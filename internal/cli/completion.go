@@ -5,7 +5,7 @@ _lit_completions() {
   local current prev words cword
   _init_completion || return
 
-  local commands="new ls show edit close open archive delete unarchive restore comment label parent children dep export sync doctor fsck backup recover bulk beads workspace hooks migrate quickstart completion help"
+  local commands="init new ls show edit close open archive delete unarchive restore comment label parent children dep export sync doctor fsck backup recover bulk beads workspace hooks migrate quickstart completion help"
   local comment_subcommands="add"
   local label_subcommands="add rm"
   local parent_subcommands="set clear"
@@ -87,6 +87,7 @@ _lit() {
   local -a commands
   commands=(
     'new:create issue'
+    'init:initialize links and auto-migrate beads'
     'ls:list issues'
     'show:show issue'
     'edit:edit issue'
@@ -173,7 +174,7 @@ _lit "$@"
 `
 
 const fishCompletionScript = `complete -c lit -f
-complete -c lit -n '__fish_use_subcommand' -a 'new ls show edit close open archive delete unarchive restore comment label parent children dep export sync doctor fsck backup recover bulk beads workspace hooks migrate quickstart completion help'
+complete -c lit -n '__fish_use_subcommand' -a 'init new ls show edit close open archive delete unarchive restore comment label parent children dep export sync doctor fsck backup recover bulk beads workspace hooks migrate quickstart completion help'
 complete -c lit -n '__fish_seen_subcommand_from comment' -a 'add'
 complete -c lit -n '__fish_seen_subcommand_from label' -a 'add rm'
 complete -c lit -n '__fish_seen_subcommand_from parent' -a 'set clear'

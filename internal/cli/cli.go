@@ -32,10 +32,37 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 		printUsage(stderr)
 		return nil
 	}
+	if !shouldBypassBeadsPreflight(args) {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("get cwd: %w", err)
+		}
+		ws, resolveErr := workspace.Resolve(cwd)
+		if resolveErr == nil {
+			if preflightErr := requireBeadsMigrationPreflight(ws); preflightErr != nil {
+				return preflightErr
+			}
+		} else if !errors.Is(resolveErr, workspace.ErrNotGitRepo) {
+			return resolveErr
+		}
+	}
 	switch args[0] {
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return nil
+	case "init":
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("get cwd: %w", err)
+		}
+		ws, err := workspace.Resolve(cwd)
+		if err != nil {
+			if errors.Is(err, workspace.ErrNotGitRepo) {
+				return fmt.Errorf("links requires running inside a git repository/worktree")
+			}
+			return err
+		}
+		return runInit(ctx, stdout, ws, args[1:])
 	case "quickstart":
 		return runQuickstart(stdout, args[1:])
 	case "completion":
@@ -1429,8 +1456,9 @@ func runQuickstart(stdout io.Writer, args []string) error {
 	payload := map[string]any{
 		"summary": "Agent quickstart for links issue tracking",
 		"workflow": []string{
+			"Initialize and auto-migrate with `lit init --json`.",
 			"Discover workspace identity and revision with `lit workspace --json`.",
-			"Migrate legacy Beads wiring with `lit migrate beads --apply --json` when needed.",
+			"Migrate legacy Beads wiring explicitly with `lit migrate beads --apply --json` when needed.",
 			"Install git hook automation once with `lit hooks install`.",
 			"List active issues with `lit ls --format lines --json` or narrow with `--query`.",
 			"Create issues with `lit new ...`; use `--type epic` for epics.",
@@ -1441,6 +1469,7 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"Snapshot and rollback using `lit backup create`, `lit backup restore`, or `lit recover`.",
 		},
 		"examples": []string{
+			"lit init --json",
 			"lit migrate beads --apply --json",
 			"lit hooks install --json",
 			"lit workspace --json",
@@ -1471,6 +1500,7 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"links agent quickstart",
 			"",
 			"1) Discover context",
+			"   `lit init --json`",
 			"   `lit migrate beads --apply --json`  # for legacy Beads repos",
 			"   `lit hooks install --json`",
 			"   `lit workspace --json`",
@@ -1850,6 +1880,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprint(w, `links / lit
 
 Usage:
+  lit init [--json] [--skip-hooks] [--skip-agents]
   lit new --title <title> [--description <text>] [--type task|feature|bug|chore|epic] [--priority 0-4] [--assignee <user>] [--labels a,b] [--expected-revision N] [--json]
   lit ls [--status open|closed] [--type <type>] [--assignee <user>] [--priority-min N] [--priority-max N] [--search <text>] [--ids a,b] [--labels a,b] [--has-comments] [--include-archived] [--include-deleted] [--updated-after RFC3339] [--updated-before RFC3339] [--query <expr>] [--sort field:asc|desc,...] [--columns id,state,title,...] [--format lines|table] [--limit N] [--json]
   lit show <id> [--json]

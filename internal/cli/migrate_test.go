@@ -67,6 +67,18 @@ func TestMigrateBeadsApplyRewritesAgentsAndInstallsLitHook(t *testing.T) {
 	if err := os.WriteFile(hookPath, []byte("#!/usr/bin/env bash\nbeads sync push\necho keep\n"), 0o755); err != nil {
 		t.Fatalf("WriteFile(pre-push) error = %v", err)
 	}
+	if err := os.MkdirAll(filepath.Join(repo, ".beads"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.beads) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".beads", "state.json"), []byte("{}\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(.beads/state.json) error = %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(repo, ".claude"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.claude) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".claude", "settings.json"), []byte(`{"hooks":{"SessionStart":[{"hooks":[{"command":"beads sync"}]}]}}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(.claude/settings.json) error = %v", err)
+	}
 	agentsPath := filepath.Join(repo, "AGENTS.md")
 	if err := os.WriteFile(agentsPath, []byte("Use Beads and beads.\n"), 0o644); err != nil {
 		t.Fatalf("WriteFile(AGENTS.md) error = %v", err)
@@ -96,16 +108,27 @@ func TestMigrateBeadsApplyRewritesAgentsAndInstallsLitHook(t *testing.T) {
 	if payload["lit_hook_installed"] != true {
 		t.Fatalf("lit_hook_installed = %v, want true", payload["lit_hook_installed"])
 	}
+	backupPath, ok := payload["backup_path"].(string)
+	if !ok || strings.TrimSpace(backupPath) == "" {
+		t.Fatalf("backup_path missing from payload: %#v", payload)
+	}
+	if _, err := os.Stat(filepath.Join(backupPath, "manifest.json")); err != nil {
+		t.Fatalf("backup manifest missing: %v", err)
+	}
 
 	newHookContent, err := os.ReadFile(hookPath)
 	if err != nil {
 		t.Fatalf("ReadFile(pre-push) error = %v", err)
 	}
-	if !strings.Contains(string(newHookContent), linksPrePushHookMarker) {
-		t.Fatalf("expected lit pre-push hook marker, got: %q", string(newHookContent))
+	newHook := string(newHookContent)
+	if !strings.Contains(newHook, linksHookBeginMarker) || !strings.Contains(newHook, linksHookEndMarker) {
+		t.Fatalf("expected lit managed hook markers, got: %q", newHook)
 	}
-	if strings.Contains(strings.ToLower(string(newHookContent)), "beads") {
-		t.Fatalf("new hook still contains beads: %q", string(newHookContent))
+	if !strings.Contains(newHook, "echo keep") {
+		t.Fatalf("new hook should preserve existing user logic: %q", newHook)
+	}
+	if strings.Contains(strings.ToLower(newHook), "beads") {
+		t.Fatalf("new hook still contains beads: %q", newHook)
 	}
 	agentsContent, err := os.ReadFile(agentsPath)
 	if err != nil {
@@ -116,5 +139,11 @@ func TestMigrateBeadsApplyRewritesAgentsAndInstallsLitHook(t *testing.T) {
 	}
 	if !strings.Contains(string(agentsContent), "Lit") && !strings.Contains(string(agentsContent), "lit") {
 		t.Fatalf("AGENTS.md missing lit replacement: %q", string(agentsContent))
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".beads")); !os.IsNotExist(err) {
+		t.Fatalf(".beads should be removed, stat error: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(repo, ".claude", "settings.json")); !os.IsNotExist(err) {
+		t.Fatalf(".claude/settings.json should be removed when only beads residue remains, stat error: %v", err)
 	}
 }
