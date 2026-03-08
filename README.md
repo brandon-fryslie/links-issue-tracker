@@ -15,3 +15,28 @@ $(git rev-parse --git-common-dir)/links/
 ```
 
 All worktrees in the same clone therefore share one stable, current view of work items.
+
+## Commands
+
+```txt
+lk new --title <title> [--description <text>] [--type task|feature|bug|chore|epic] [--priority 0-4] [--assignee <user>] [--json]
+lk ls [--status open|closed] [--type <type>] [--assignee <user>] [--limit N] [--json]
+lk show <id> [--json]
+lk edit <id> [--title ...] [--description ...] [--type ...] [--status ...] [--priority ...] [--assignee ...|--clear-assignee] [--json]
+lk close <id> [--json]
+lk open <id> [--json]
+lk comment add <id> --body <text> [--by <user>] [--json]
+lk dep add <src-id> <dst-id> [--type blocks|parent-child|related-to] [--by <user>] [--json]
+lk dep rm <src-id> <dst-id> [--type blocks|parent-child|related-to]
+lk export
+lk beads import --db <path> [--json]
+lk beads export --db <path> [--json]
+lk workspace [--json]
+```
+
+## Beads compatibility
+
+- `// [LAW:locality-or-seam]` Beads compatibility is isolated in `internal/beads` so the core store keeps one canonical data model.
+- `lk beads import` reads Beads' SQLite tables `issues`, `dependencies`, and `comments`.
+- `lk beads export` writes a Beads-compatible SQLite database with those same core tables populated from Links data.
+- Only the implemented core relationship types are imported/exported: `blocks`, `parent-child`, and `related-to`.

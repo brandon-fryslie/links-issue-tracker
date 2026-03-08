@@ -23,6 +23,35 @@ type Store struct {
 	workspaceID string
 }
 
+type ImportIssue struct {
+	ID          string
+	Title       string
+	Description string
+	Status      string
+	Priority    int
+	IssueType   string
+	Assignee    string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	ClosedAt    *time.Time
+}
+
+type ImportComment struct {
+	ID        string
+	IssueID   string
+	Body      string
+	CreatedAt time.Time
+	CreatedBy string
+}
+
+type ImportRelation struct {
+	SrcID     string
+	DstID     string
+	Type      string
+	CreatedAt time.Time
+	CreatedBy string
+}
+
 type CreateIssueInput struct {
 	Title       string
 	Description string
@@ -438,6 +467,119 @@ func (s *Store) Export(ctx context.Context) (model.Export, error) {
 		return model.Export{}, err
 	}
 	return model.Export{Version: 1, WorkspaceID: s.workspaceID, ExportedAt: time.Now().UTC(), Issues: issues, Relations: rels, Comments: comments}, nil
+}
+
+func (s *Store) ImportIssue(ctx context.Context, in ImportIssue) error {
+	issueType, err := validateIssueType(in.IssueType)
+	if err != nil {
+		return err
+	}
+	if err := validatePriority(in.Priority); err != nil {
+		return err
+	}
+	status := strings.TrimSpace(in.Status)
+	if status != "open" && status != "closed" {
+		return errors.New("status must be open or closed")
+	}
+	if strings.TrimSpace(in.ID) == "" {
+		return errors.New("issue id is required")
+	}
+	if strings.TrimSpace(in.Title) == "" {
+		return errors.New("title is required")
+	}
+	var closedAt any
+	if in.ClosedAt != nil {
+		closedAt = in.ClosedAt.Format(time.RFC3339Nano)
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO issues(
+		id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		title = excluded.title,
+		description = excluded.description,
+		status = excluded.status,
+		priority = excluded.priority,
+		issue_type = excluded.issue_type,
+		assignee = excluded.assignee,
+		created_at = excluded.created_at,
+		updated_at = excluded.updated_at,
+		closed_at = excluded.closed_at`,
+		in.ID,
+		strings.TrimSpace(in.Title),
+		strings.TrimSpace(in.Description),
+		status,
+		in.Priority,
+		issueType,
+		strings.TrimSpace(in.Assignee),
+		in.CreatedAt.Format(time.RFC3339Nano),
+		in.UpdatedAt.Format(time.RFC3339Nano),
+		closedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("import issue: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ImportComment(ctx context.Context, in ImportComment) error {
+	if _, err := s.GetIssue(ctx, in.IssueID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(in.ID) == "" {
+		return errors.New("comment id is required")
+	}
+	if strings.TrimSpace(in.Body) == "" {
+		return errors.New("comment body is required")
+	}
+	createdBy := strings.TrimSpace(in.CreatedBy)
+	if createdBy == "" {
+		createdBy = "unknown"
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO comments(id, issue_id, body, created_at, created_by)
+	VALUES (?, ?, ?, ?, ?)
+	ON CONFLICT(id) DO UPDATE SET
+		issue_id = excluded.issue_id,
+		body = excluded.body,
+		created_at = excluded.created_at,
+		created_by = excluded.created_by`,
+		in.ID, in.IssueID, strings.TrimSpace(in.Body), in.CreatedAt.Format(time.RFC3339Nano), createdBy)
+	if err != nil {
+		return fmt.Errorf("import comment: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ImportRelation(ctx context.Context, in ImportRelation) error {
+	if _, err := s.GetIssue(ctx, in.SrcID); err != nil {
+		return err
+	}
+	if _, err := s.GetIssue(ctx, in.DstID); err != nil {
+		return err
+	}
+	relType := strings.TrimSpace(in.Type)
+	if relType != "blocks" && relType != "parent-child" && relType != "related-to" {
+		return errors.New("relation type must be blocks, parent-child, or related-to")
+	}
+	srcID, dstID := in.SrcID, in.DstID
+	if relType == "related-to" {
+		ordered := []string{srcID, dstID}
+		sort.Strings(ordered)
+		srcID, dstID = ordered[0], ordered[1]
+	}
+	createdBy := strings.TrimSpace(in.CreatedBy)
+	if createdBy == "" {
+		createdBy = "unknown"
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO relations(src_id, dst_id, type, created_at, created_by)
+	VALUES (?, ?, ?, ?, ?)
+	ON CONFLICT(src_id, dst_id, type) DO UPDATE SET
+		created_at = excluded.created_at,
+		created_by = excluded.created_by`,
+		srcID, dstID, relType, in.CreatedAt.Format(time.RFC3339Nano), createdBy)
+	if err != nil {
+		return fmt.Errorf("import relation: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) listRelations(ctx context.Context, issueID string) ([]model.Relation, error) {

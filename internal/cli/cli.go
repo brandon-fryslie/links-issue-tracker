@@ -12,6 +12,7 @@ import (
 	"text/tabwriter"
 
 	"github.com/bmf/links-issue-tracker/internal/app"
+	"github.com/bmf/links-issue-tracker/internal/beads"
 	"github.com/bmf/links-issue-tracker/internal/model"
 	"github.com/bmf/links-issue-tracker/internal/store"
 	"github.com/bmf/links-issue-tracker/internal/workspace"
@@ -50,6 +51,8 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 		return runDep(ctx, stdout, ap, args[1:])
 	case "export":
 		return runExport(ctx, stdout, ap, args[1:])
+	case "beads":
+		return runBeads(ctx, stdout, ap, args[1:])
 	case "workspace":
 		return runWorkspace(stdout, ap, args[1:])
 	case "help", "-h", "--help":
@@ -296,6 +299,56 @@ func runExport(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 	return writeJSON(stdout, export)
 }
 
+func runBeads(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: lk beads <import|export> --db <path> [--json]")
+	}
+	switch args[0] {
+	case "import":
+		fs := flag.NewFlagSet("beads import", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		dbPath := fs.String("db", "", "Path to beads sqlite database")
+		jsonOut := fs.Bool("json", false, "Output JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if strings.TrimSpace(*dbPath) == "" {
+			return errors.New("usage: lk beads import --db <path> [--json]")
+		}
+		summary, err := beads.Import(ctx, ap.Store, *dbPath)
+		if err != nil {
+			return err
+		}
+		return printValue(stdout, summary, *jsonOut, func(w io.Writer, v any) error {
+			s := v.(beads.Summary)
+			_, err := fmt.Fprintf(w, "imported issues=%d relations=%d comments=%d\n", s.Issues, s.Relations, s.Comments)
+			return err
+		})
+	case "export":
+		fs := flag.NewFlagSet("beads export", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		dbPath := fs.String("db", "", "Path to beads sqlite database")
+		jsonOut := fs.Bool("json", false, "Output JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if strings.TrimSpace(*dbPath) == "" {
+			return errors.New("usage: lk beads export --db <path> [--json]")
+		}
+		summary, err := beads.Export(ctx, ap.Store, *dbPath)
+		if err != nil {
+			return err
+		}
+		return printValue(stdout, summary, *jsonOut, func(w io.Writer, v any) error {
+			s := v.(beads.Summary)
+			_, err := fmt.Fprintf(w, "exported issues=%d relations=%d comments=%d\n", s.Issues, s.Relations, s.Comments)
+			return err
+		})
+	default:
+		return errors.New("usage: lk beads <import|export> --db <path> [--json]")
+	}
+}
+
 func runWorkspace(stdout io.Writer, ap *app.App, args []string) error {
 	jsonOut := len(args) > 0 && args[0] == "--json"
 	payload := map[string]string{
@@ -427,6 +480,8 @@ Usage:
   lk dep add <src-id> <dst-id> [--type blocks|parent-child|related-to] [--by <user>] [--json]
   lk dep rm <src-id> <dst-id> [--type blocks|parent-child|related-to]
   lk export
+  lk beads import --db <path> [--json]
+  lk beads export --db <path> [--json]
   lk workspace [--json]
 `)
 }
