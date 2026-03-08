@@ -34,6 +34,8 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return nil
+	case "quickstart":
+		return runQuickstart(stdout, args[1:])
 	case "completion":
 		return runCompletion(stdout, args[1:])
 	}
@@ -1201,6 +1203,90 @@ func runCompletion(stdout io.Writer, args []string) error {
 	}
 }
 
+func runQuickstart(stdout io.Writer, args []string) error {
+	fs := flag.NewFlagSet("quickstart", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	jsonOut := fs.Bool("json", false, "Output JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("usage: lk quickstart [--json]")
+	}
+
+	payload := map[string]any{
+		"summary": "Agent quickstart for links issue tracking",
+		"workflow": []string{
+			"Discover workspace identity and revision with `lk workspace --json`.",
+			"List active issues with `lk ls --format lines --json` or narrow with `--query`.",
+			"Create issues with `lk new ...`; use `--type epic` for epics.",
+			"Connect issues using `lk parent set` and `lk dep add --type related-to|blocks`.",
+			"Mutate safely with `--expected-revision` from `workspace_revision`.",
+			"Sync state via `lk sync export` and `lk sync import --resolve fail|local|remote`.",
+			"Run health checks with `lk doctor` and repair known corruption with `lk fsck --repair`.",
+			"Snapshot and rollback using `lk backup create`, `lk backup restore`, or `lk recover`.",
+		},
+		"examples": []string{
+			"lk workspace --json",
+			"lk ls --query \"status:open type:task\" --sort priority:asc,updated_at:desc --json",
+			"lk new --title \"Fix renderer race\" --type bug --priority 1 --labels renderer,urgent --json",
+			"lk parent set lk-124 lk-100 --json",
+			"lk dep add lk-124 lk-122 --type related-to --json",
+			"lk edit lk-124 --priority 1 --expected-revision 42 --json",
+			"lk sync import --path links/export.json --resolve fail --json",
+		},
+		"exit_codes": map[string]int{
+			"ok":             ExitOK,
+			"usage":          ExitUsage,
+			"validation":     ExitValidation,
+			"not_found":      ExitNotFound,
+			"conflict":       ExitConflict,
+			"stale_revision": ExitStaleRevision,
+			"corruption":     ExitCorruption,
+		},
+	}
+
+	return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
+		instructions := v.(map[string]any)
+		lines := []string{
+			"links agent quickstart",
+			"",
+			"1) Discover context",
+			"   `lk workspace --json`",
+			"",
+			"2) Find work",
+			"   `lk ls --format lines --json`",
+			"   `lk ls --query \"status:open type:task\" --sort priority:asc,updated_at:desc --json`",
+			"",
+			"3) Create and relate issues/epics",
+			"   `lk new --title \"...\" --type task|bug|feature|chore|epic --json`",
+			"   `lk parent set <child-id> <parent-id> --json`",
+			"   `lk dep add <src-id> <dst-id> --type blocks|related-to|parent-child --json`",
+			"",
+			"4) Safe mutations",
+			"   Read `workspace_revision` and pass `--expected-revision N` on writes.",
+			"",
+			"5) Sync + merge",
+			"   `lk sync export --json`",
+			"   `lk sync import --resolve fail|local|remote --json`",
+			"",
+			"6) Integrity and recovery",
+			"   `lk doctor --json`",
+			"   `lk fsck --repair --json`",
+			"   `lk backup create --json`",
+			"   `lk backup restore --latest --json`",
+			"   `lk recover --latest-backup --json`",
+			"",
+			fmt.Sprintf("Exit codes: ok=%d usage=%d validation=%d not_found=%d conflict=%d stale_revision=%d corruption=%d", ExitOK, ExitUsage, ExitValidation, ExitNotFound, ExitConflict, ExitStaleRevision, ExitCorruption),
+		}
+		if summary, ok := instructions["summary"].(string); ok && strings.TrimSpace(summary) != "" {
+			lines[0] = summary
+		}
+		_, err := fmt.Fprintln(w, strings.Join(lines, "\n"))
+		return err
+	})
+}
+
 func writeJSON(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -1574,6 +1660,7 @@ Usage:
   lk bulk label <add|rm> --ids a,b --label <name> [--by <user>] [--expected-revision N] [--json]
   lk bulk <close|archive> --ids a,b --reason <text> [--by <user>] [--expected-revision N] [--json]
   lk bulk import --path <export.json> [--force] [--json]
+  lk quickstart [--json]
   lk completion <bash|zsh|fish>
   lk beads import --db <path> [--json]
   lk beads export --db <path> [--json]

@@ -65,10 +65,16 @@ lk recover (--from-sync <path> | --from-backup <path> | --latest-backup) [--forc
 lk bulk label <add|rm> --ids a,b --label <name> [--by <user>] [--expected-revision N] [--json]
 lk bulk <close|archive> --ids a,b --reason <text> [--by <user>] [--expected-revision N] [--json]
 lk bulk import --path <export.json> [--force] [--json]
+lk quickstart [--json]
 lk beads import --db <path> [--json]
 lk beads export --db <path> [--json]
 lk workspace [--json]
 ```
+
+## Agent quickstart
+
+- `lk quickstart` prints operational guidance for agents.
+- `lk quickstart --json` emits structured instructions suitable for machine consumption.
 
 ## Querying
 
