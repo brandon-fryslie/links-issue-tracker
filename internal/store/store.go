@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -21,6 +22,12 @@ const sqliteDriverName = "sqlite"
 type Store struct {
 	db          *sql.DB
 	workspaceID string
+}
+
+type SyncState struct {
+	Path              string
+	ContentHash       string
+	WorkspaceRevision int64
 }
 
 type ImportIssue struct {
@@ -208,6 +215,60 @@ func (s *Store) migrate(ctx context.Context) error {
 		 ON CONFLICT(key) DO NOTHING`); err != nil {
 		return fmt.Errorf("store schema_version: %w", err)
 	}
+	if _, err := s.db.ExecContext(ctx,
+		`INSERT INTO meta(key, value) VALUES ('workspace_revision', '0')
+		 ON CONFLICT(key) DO NOTHING`); err != nil {
+		return fmt.Errorf("store workspace_revision: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetWorkspaceRevision(ctx context.Context) (int64, error) {
+	return s.getWorkspaceRevision(ctx, nil)
+}
+
+func (s *Store) GetSyncState(ctx context.Context) (SyncState, error) {
+	state := SyncState{}
+	var err error
+	state.Path, err = s.getMeta(ctx, nil, "last_sync_path")
+	if err != nil {
+		return SyncState{}, err
+	}
+	state.ContentHash, err = s.getMeta(ctx, nil, "last_sync_hash")
+	if err != nil {
+		return SyncState{}, err
+	}
+	revisionValue, err := s.getMeta(ctx, nil, "last_sync_workspace_revision")
+	if err != nil {
+		return SyncState{}, err
+	}
+	if strings.TrimSpace(revisionValue) != "" {
+		state.WorkspaceRevision, err = strconv.ParseInt(revisionValue, 10, 64)
+		if err != nil {
+			return SyncState{}, fmt.Errorf("parse last_sync_workspace_revision: %w", err)
+		}
+	}
+	return state, nil
+}
+
+func (s *Store) RecordSyncState(ctx context.Context, state SyncState) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin record sync state tx: %w", err)
+	}
+	defer tx.Rollback()
+	for key, value := range map[string]string{
+		"last_sync_path":               strings.TrimSpace(state.Path),
+		"last_sync_hash":               strings.TrimSpace(state.ContentHash),
+		"last_sync_workspace_revision": strconv.FormatInt(state.WorkspaceRevision, 10),
+	} {
+		if err := s.setMeta(ctx, tx, key, value); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit record sync state: %w", err)
+	}
 	return nil
 }
 
@@ -254,6 +315,9 @@ func (s *Store) CreateIssue(ctx context.Context, in CreateIssueInput) (model.Iss
 		return model.Issue{}, fmt.Errorf("insert issue: %w", err)
 	}
 	if err := s.replaceLabelsTx(ctx, tx, issue.ID, issue.Labels, "links"); err != nil {
+		return model.Issue{}, err
+	}
+	if _, err := s.bumpWorkspaceRevisionTx(ctx, tx); err != nil {
 		return model.Issue{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -542,6 +606,9 @@ func (s *Store) UpdateIssue(ctx context.Context, id string, in UpdateIssueInput)
 			return model.Issue{}, err
 		}
 	}
+	if _, err := s.bumpWorkspaceRevisionTx(ctx, tx); err != nil {
+		return model.Issue{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return model.Issue{}, fmt.Errorf("commit update issue: %w", err)
 	}
@@ -561,9 +628,19 @@ func (s *Store) AddComment(ctx context.Context, in AddCommentInput) (model.Comme
 	if comment.CreatedBy == "" {
 		comment.CreatedBy = "unknown"
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO comments(id, issue_id, body, created_at, created_by) VALUES (?, ?, ?, ?, ?)`, comment.ID, comment.IssueID, comment.Body, comment.CreatedAt.Format(time.RFC3339Nano), comment.CreatedBy)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return model.Comment{}, fmt.Errorf("begin add comment tx: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO comments(id, issue_id, body, created_at, created_by) VALUES (?, ?, ?, ?, ?)`, comment.ID, comment.IssueID, comment.Body, comment.CreatedAt.Format(time.RFC3339Nano), comment.CreatedBy); err != nil {
 		return model.Comment{}, fmt.Errorf("insert comment: %w", err)
+	}
+	if _, err := s.bumpWorkspaceRevisionTx(ctx, tx); err != nil {
+		return model.Comment{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Comment{}, fmt.Errorf("commit add comment: %w", err)
 	}
 	return comment, nil
 }
@@ -593,9 +670,19 @@ func (s *Store) AddRelation(ctx context.Context, in AddRelationInput) (model.Rel
 	if rel.CreatedBy == "" {
 		rel.CreatedBy = "unknown"
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO relations(src_id, dst_id, type, created_at, created_by) VALUES (?, ?, ?, ?, ?)`, rel.SrcID, rel.DstID, rel.Type, rel.CreatedAt.Format(time.RFC3339Nano), rel.CreatedBy)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return model.Relation{}, fmt.Errorf("begin add relation tx: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO relations(src_id, dst_id, type, created_at, created_by) VALUES (?, ?, ?, ?, ?)`, rel.SrcID, rel.DstID, rel.Type, rel.CreatedAt.Format(time.RFC3339Nano), rel.CreatedBy); err != nil {
 		return model.Relation{}, fmt.Errorf("insert relation: %w", err)
+	}
+	if _, err := s.bumpWorkspaceRevisionTx(ctx, tx); err != nil {
+		return model.Relation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Relation{}, fmt.Errorf("commit add relation: %w", err)
 	}
 	return rel, nil
 }
@@ -606,13 +693,24 @@ func (s *Store) RemoveRelation(ctx context.Context, srcID, dstID, relType string
 		sort.Strings(ordered)
 		srcID, dstID = ordered[0], ordered[1]
 	}
-	res, err := s.db.ExecContext(ctx, `DELETE FROM relations WHERE src_id = ? AND dst_id = ? AND type = ?`, srcID, dstID, relType)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin remove relation tx: %w", err)
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `DELETE FROM relations WHERE src_id = ? AND dst_id = ? AND type = ?`, srcID, dstID, relType)
 	if err != nil {
 		return fmt.Errorf("delete relation: %w", err)
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
 		return fmt.Errorf("relation not found")
+	}
+	if _, err := s.bumpWorkspaceRevisionTx(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit remove relation: %w", err)
 	}
 	return nil
 }
@@ -634,7 +732,11 @@ func (s *Store) Export(ctx context.Context) (model.Export, error) {
 	if err != nil {
 		return model.Export{}, err
 	}
-	return model.Export{Version: 1, WorkspaceID: s.workspaceID, ExportedAt: time.Now().UTC(), Issues: issues, Relations: rels, Comments: comments, Labels: labels}, nil
+	workspaceRevision, err := s.GetWorkspaceRevision(ctx)
+	if err != nil {
+		return model.Export{}, err
+	}
+	return model.Export{Version: 1, WorkspaceID: s.workspaceID, WorkspaceRevision: workspaceRevision, ExportedAt: time.Now().UTC(), Issues: issues, Relations: rels, Comments: comments, Labels: labels}, nil
 }
 
 func (s *Store) ImportIssue(ctx context.Context, in ImportIssue) error {
@@ -659,7 +761,12 @@ func (s *Store) ImportIssue(ctx context.Context, in ImportIssue) error {
 	if in.ClosedAt != nil {
 		closedAt = in.ClosedAt.Format(time.RFC3339Nano)
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO issues(
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin import issue tx: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO issues(
 		id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
@@ -686,8 +793,18 @@ func (s *Store) ImportIssue(ctx context.Context, in ImportIssue) error {
 	if err != nil {
 		return fmt.Errorf("import issue: %w", err)
 	}
-	if err := s.ReplaceLabels(ctx, in.ID, in.Labels, "import"); err != nil {
+	labels, err := canonicalizeLabels(in.Labels)
+	if err != nil {
 		return err
+	}
+	if err := s.replaceLabelsTx(ctx, tx, in.ID, labels, "import"); err != nil {
+		return err
+	}
+	if _, err := s.bumpWorkspaceRevisionTx(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit import issue: %w", err)
 	}
 	return nil
 }
@@ -706,7 +823,12 @@ func (s *Store) ImportComment(ctx context.Context, in ImportComment) error {
 	if createdBy == "" {
 		createdBy = "unknown"
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO comments(id, issue_id, body, created_at, created_by)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin import comment tx: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO comments(id, issue_id, body, created_at, created_by)
 	VALUES (?, ?, ?, ?, ?)
 	ON CONFLICT(id) DO UPDATE SET
 		issue_id = excluded.issue_id,
@@ -716,6 +838,12 @@ func (s *Store) ImportComment(ctx context.Context, in ImportComment) error {
 		in.ID, in.IssueID, strings.TrimSpace(in.Body), in.CreatedAt.Format(time.RFC3339Nano), createdBy)
 	if err != nil {
 		return fmt.Errorf("import comment: %w", err)
+	}
+	if _, err := s.bumpWorkspaceRevisionTx(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit import comment: %w", err)
 	}
 	return nil
 }
@@ -741,7 +869,12 @@ func (s *Store) ImportRelation(ctx context.Context, in ImportRelation) error {
 	if createdBy == "" {
 		createdBy = "unknown"
 	}
-	_, err := s.db.ExecContext(ctx, `INSERT INTO relations(src_id, dst_id, type, created_at, created_by)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin import relation tx: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO relations(src_id, dst_id, type, created_at, created_by)
 	VALUES (?, ?, ?, ?, ?)
 	ON CONFLICT(src_id, dst_id, type) DO UPDATE SET
 		created_at = excluded.created_at,
@@ -749,6 +882,12 @@ func (s *Store) ImportRelation(ctx context.Context, in ImportRelation) error {
 		srcID, dstID, relType, in.CreatedAt.Format(time.RFC3339Nano), createdBy)
 	if err != nil {
 		return fmt.Errorf("import relation: %w", err)
+	}
+	if _, err := s.bumpWorkspaceRevisionTx(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit import relation: %w", err)
 	}
 	return nil
 }
@@ -765,13 +904,24 @@ func (s *Store) ImportLabel(ctx context.Context, in ImportLabel) error {
 	if createdBy == "" {
 		createdBy = "unknown"
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO labels(issue_id, label, created_at, created_by)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin import label tx: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO labels(issue_id, label, created_at, created_by)
 	VALUES (?, ?, ?, ?)
 	ON CONFLICT(issue_id, label) DO UPDATE SET
 		created_at = excluded.created_at,
 		created_by = excluded.created_by`, in.IssueID, label, in.CreatedAt.Format(time.RFC3339Nano), createdBy)
 	if err != nil {
 		return fmt.Errorf("import label: %w", err)
+	}
+	if _, err := s.bumpWorkspaceRevisionTx(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit import label: %w", err)
 	}
 	return nil
 }
@@ -788,11 +938,22 @@ func (s *Store) AddLabel(ctx context.Context, in AddLabelInput) ([]string, error
 	if createdBy == "" {
 		createdBy = "unknown"
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO labels(issue_id, label, created_at, created_by)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin add label tx: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO labels(issue_id, label, created_at, created_by)
 	VALUES (?, ?, ?, ?)
 	ON CONFLICT(issue_id, label) DO NOTHING`, in.IssueID, label, time.Now().UTC().Format(time.RFC3339Nano), createdBy)
 	if err != nil {
 		return nil, fmt.Errorf("insert label: %w", err)
+	}
+	if _, err := s.bumpWorkspaceRevisionTx(ctx, tx); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit add label: %w", err)
 	}
 	return s.ListLabels(ctx, in.IssueID)
 }
@@ -805,13 +966,24 @@ func (s *Store) RemoveLabel(ctx context.Context, issueID, labelName string) ([]s
 	if err != nil {
 		return nil, err
 	}
-	res, err := s.db.ExecContext(ctx, `DELETE FROM labels WHERE issue_id = ? AND label = ?`, issueID, label)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin remove label tx: %w", err)
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `DELETE FROM labels WHERE issue_id = ? AND label = ?`, issueID, label)
 	if err != nil {
 		return nil, fmt.Errorf("delete label: %w", err)
 	}
 	affected, _ := res.RowsAffected()
 	if affected == 0 {
 		return nil, fmt.Errorf("label %q not found on issue %q", label, issueID)
+	}
+	if _, err := s.bumpWorkspaceRevisionTx(ctx, tx); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit remove label: %w", err)
 	}
 	return s.ListLabels(ctx, issueID)
 }
@@ -830,6 +1002,9 @@ func (s *Store) ReplaceLabels(ctx context.Context, issueID string, labels []stri
 	}
 	defer tx.Rollback()
 	if err := s.replaceLabelsTx(ctx, tx, issueID, normalized, createdBy); err != nil {
+		return err
+	}
+	if _, err := s.bumpWorkspaceRevisionTx(ctx, tx); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -855,6 +1030,59 @@ func (s *Store) ListLabels(ctx context.Context, issueID string) ([]string, error
 	return labels, rows.Err()
 }
 
+func (s *Store) ReplaceFromExport(ctx context.Context, export model.Export) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin replace from export tx: %w", err)
+	}
+	defer tx.Rollback()
+	for _, table := range []string{"labels", "comments", "relations", "issues"} {
+		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
+			return fmt.Errorf("clear %s: %w", table, err)
+		}
+	}
+	for _, issue := range export.Issues {
+		var closedAt any
+		if issue.ClosedAt != nil {
+			closedAt = issue.ClosedAt.Format(time.RFC3339Nano)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issues(id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			issue.ID, issue.Title, issue.Description, issue.Status, issue.Priority, issue.IssueType, issue.Assignee, issue.CreatedAt.Format(time.RFC3339Nano), issue.UpdatedAt.Format(time.RFC3339Nano), closedAt); err != nil {
+			return fmt.Errorf("restore issue %s: %w", issue.ID, err)
+		}
+	}
+	for _, relation := range export.Relations {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO relations(src_id, dst_id, type, created_at, created_by) VALUES (?, ?, ?, ?, ?)`,
+			relation.SrcID, relation.DstID, relation.Type, relation.CreatedAt.Format(time.RFC3339Nano), relation.CreatedBy); err != nil {
+			return fmt.Errorf("restore relation %s->%s: %w", relation.SrcID, relation.DstID, err)
+		}
+	}
+	for _, comment := range export.Comments {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO comments(id, issue_id, body, created_at, created_by) VALUES (?, ?, ?, ?, ?)`,
+			comment.ID, comment.IssueID, comment.Body, comment.CreatedAt.Format(time.RFC3339Nano), comment.CreatedBy); err != nil {
+			return fmt.Errorf("restore comment %s: %w", comment.ID, err)
+		}
+	}
+	for _, label := range export.Labels {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO labels(issue_id, label, created_at, created_by) VALUES (?, ?, ?, ?)`,
+			label.IssueID, label.Name, label.CreatedAt.Format(time.RFC3339Nano), label.CreatedBy); err != nil {
+			return fmt.Errorf("restore label %s:%s: %w", label.IssueID, label.Name, err)
+		}
+	}
+	workspaceRevision := export.WorkspaceRevision
+	if workspaceRevision < 0 {
+		workspaceRevision = 0
+	}
+	if err := s.setMeta(ctx, tx, "workspace_revision", strconv.FormatInt(workspaceRevision, 10)); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit replace from export: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) listRelations(ctx context.Context, issueID string) ([]model.Relation, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT src_id, dst_id, type, created_at, created_by FROM relations WHERE src_id = ? OR dst_id = ? ORDER BY created_at ASC`, issueID, issueID)
 	if err != nil {
@@ -876,6 +1104,66 @@ func (s *Store) listRelations(ctx context.Context, issueID string) ([]model.Rela
 		rels = append(rels, rel)
 	}
 	return rels, rows.Err()
+}
+
+func (s *Store) getWorkspaceRevision(ctx context.Context, tx *sql.Tx) (int64, error) {
+	value, err := s.getMeta(ctx, tx, "workspace_revision")
+	if err != nil {
+		return 0, err
+	}
+	if strings.TrimSpace(value) == "" {
+		return 0, nil
+	}
+	revision, err := strconv.ParseInt(value, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse workspace_revision: %w", err)
+	}
+	return revision, nil
+}
+
+func (s *Store) bumpWorkspaceRevisionTx(ctx context.Context, tx *sql.Tx) (int64, error) {
+	current, err := s.getWorkspaceRevision(ctx, tx)
+	if err != nil {
+		return 0, err
+	}
+	next := current + 1
+	if err := s.setMeta(ctx, tx, "workspace_revision", strconv.FormatInt(next, 10)); err != nil {
+		return 0, err
+	}
+	return next, nil
+}
+
+func (s *Store) getMeta(ctx context.Context, tx *sql.Tx, key string) (string, error) {
+	var row *sql.Row
+	if tx != nil {
+		row = tx.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, key)
+	} else {
+		row = s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, key)
+	}
+	var value string
+	if err := row.Scan(&value); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("get meta %q: %w", key, err)
+	}
+	return value, nil
+}
+
+func (s *Store) setMeta(ctx context.Context, tx *sql.Tx, key, value string) error {
+	var execer interface {
+		ExecContext(context.Context, string, ...any) (sql.Result, error)
+	}
+	if tx != nil {
+		execer = tx
+	} else {
+		execer = s.db
+	}
+	if _, err := execer.ExecContext(ctx, `INSERT INTO meta(key, value) VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value); err != nil {
+		return fmt.Errorf("set meta %q: %w", key, err)
+	}
+	return nil
 }
 
 func (s *Store) listAllLabels(ctx context.Context) ([]model.Label, error) {

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -17,6 +19,7 @@ import (
 	"github.com/bmf/links-issue-tracker/internal/model"
 	"github.com/bmf/links-issue-tracker/internal/query"
 	"github.com/bmf/links-issue-tracker/internal/store"
+	"github.com/bmf/links-issue-tracker/internal/syncfile"
 	"github.com/bmf/links-issue-tracker/internal/workspace"
 )
 
@@ -59,6 +62,8 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 		return runBeads(ctx, stdout, ap, args[1:])
 	case "workspace":
 		return runWorkspace(stdout, ap, args[1:])
+	case "sync":
+		return runSync(ctx, stdout, ap, args[1:])
 	case "help", "-h", "--help":
 		printUsage(stdout)
 		return nil
@@ -482,15 +487,151 @@ func runWorkspace(stdout io.Writer, ap *app.App, args []string) error {
 		"storage_dir":    ap.Workspace.StorageDir,
 		"database_path":  ap.Workspace.DatabasePath,
 	}
+	if revision, err := ap.Store.GetWorkspaceRevision(context.Background()); err == nil {
+		payload["workspace_revision"] = strconv.FormatInt(revision, 10)
+	}
 	if jsonOut {
 		return writeJSON(stdout, payload)
 	}
-	for _, key := range []string{"workspace_id", "git_common_dir", "storage_dir", "database_path"} {
+	for _, key := range []string{"workspace_id", "workspace_revision", "git_common_dir", "storage_dir", "database_path"} {
 		if _, err := fmt.Fprintf(stdout, "%s: %s\n", key, payload[key]); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func runSync(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: lk sync <export|import|status> [--path <path>] [--force] [--json]")
+	}
+	switch args[0] {
+	case "export":
+		fs := flag.NewFlagSet("sync export", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		path := fs.String("path", defaultSyncPath(ap), "Path to export snapshot file")
+		force := fs.Bool("force", false, "Overwrite sync file even if it changed outside links")
+		jsonOut := fs.Bool("json", false, "Output JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		state, err := ap.Store.GetSyncState(ctx)
+		if err != nil {
+			return err
+		}
+		existingHash, err := syncfile.HashFile(*path)
+		if err != nil {
+			return err
+		}
+		if existingHash != "" && state.Path == filepath.Clean(*path) && state.ContentHash != "" && existingHash != state.ContentHash && !*force {
+			return fmt.Errorf("sync export conflict: %s changed outside links; rerun with --force to overwrite", filepath.Clean(*path))
+		}
+		export, err := ap.Store.Export(ctx)
+		if err != nil {
+			return err
+		}
+		contentHash, err := syncfile.WriteAtomic(*path, export)
+		if err != nil {
+			return err
+		}
+		if err := ap.Store.RecordSyncState(ctx, store.SyncState{
+			Path:              filepath.Clean(*path),
+			ContentHash:       contentHash,
+			WorkspaceRevision: export.WorkspaceRevision,
+		}); err != nil {
+			return err
+		}
+		payload := map[string]any{
+			"path":               filepath.Clean(*path),
+			"content_hash":       contentHash,
+			"workspace_revision": export.WorkspaceRevision,
+		}
+		return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
+			p := v.(map[string]any)
+			_, err := fmt.Fprintf(w, "exported %s revision=%v hash=%v\n", p["path"], p["workspace_revision"], p["content_hash"])
+			return err
+		})
+	case "import":
+		fs := flag.NewFlagSet("sync import", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		path := fs.String("path", defaultSyncPath(ap), "Path to import snapshot file")
+		force := fs.Bool("force", false, "Import even if local workspace has unsynced changes")
+		jsonOut := fs.Bool("json", false, "Output JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		state, err := ap.Store.GetSyncState(ctx)
+		if err != nil {
+			return err
+		}
+		currentRevision, err := ap.Store.GetWorkspaceRevision(ctx)
+		if err != nil {
+			return err
+		}
+		if state.WorkspaceRevision != 0 && currentRevision != state.WorkspaceRevision && !*force {
+			return fmt.Errorf("sync import conflict: local workspace revision %d has unsynced changes since last sync revision %d; rerun with --force to replace local state", currentRevision, state.WorkspaceRevision)
+		}
+		export, contentHash, err := syncfile.Read(*path)
+		if err != nil {
+			return err
+		}
+		if err := ap.Store.ReplaceFromExport(ctx, export); err != nil {
+			return err
+		}
+		if err := ap.Store.RecordSyncState(ctx, store.SyncState{
+			Path:              filepath.Clean(*path),
+			ContentHash:       contentHash,
+			WorkspaceRevision: export.WorkspaceRevision,
+		}); err != nil {
+			return err
+		}
+		payload := map[string]any{
+			"path":               filepath.Clean(*path),
+			"content_hash":       contentHash,
+			"workspace_revision": export.WorkspaceRevision,
+		}
+		return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
+			p := v.(map[string]any)
+			_, err := fmt.Fprintf(w, "imported %s revision=%v hash=%v\n", p["path"], p["workspace_revision"], p["content_hash"])
+			return err
+		})
+	case "status":
+		fs := flag.NewFlagSet("sync status", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		path := fs.String("path", defaultSyncPath(ap), "Path to sync snapshot file")
+		jsonOut := fs.Bool("json", false, "Output JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		state, err := ap.Store.GetSyncState(ctx)
+		if err != nil {
+			return err
+		}
+		currentRevision, err := ap.Store.GetWorkspaceRevision(ctx)
+		if err != nil {
+			return err
+		}
+		existingHash, err := syncfile.HashFile(*path)
+		if err != nil {
+			return err
+		}
+		payload := map[string]any{
+			"path":                         filepath.Clean(*path),
+			"current_workspace_revision":   currentRevision,
+			"last_sync_path":               state.Path,
+			"last_sync_hash":               state.ContentHash,
+			"last_sync_workspace_revision": state.WorkspaceRevision,
+			"current_file_hash":            existingHash,
+			"file_matches_last_sync":       existingHash != "" && existingHash == state.ContentHash,
+		}
+		return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
+			p := v.(map[string]any)
+			_, err := fmt.Fprintf(w, "path=%v current_revision=%v last_sync_revision=%v file_hash=%v\n", p["path"], p["current_workspace_revision"], p["last_sync_workspace_revision"], p["current_file_hash"])
+			return err
+		})
+	default:
+		return errors.New("usage: lk sync <export|import|status> [--path <path>] [--force] [--json]")
+	}
 }
 
 func writeJSON(w io.Writer, v any) error {
@@ -619,6 +760,10 @@ func splitCSV(input string) []string {
 	return out
 }
 
+func defaultSyncPath(ap *app.App) string {
+	return filepath.Join(ap.Workspace.RootDir, "links", "export.json")
+}
+
 func printUsage(w io.Writer) {
 	fmt.Fprint(w, `links / lk
 
@@ -635,6 +780,9 @@ Usage:
   lk dep add <src-id> <dst-id> [--type blocks|parent-child|related-to] [--by <user>] [--json]
   lk dep rm <src-id> <dst-id> [--type blocks|parent-child|related-to]
   lk export
+  lk sync export [--path <path>] [--force] [--json]
+  lk sync import [--path <path>] [--force] [--json]
+  lk sync status [--path <path>] [--json]
   lk beads import --db <path> [--json]
   lk beads export --db <path> [--json]
   lk workspace [--json]

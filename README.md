@@ -31,6 +31,9 @@ lk label rm <issue-id> <label> [--json]
 lk dep add <src-id> <dst-id> [--type blocks|parent-child|related-to] [--by <user>] [--json]
 lk dep rm <src-id> <dst-id> [--type blocks|parent-child|related-to]
 lk export
+lk sync export [--path <path>] [--force] [--json]
+lk sync import [--path <path>] [--force] [--json]
+lk sync status [--path <path>] [--json]
 lk beads import --db <path> [--json]
 lk beads export --db <path> [--json]
 lk workspace [--json]
@@ -61,6 +64,15 @@ lk workspace [--json]
   - clear on edit with `--clear-labels`
   - mutate incrementally with `lk label add` and `lk label rm`
 - Labels are normalized to lowercase and must not contain commas.
+
+## Sync and concurrency
+
+- `// [LAW:single-enforcer]` The store owns one canonical `workspace_revision` and bumps it on every successful mutation.
+- `lk workspace --json` exposes the current `workspace_revision` so agents can detect stale views before writing.
+- `lk sync export` writes an atomic snapshot to `links/export.json` by default.
+- `lk sync export` refuses to overwrite a sync file that changed outside `links` unless `--force` is used.
+- `lk sync import` refuses to replace local state if the workspace has unsynced local changes since the last recorded sync unless `--force` is used.
+- The export snapshot includes `workspace_revision`, so sync state can be correlated deterministically.
 
 ## Beads compatibility
 

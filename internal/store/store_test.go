@@ -2,9 +2,12 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/bmf/links-issue-tracker/internal/model"
 )
 
 func TestStoreCreateEpicAndRelations(t *testing.T) {
@@ -198,3 +201,94 @@ func TestStoreLabelsAreWritableFirstClassData(t *testing.T) {
 }
 
 func intPtr(value int) *int { return &value }
+
+func TestWorkspaceRevisionAndReplaceFromExport(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "links.db"), "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer st.Close()
+
+	initialRevision, err := st.GetWorkspaceRevision(ctx)
+	if err != nil {
+		t.Fatalf("GetWorkspaceRevision() error = %v", err)
+	}
+	if initialRevision != 0 {
+		t.Fatalf("initialRevision = %d, want 0", initialRevision)
+	}
+
+	issue, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Renderer cleanup", IssueType: "task", Priority: 1})
+	if err != nil {
+		t.Fatalf("CreateIssue() error = %v", err)
+	}
+	afterCreate, err := st.GetWorkspaceRevision(ctx)
+	if err != nil {
+		t.Fatalf("GetWorkspaceRevision() after create error = %v", err)
+	}
+	if afterCreate != 1 {
+		t.Fatalf("afterCreate = %d, want 1", afterCreate)
+	}
+
+	export := model.Export{
+		Version:           1,
+		WorkspaceID:       "foreign-workspace",
+		WorkspaceRevision: 42,
+		ExportedAt:        time.Now().UTC(),
+		Issues: []model.Issue{{
+			ID:          "issue-replaced",
+			Title:       "Imported issue",
+			Description: "from file sync",
+			Status:      "open",
+			Priority:    2,
+			IssueType:   "task",
+			Labels:      []string{"imported"},
+			CreatedAt:   time.Now().UTC(),
+			UpdatedAt:   time.Now().UTC(),
+		}},
+		Labels: []model.Label{{
+			IssueID:   "issue-replaced",
+			Name:      "imported",
+			CreatedAt: time.Now().UTC(),
+			CreatedBy: "sync",
+		}},
+	}
+	if err := st.ReplaceFromExport(ctx, export); err != nil {
+		t.Fatalf("ReplaceFromExport() error = %v", err)
+	}
+
+	issues, err := st.ListIssues(ctx, ListIssuesFilter{})
+	if err != nil {
+		t.Fatalf("ListIssues() error = %v", err)
+	}
+	if len(issues) != 1 || issues[0].ID != "issue-replaced" {
+		t.Fatalf("issues = %#v", issues)
+	}
+	if len(issues[0].Labels) != 1 || issues[0].Labels[0] != "imported" {
+		t.Fatalf("labels = %#v", issues[0].Labels)
+	}
+	currentRevision, err := st.GetWorkspaceRevision(ctx)
+	if err != nil {
+		t.Fatalf("GetWorkspaceRevision() after replace error = %v", err)
+	}
+	if currentRevision != 42 {
+		t.Fatalf("currentRevision = %d, want 42", currentRevision)
+	}
+
+	state := SyncState{Path: "/tmp/export.json", ContentHash: "abc123", WorkspaceRevision: 42}
+	if err := st.RecordSyncState(ctx, state); err != nil {
+		t.Fatalf("RecordSyncState() error = %v", err)
+	}
+	loadedState, err := st.GetSyncState(ctx)
+	if err != nil {
+		t.Fatalf("GetSyncState() error = %v", err)
+	}
+	encoded, _ := json.Marshal(loadedState)
+	if string(encoded) == "" || loadedState.Path != state.Path || loadedState.ContentHash != state.ContentHash || loadedState.WorkspaceRevision != state.WorkspaceRevision {
+		t.Fatalf("loadedState = %#v", loadedState)
+	}
+
+	if _, err := st.GetIssue(ctx, issue.ID); err == nil {
+		t.Fatalf("expected original issue %s to be replaced", issue.ID)
+	}
+}
