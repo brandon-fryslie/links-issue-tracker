@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -29,6 +30,11 @@ type Info struct {
 	DatabasePath string
 	DoltRepoPath string
 	WorkspaceID  string
+}
+
+type GitRemote struct {
+	Name string `json:"name"`
+	URL  string `json:"url"`
 }
 
 func Resolve(cwd string) (Info, error) {
@@ -74,6 +80,38 @@ func gitOutput(cwd string, args ...string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func GitRemotes(cwd string) ([]GitRemote, error) {
+	output, err := gitOutput(cwd, "remote", "-v")
+	if err != nil {
+		return nil, err
+	}
+	entries := strings.Split(strings.TrimSpace(output), "\n")
+	byName := map[string]string{}
+	for _, entry := range entries {
+		line := strings.TrimSpace(entry)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		name := fields[0]
+		url := fields[1]
+		scope := strings.Trim(fields[2], "()")
+		if scope != "fetch" {
+			continue
+		}
+		byName[name] = url
+	}
+	remotes := make([]GitRemote, 0, len(byName))
+	for name, url := range byName {
+		remotes = append(remotes, GitRemote{Name: name, URL: url})
+	}
+	sort.Slice(remotes, func(i, j int) bool { return remotes[i].Name < remotes[j].Name })
+	return remotes, nil
 }
 
 func loadOrCreateConfig(path string) (Config, error) {

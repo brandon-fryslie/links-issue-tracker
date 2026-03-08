@@ -1,6 +1,7 @@
 # Dolt Remote Sync
 
 `links` sync is Dolt-native and uses Dolt git-remote support directly.
+Git remotes are the canonical remote configuration.
 
 ## Version requirement
 
@@ -20,8 +21,8 @@ $(git rev-parse --git-common-dir)/links/dolt
 ## Typical setup
 
 ```sh
-lk sync remote add --name origin --url https://github.com/<org>/<repo>.git
-lk sync remote ls
+git remote add origin https://github.com/<org>/<repo>.git
+lk sync remote ls --json
 lk sync fetch --remote origin
 lk sync pull --remote origin --branch main
 ```
@@ -39,9 +40,12 @@ lk sync push --remote origin --branch main
 
 - `lk sync status [--json]`
 - `lk sync remote ls [--json]`
-- `lk sync remote add --name <name> --url <url> [--json]`
-- `lk sync remote rm --name <name> [--json]`
 - `lk sync fetch [--remote <name>] [--prune] [--json]`
 - `lk sync pull [--remote <name>] [--branch <name>] [--json]`
 - `lk sync push [--remote <name>] [--branch <name>] [--set-upstream] [--force] [--json]`
 
+Before each `lk sync` command, `lk` reconciles Dolt remotes to exactly match `git remote -v` fetch URLs:
+
+- add missing Dolt remotes
+- update changed remote URLs
+- remove Dolt remotes that no longer exist in Git

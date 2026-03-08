@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"text/tabwriter"
@@ -52,6 +53,9 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 			return err
 		}
 		if _, err := doltcli.RequireMinimumVersion(ctx, ws.RootDir, doltcli.MinSupportedVersion); err != nil {
+			return err
+		}
+		if err := store.EnsureDatabase(ctx, ws.DatabasePath, ws.WorkspaceID); err != nil {
 			return err
 		}
 		return runSync(ctx, stdout, ws, args[1:])
@@ -702,10 +706,14 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 	if len(args) == 0 {
 		return errors.New("usage: lk sync <status|remote|fetch|pull|push> ...")
 	}
+	syncState, err := syncDoltRemotesFromGit(ctx, ws)
+	if err != nil {
+		return err
+	}
 	switch args[0] {
 	case "remote":
 		if len(args) < 2 {
-			return errors.New("usage: lk sync remote <ls|add|rm> ...")
+			return errors.New("usage: lk sync remote ls [--json]")
 		}
 		switch args[1] {
 		case "ls":
@@ -715,81 +723,26 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 			if err := fs.Parse(args[2:]); err != nil {
 				return err
 			}
-			output, err := doltcli.Run(ctx, ws.DoltRepoPath, "remote", "-v")
-			if err != nil {
-				return err
-			}
 			payload := map[string]any{
-				"remotes": parseDoltRemoteVerbose(output),
-				"raw":     output,
+				"git_remotes":  syncState.gitRemotes,
+				"dolt_remotes": syncState.doltRemotes,
+				"changes":      syncState.changes,
 			}
 			return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
 				p := v.(map[string]any)
-				_, err := fmt.Fprintln(w, strings.TrimSpace(p["raw"].(string)))
-				return err
-			})
-		case "add":
-			fs := flag.NewFlagSet("sync remote add", flag.ContinueOnError)
-			fs.SetOutput(io.Discard)
-			name := fs.String("name", "", "Remote name")
-			url := fs.String("url", "", "Remote URL")
-			jsonOut := fs.Bool("json", false, "Output JSON")
-			if err := fs.Parse(args[2:]); err != nil {
-				return err
-			}
-			if strings.TrimSpace(*name) == "" || strings.TrimSpace(*url) == "" {
-				return errors.New("usage: lk sync remote add --name <name> --url <url> [--json]")
-			}
-			output, err := doltcli.Run(ctx, ws.DoltRepoPath, "remote", "add", strings.TrimSpace(*name), strings.TrimSpace(*url))
-			if err != nil {
-				return err
-			}
-			payload := map[string]any{
-				"status": "ok",
-				"name":   strings.TrimSpace(*name),
-				"url":    strings.TrimSpace(*url),
-				"raw":    output,
-			}
-			return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
-				p := v.(map[string]any)
-				if strings.TrimSpace(p["raw"].(string)) != "" {
-					_, err := fmt.Fprintln(w, strings.TrimSpace(p["raw"].(string)))
-					return err
-				}
-				_, err := fmt.Fprintf(w, "remote %s added\n", p["name"])
-				return err
-			})
-		case "rm", "remove":
-			fs := flag.NewFlagSet("sync remote rm", flag.ContinueOnError)
-			fs.SetOutput(io.Discard)
-			name := fs.String("name", "", "Remote name")
-			jsonOut := fs.Bool("json", false, "Output JSON")
-			if err := fs.Parse(args[2:]); err != nil {
-				return err
-			}
-			if strings.TrimSpace(*name) == "" {
-				return errors.New("usage: lk sync remote rm --name <name> [--json]")
-			}
-			output, err := doltcli.Run(ctx, ws.DoltRepoPath, "remote", "remove", strings.TrimSpace(*name))
-			if err != nil {
-				return err
-			}
-			payload := map[string]any{
-				"status": "ok",
-				"name":   strings.TrimSpace(*name),
-				"raw":    output,
-			}
-			return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
-				p := v.(map[string]any)
-				if strings.TrimSpace(p["raw"].(string)) != "" {
-					_, err := fmt.Fprintln(w, strings.TrimSpace(p["raw"].(string)))
-					return err
-				}
-				_, err := fmt.Fprintf(w, "remote %s removed\n", p["name"])
+				_, err := fmt.Fprintf(
+					w,
+					"git=%d dolt=%d added=%d updated=%d removed=%d\n",
+					len(p["git_remotes"].([]workspace.GitRemote)),
+					len(p["dolt_remotes"].([]map[string]string)),
+					len(syncState.changes.Added),
+					len(syncState.changes.Updated),
+					len(syncState.changes.Removed),
+				)
 				return err
 			})
 		default:
-			return errors.New("usage: lk sync remote <ls|add|rm> ...")
+			return errors.New("usage: lk sync remote ls [--json]")
 		}
 	case "fetch":
 		fs := flag.NewFlagSet("sync fetch", flag.ContinueOnError)
@@ -934,17 +887,143 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 			"dolt_version": version.String(),
 			"branch":       strings.TrimSpace(branch),
 			"head":         strings.TrimSpace(logOutput),
-			"remotes":      parseDoltRemoteVerbose(remotesOutput),
 			"status":       strings.TrimSpace(statusOutput),
+			"git_remotes":  syncState.gitRemotes,
+			"dolt_remotes": parseDoltRemoteVerbose(remotesOutput),
+			"changes":      syncState.changes,
 		}
 		return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
 			p := v.(map[string]any)
-			_, err := fmt.Fprintf(w, "version=%v branch=%v head=%v remotes=%d\n", p["dolt_version"], p["branch"], p["head"], len(p["remotes"].([]map[string]string)))
+			_, err := fmt.Fprintf(
+				w,
+				"version=%v branch=%v head=%v git=%d dolt=%d added=%d updated=%d removed=%d\n",
+				p["dolt_version"],
+				p["branch"],
+				p["head"],
+				len(p["git_remotes"].([]workspace.GitRemote)),
+				len(p["dolt_remotes"].([]map[string]string)),
+				len(syncState.changes.Added),
+				len(syncState.changes.Updated),
+				len(syncState.changes.Removed),
+			)
 			return err
 		})
 	default:
 		return errors.New("usage: lk sync <status|remote|fetch|pull|push> ...")
 	}
+}
+
+type remoteSyncChanges struct {
+	Added   []string `json:"added"`
+	Updated []string `json:"updated"`
+	Removed []string `json:"removed"`
+}
+
+type remoteSyncState struct {
+	gitRemotes  []workspace.GitRemote
+	doltRemotes []map[string]string
+	changes     remoteSyncChanges
+}
+
+func syncDoltRemotesFromGit(ctx context.Context, ws workspace.Info) (remoteSyncState, error) {
+	gitRemotes, err := workspace.GitRemotes(ws.RootDir)
+	if err != nil {
+		return remoteSyncState{}, fmt.Errorf("read git remotes: %w", err)
+	}
+	doltOutput, err := doltcli.Run(ctx, ws.DoltRepoPath, "remote", "-v")
+	if err != nil {
+		return remoteSyncState{}, err
+	}
+	doltRemotes := parseDoltRemoteVerbose(doltOutput)
+	gitByName := mapGitRemotesByName(gitRemotes)
+	doltByName := mapRemotesByName(doltRemotes)
+
+	changes := remoteSyncChanges{
+		Added:   []string{},
+		Updated: []string{},
+		Removed: []string{},
+	}
+
+	for _, remote := range gitRemotes {
+		currentURL, exists := doltByName[remote.Name]
+		if !exists {
+			if _, err := doltcli.Run(ctx, ws.DoltRepoPath, "remote", "add", remote.Name, remote.URL); err != nil {
+				return remoteSyncState{}, err
+			}
+			changes.Added = append(changes.Added, remote.Name)
+			continue
+		}
+		if !sameRemoteURL(currentURL, remote.URL) {
+			if _, err := doltcli.Run(ctx, ws.DoltRepoPath, "remote", "remove", remote.Name); err != nil {
+				return remoteSyncState{}, err
+			}
+			if _, err := doltcli.Run(ctx, ws.DoltRepoPath, "remote", "add", remote.Name, remote.URL); err != nil {
+				return remoteSyncState{}, err
+			}
+			changes.Updated = append(changes.Updated, remote.Name)
+		}
+	}
+	for name := range doltByName {
+		if _, keep := gitByName[name]; keep {
+			continue
+		}
+		if _, err := doltcli.Run(ctx, ws.DoltRepoPath, "remote", "remove", name); err != nil {
+			return remoteSyncState{}, err
+		}
+		changes.Removed = append(changes.Removed, name)
+	}
+	sort.Strings(changes.Added)
+	sort.Strings(changes.Updated)
+	sort.Strings(changes.Removed)
+
+	finalOutput, err := doltcli.Run(ctx, ws.DoltRepoPath, "remote", "-v")
+	if err != nil {
+		return remoteSyncState{}, err
+	}
+	return remoteSyncState{
+		gitRemotes:  gitRemotes,
+		doltRemotes: parseDoltRemoteVerbose(finalOutput),
+		changes:     changes,
+	}, nil
+}
+
+func mapGitRemotesByName(remotes []workspace.GitRemote) map[string]string {
+	out := make(map[string]string, len(remotes))
+	for _, remote := range remotes {
+		out[remote.Name] = remote.URL
+	}
+	return out
+}
+
+func mapRemotesByName(remotes []map[string]string) map[string]string {
+	out := make(map[string]string, len(remotes))
+	for _, remote := range remotes {
+		name := strings.TrimSpace(remote["name"])
+		url := strings.TrimSpace(remote["url"])
+		scope := strings.TrimSpace(remote["scope"])
+		if name == "" || url == "" {
+			continue
+		}
+		// [LAW:one-source-of-truth] Remote URL projection always prefers fetch scope as the canonical source.
+		if scope == "fetch" {
+			out[name] = url
+			continue
+		}
+		if _, exists := out[name]; !exists {
+			out[name] = url
+		}
+	}
+	return out
+}
+
+func sameRemoteURL(left, right string) bool {
+	return normalizeRemoteURL(left) == normalizeRemoteURL(right)
+}
+
+func normalizeRemoteURL(input string) string {
+	trimmed := strings.TrimSpace(input)
+	trimmed = strings.TrimPrefix(trimmed, "git+")
+	return trimmed
 }
 
 func parseDoltRemoteVerbose(output string) []map[string]string {
@@ -1329,7 +1408,7 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"Create issues with `lk new ...`; use `--type epic` for epics.",
 			"Connect issues using `lk parent set` and `lk dep add --type related-to|blocks`.",
 			"Mutate safely with `--expected-revision` from `workspace_revision`.",
-			"Sync via Dolt git remotes using `lk sync remote`, `lk sync fetch`, `lk sync pull`, and `lk sync push`.",
+			"Configure remotes with `git remote`; `lk sync` mirrors those remotes into Dolt automatically.",
 			"Run health checks with `lk doctor` and repair known corruption with `lk fsck --repair`.",
 			"Snapshot and rollback using `lk backup create`, `lk backup restore`, or `lk recover`.",
 		},
@@ -1340,7 +1419,8 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"lk parent set lk-124 lk-100 --json",
 			"lk dep add lk-124 lk-122 --type related-to --json",
 			"lk edit lk-124 --priority 1 --expected-revision 42 --json",
-			"lk sync remote add --name origin --url https://github.com/org/repo.git --json",
+			"git remote add origin https://github.com/org/repo.git",
+			"lk sync remote ls --json",
 			"lk sync pull --remote origin --branch main --json",
 			"lk sync push --remote origin --branch main --json",
 		},
@@ -1376,6 +1456,8 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"   Read `workspace_revision` and pass `--expected-revision N` on writes.",
 			"",
 			"5) Dolt remote sync",
+			"   Configure remotes with git, then run sync commands.",
+			"   `git remote -v`",
 			"   `lk sync remote ls --json`",
 			"   `lk sync fetch --remote origin --json`",
 			"   `lk sync pull --remote origin --branch main --json`",
@@ -1757,8 +1839,6 @@ Usage:
   lk export [--json]
   lk sync status [--json]
   lk sync remote ls [--json]
-  lk sync remote add --name <name> --url <url> [--json]
-  lk sync remote rm --name <name> [--json]
   lk sync fetch [--remote <name>] [--prune] [--json]
   lk sync pull [--remote <name>] [--branch <name>] [--json]
   lk sync push [--remote <name>] [--branch <name>] [--set-upstream] [--force] [--json]

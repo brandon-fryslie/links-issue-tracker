@@ -60,8 +60,6 @@ lk dep ls <issue-id> [--type blocks|parent-child|related-to] [--json]
 lk export [--json]
 lk sync status [--json]
 lk sync remote ls [--json]
-lk sync remote add --name <name> --url <url> [--json]
-lk sync remote rm --name <name> [--json]
 lk sync fetch [--remote <name>] [--prune] [--json]
 lk sync pull [--remote <name>] [--branch <name>] [--json]
 lk sync push [--remote <name>] [--branch <name>] [--set-upstream] [--force] [--json]
@@ -116,12 +114,13 @@ lk workspace [--json]
 - `// [LAW:single-enforcer]` The store owns one canonical `workspace_revision` and bumps it on every successful mutation.
 - `lk workspace --json` exposes the current `workspace_revision` so agents can detect stale views before writing.
 - Mutating commands support `--expected-revision N`; stale writes fail with a dedicated exit code.
-- `lk sync` uses Dolt git-remote support directly:
-  - `lk sync remote add|rm|ls` manages remotes
-  - `lk sync fetch` fetches remote refs
-  - `lk sync pull` pulls/merges from a remote branch
-  - `lk sync push` pushes local commits to a remote branch
-  - `lk sync status` shows local branch/head/status plus configured remotes
+- `// [LAW:one-source-of-truth]` Git remotes are the canonical remote config; `lk sync` mirrors them into Dolt before every sync operation.
+- `lk sync` commands:
+  - `lk sync remote ls` shows canonical git remotes, mirrored Dolt remotes, and reconcile changes.
+  - `lk sync fetch` fetches remote refs (after remote reconciliation).
+  - `lk sync pull` pulls/merges from a remote branch (after remote reconciliation).
+  - `lk sync push` pushes local commits to a remote branch (after remote reconciliation).
+  - `lk sync status` shows local branch/head/status plus git+dolt remote state.
 - By default all sync operations run in the current repo/worktree root and operate on the shared Dolt database at `$(git rev-parse --git-common-dir)/links/dolt`.
 - See [docs/dolt-remote-sync.md](docs/dolt-remote-sync.md) for full examples.
 

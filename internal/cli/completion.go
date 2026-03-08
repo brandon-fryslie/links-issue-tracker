@@ -11,7 +11,7 @@ _lk_completions() {
   local parent_subcommands="set clear"
   local dep_subcommands="add rm ls"
   local sync_subcommands="status remote fetch pull push"
-  local sync_remote_subcommands="ls add rm"
+  local sync_remote_subcommands="ls"
   local backup_subcommands="create list restore"
   local bulk_subcommands="label close archive import"
   local beads_subcommands="import export"
@@ -131,7 +131,7 @@ _lk() {
           ;;
         remote)
           if [[ "$line[1]" = "sync" ]]; then
-            _values 'sync remote commands' ls add rm
+            _values 'sync remote commands' ls
           fi
           ;;
         backup)
@@ -161,7 +161,7 @@ complete -c lk -n '__fish_seen_subcommand_from label' -a 'add rm'
 complete -c lk -n '__fish_seen_subcommand_from parent' -a 'set clear'
 complete -c lk -n '__fish_seen_subcommand_from dep' -a 'add rm ls'
 complete -c lk -n '__fish_seen_subcommand_from sync' -a 'status remote fetch pull push'
-complete -c lk -n '__fish_seen_subcommand_from remote' -a 'ls add rm'
+complete -c lk -n '__fish_seen_subcommand_from remote' -a 'ls'
 complete -c lk -n '__fish_seen_subcommand_from backup' -a 'create list restore'
 complete -c lk -n '__fish_seen_subcommand_from bulk' -a 'label close archive import'
 complete -c lk -n '__fish_seen_subcommand_from beads' -a 'import export'

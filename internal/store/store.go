@@ -188,7 +188,7 @@ func Open(ctx context.Context, doltRootDir string, workspaceID string) (*Store, 
 	if strings.TrimSpace(workspaceID) == "" {
 		return nil, errors.New("workspace id is required")
 	}
-	if err := ensureDoltDatabase(ctx, doltRootDir, workspaceID); err != nil {
+	if err := EnsureDatabase(ctx, doltRootDir, workspaceID); err != nil {
 		return nil, err
 	}
 	db, err := sql.Open(doltDriverName, buildDoltDSN(doltRootDir, workspaceID, true))
@@ -201,6 +201,16 @@ func Open(ctx context.Context, doltRootDir string, workspaceID string) (*Store, 
 		return nil, err
 	}
 	return s, nil
+}
+
+func EnsureDatabase(ctx context.Context, doltRootDir string, workspaceID string) error {
+	if strings.TrimSpace(doltRootDir) == "" {
+		return errors.New("dolt root dir is required")
+	}
+	if strings.TrimSpace(workspaceID) == "" {
+		return errors.New("workspace id is required")
+	}
+	return ensureDoltDatabase(ctx, doltRootDir, workspaceID)
 }
 
 func (s *Store) Close() error { return s.db.Close() }

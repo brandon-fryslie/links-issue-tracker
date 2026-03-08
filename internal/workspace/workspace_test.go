@@ -55,6 +55,28 @@ func TestResolveFailsOutsideGit(t *testing.T) {
 	}
 }
 
+func TestGitRemotesReturnsFetchURLsSortedByName(t *testing.T) {
+	repo := t.TempDir()
+	run(t, repo, "git", "init")
+	run(t, repo, "git", "remote", "add", "upstream", "https://github.com/acme/upstream.git")
+	run(t, repo, "git", "remote", "add", "origin", "https://github.com/acme/origin.git")
+	run(t, repo, "git", "remote", "set-url", "--push", "origin", "git@github.com:acme/origin.git")
+
+	remotes, err := GitRemotes(repo)
+	if err != nil {
+		t.Fatalf("GitRemotes() error = %v", err)
+	}
+	if len(remotes) != 2 {
+		t.Fatalf("len(remotes) = %d, want 2", len(remotes))
+	}
+	if remotes[0].Name != "origin" || remotes[0].URL != "https://github.com/acme/origin.git" {
+		t.Fatalf("origin remote mismatch: %+v", remotes[0])
+	}
+	if remotes[1].Name != "upstream" || remotes[1].URL != "https://github.com/acme/upstream.git" {
+		t.Fatalf("upstream remote mismatch: %+v", remotes[1])
+	}
+}
+
 func run(t *testing.T, dir string, name string, args ...string) {
 	t.Helper()
 	cmd := exec.Command(name, args...)
