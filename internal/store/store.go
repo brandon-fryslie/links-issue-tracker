@@ -70,10 +70,17 @@ type UpdateIssueInput struct {
 }
 
 type ListIssuesFilter struct {
-	Status    string
-	IssueType string
-	Assignee  string
-	Limit     int
+	Status        string
+	IssueType     string
+	Assignee      string
+	PriorityMin   *int
+	PriorityMax   *int
+	SearchTerms   []string
+	IDs           []string
+	HasComments   *bool
+	UpdatedAfter  *time.Time
+	UpdatedBefore *time.Time
+	Limit         int
 }
 
 type AddCommentInput struct {
@@ -228,6 +235,49 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 		where = append(where, "assignee = ?")
 		args = append(args, filter.Assignee)
 	}
+	if filter.PriorityMin != nil {
+		where = append(where, "priority >= ?")
+		args = append(args, *filter.PriorityMin)
+	}
+	if filter.PriorityMax != nil {
+		where = append(where, "priority <= ?")
+		args = append(args, *filter.PriorityMax)
+	}
+	if filter.UpdatedAfter != nil {
+		where = append(where, "updated_at >= ?")
+		args = append(args, filter.UpdatedAfter.UTC().Format(time.RFC3339Nano))
+	}
+	if filter.UpdatedBefore != nil {
+		where = append(where, "updated_at <= ?")
+		args = append(args, filter.UpdatedBefore.UTC().Format(time.RFC3339Nano))
+	}
+	if filter.HasComments != nil {
+		where = append(where, "EXISTS (SELECT 1 FROM comments WHERE comments.issue_id = issues.id) = ?")
+		args = append(args, boolToInt(*filter.HasComments))
+	}
+	if len(filter.IDs) > 0 {
+		placeholders := make([]string, 0, len(filter.IDs))
+		for _, id := range filter.IDs {
+			trimmed := strings.TrimSpace(id)
+			if trimmed == "" {
+				continue
+			}
+			placeholders = append(placeholders, "?")
+			args = append(args, trimmed)
+		}
+		if len(placeholders) > 0 {
+			where = append(where, "id IN ("+strings.Join(placeholders, ", ")+")")
+		}
+	}
+	for _, term := range filter.SearchTerms {
+		trimmed := strings.ToLower(strings.TrimSpace(term))
+		if trimmed == "" {
+			continue
+		}
+		where = append(where, "(LOWER(title) LIKE ? OR LOWER(description) LIKE ?)")
+		like := "%" + trimmed + "%"
+		args = append(args, like, like)
+	}
 	if len(where) > 0 {
 		query += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -249,6 +299,13 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 		issues = append(issues, issue)
 	}
 	return issues, rows.Err()
+}
+
+func boolToInt(value bool) int {
+	if value {
+		return 1
+	}
+	return 0
 }
 
 func (s *Store) GetIssueDetail(ctx context.Context, id string) (model.IssueDetail, error) {

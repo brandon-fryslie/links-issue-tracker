@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestStoreCreateEpicAndRelations(t *testing.T) {
@@ -76,3 +77,60 @@ func TestStoreRejectsInvalidIssueType(t *testing.T) {
 		t.Fatal("expected invalid issue type error")
 	}
 }
+
+func TestStoreListIssuesSupportsAdvancedFilters(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "links.db"), "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer st.Close()
+
+	issueA, err := st.CreateIssue(ctx, CreateIssueInput{
+		Title:       "Renderer contract cleanup",
+		Description: "Fix the renderer contract for draw prep.",
+		IssueType:   "task",
+		Priority:    1,
+		Assignee:    "bmf",
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue issueA error = %v", err)
+	}
+	issueB, err := st.CreateIssue(ctx, CreateIssueInput{
+		Title:       "Fluid defaults",
+		Description: "Tune the fluid presets.",
+		IssueType:   "feature",
+		Priority:    3,
+		Assignee:    "e-prawn",
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue issueB error = %v", err)
+	}
+	if _, err := st.AddComment(ctx, AddCommentInput{IssueID: issueA.ID, Body: "Need compiler contract first.", CreatedBy: "bmf"}); err != nil {
+		t.Fatalf("AddComment() error = %v", err)
+	}
+
+	now := time.Now().UTC()
+	before := now.Add(-time.Hour)
+	after := now.Add(time.Hour)
+	hasComments := true
+	issues, err := st.ListIssues(ctx, ListIssuesFilter{
+		Status:        "open",
+		IssueType:     "task",
+		Assignee:      "bmf",
+		PriorityMax:   intPtr(2),
+		SearchTerms:   []string{"renderer", "draw prep"},
+		IDs:           []string{issueA.ID, issueB.ID},
+		HasComments:   &hasComments,
+		UpdatedAfter:  &before,
+		UpdatedBefore: &after,
+	})
+	if err != nil {
+		t.Fatalf("ListIssues() error = %v", err)
+	}
+	if len(issues) != 1 || issues[0].ID != issueA.ID {
+		t.Fatalf("issues = %#v", issues)
+	}
+}
+
+func intPtr(value int) *int { return &value }

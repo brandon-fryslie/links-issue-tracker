@@ -10,10 +10,12 @@ import (
 	"os"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/bmf/links-issue-tracker/internal/app"
 	"github.com/bmf/links-issue-tracker/internal/beads"
 	"github.com/bmf/links-issue-tracker/internal/model"
+	"github.com/bmf/links-issue-tracker/internal/query"
 	"github.com/bmf/links-issue-tracker/internal/store"
 	"github.com/bmf/links-issue-tracker/internal/workspace"
 )
@@ -90,12 +92,70 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	status := fs.String("status", "", "Filter by status")
 	issueType := fs.String("type", "", "Filter by issue type")
 	assignee := fs.String("assignee", "", "Filter by assignee")
+	priorityMin := fs.Int("priority-min", -1, "Minimum priority 0..4")
+	priorityMax := fs.Int("priority-max", -1, "Maximum priority 0..4")
+	search := fs.String("search", "", "Search title and description text")
+	ids := fs.String("ids", "", "Comma-separated issue IDs")
+	hasComments := fs.Bool("has-comments", false, "Only include issues with comments")
+	updatedAfter := fs.String("updated-after", "", "Only include issues updated at or after RFC3339 timestamp")
+	updatedBefore := fs.String("updated-before", "", "Only include issues updated at or before RFC3339 timestamp")
+	queryExpr := fs.String("query", "", "Query language: status:open type:task priority<=2 has:comments text")
 	limit := fs.Int("limit", 0, "Limit results")
 	jsonOut := fs.Bool("json", false, "Output JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	issues, err := ap.Store.ListIssues(ctx, store.ListIssuesFilter{Status: *status, IssueType: *issueType, Assignee: *assignee, Limit: *limit})
+	visited := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { visited[f.Name] = true })
+	filter := store.ListIssuesFilter{
+		Status:    strings.TrimSpace(*status),
+		IssueType: strings.TrimSpace(*issueType),
+		Assignee:  strings.TrimSpace(*assignee),
+		Limit:     *limit,
+	}
+	if visited["priority-min"] {
+		value := *priorityMin
+		filter.PriorityMin = &value
+	}
+	if visited["priority-max"] {
+		value := *priorityMax
+		filter.PriorityMax = &value
+	}
+	if visited["search"] {
+		filter.SearchTerms = append(filter.SearchTerms, strings.TrimSpace(*search))
+	}
+	if visited["ids"] {
+		filter.IDs = splitCSV(*ids)
+	}
+	if visited["has-comments"] {
+		value := *hasComments
+		filter.HasComments = &value
+	}
+	if visited["updated-after"] {
+		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(*updatedAfter))
+		if err != nil {
+			return fmt.Errorf("parse --updated-after: %w", err)
+		}
+		filter.UpdatedAfter = &parsed
+	}
+	if visited["updated-before"] {
+		parsed, err := time.Parse(time.RFC3339, strings.TrimSpace(*updatedBefore))
+		if err != nil {
+			return fmt.Errorf("parse --updated-before: %w", err)
+		}
+		filter.UpdatedBefore = &parsed
+	}
+	if strings.TrimSpace(*queryExpr) != "" {
+		parsed, err := query.Parse(*queryExpr)
+		if err != nil {
+			return err
+		}
+		filter, err = query.Merge(filter, parsed.Filter)
+		if err != nil {
+			return err
+		}
+	}
+	issues, err := ap.Store.ListIssues(ctx, filter)
 	if err != nil {
 		return err
 	}
@@ -466,12 +526,27 @@ func emptyDash(s string) string {
 	return s
 }
 
+func splitCSV(input string) []string {
+	if strings.TrimSpace(input) == "" {
+		return nil
+	}
+	parts := strings.Split(input, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		trimmed := strings.TrimSpace(part)
+		if trimmed != "" {
+			out = append(out, trimmed)
+		}
+	}
+	return out
+}
+
 func printUsage(w io.Writer) {
 	fmt.Fprint(w, `links / lk
 
 Usage:
   lk new --title <title> [--description <text>] [--type task|feature|bug|chore|epic] [--priority 0-4] [--assignee <user>] [--json]
-  lk ls [--status open|closed] [--type <type>] [--assignee <user>] [--limit N] [--json]
+  lk ls [--status open|closed] [--type <type>] [--assignee <user>] [--priority-min N] [--priority-max N] [--search <text>] [--ids a,b] [--has-comments] [--updated-after RFC3339] [--updated-before RFC3339] [--query <expr>] [--limit N] [--json]
   lk show <id> [--json]
   lk edit <id> [--title ...] [--description ...] [--type ...] [--status ...] [--priority ...] [--assignee ...|--clear-assignee] [--json]
   lk close <id> [--json]

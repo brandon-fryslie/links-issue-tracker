@@ -34,6 +34,21 @@ lk beads export --db <path> [--json]
 lk workspace [--json]
 ```
 
+## Querying
+
+- `// [LAW:one-source-of-truth]` Filtering semantics are owned by the store query contract; the CLI query language lowers into that same filter shape.
+- `lk ls --query 'status:open type:task priority<=2 has:comments renderer contract'`
+- Supported query terms:
+  - `status:open|closed`
+  - `type:task|feature|bug|chore|epic`
+  - `assignee:<user>`
+  - `id:<issue-id>`
+  - `priority:<n>`
+  - `priority<=<n>`, `priority>=<n>`, `p<=<n>`, `p>=<n>`
+  - `updated>=<RFC3339>`, `updated<=<RFC3339>`
+  - `has:comments`
+  - any other term becomes title/description text search
+
 ## Beads compatibility
 
 - `// [LAW:locality-or-seam]` Beads compatibility is isolated in `internal/beads` so the core store keeps one canonical data model.
