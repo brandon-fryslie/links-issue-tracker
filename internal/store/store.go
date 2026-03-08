@@ -24,6 +24,24 @@ type Store struct {
 	workspaceID string
 }
 
+type StaleRevisionError struct {
+	Expected int64
+	Actual   int64
+}
+
+func (e StaleRevisionError) Error() string {
+	return fmt.Sprintf("stale workspace revision: expected %d, actual %d", e.Expected, e.Actual)
+}
+
+type NotFoundError struct {
+	Entity string
+	ID     string
+}
+
+func (e NotFoundError) Error() string {
+	return fmt.Sprintf("%s %q not found", e.Entity, e.ID)
+}
+
 type SyncState struct {
 	Path              string
 	ContentHash       string
@@ -68,22 +86,29 @@ type ImportLabel struct {
 }
 
 type CreateIssueInput struct {
-	Title       string
-	Description string
-	IssueType   string
-	Priority    int
-	Assignee    string
-	Labels      []string
+	Title            string
+	Description      string
+	IssueType        string
+	Priority         int
+	Assignee         string
+	Labels           []string
+	ExpectedRevision *int64
 }
 
 type UpdateIssueInput struct {
-	Title       *string
-	Description *string
-	IssueType   *string
-	Status      *string
-	Priority    *int
-	Assignee    *string
-	Labels      *[]string
+	Title            *string
+	Description      *string
+	IssueType        *string
+	Status           *string
+	Priority         *int
+	Assignee         *string
+	Labels           *[]string
+	ExpectedRevision *int64
+}
+
+type SortSpec struct {
+	Field string
+	Desc  bool
 }
 
 type ListIssuesFilter struct {
@@ -100,33 +125,54 @@ type ListIssuesFilter struct {
 	UpdatedBefore   *time.Time
 	IncludeArchived bool
 	IncludeDeleted  bool
+	SortBy          []SortSpec
 	Limit           int
 }
 
 type AddCommentInput struct {
-	IssueID   string
-	Body      string
-	CreatedBy string
+	IssueID          string
+	Body             string
+	CreatedBy        string
+	ExpectedRevision *int64
 }
 
 type AddRelationInput struct {
-	SrcID     string
-	DstID     string
-	Type      string
-	CreatedBy string
+	SrcID            string
+	DstID            string
+	Type             string
+	CreatedBy        string
+	ExpectedRevision *int64
+}
+
+type SetParentInput struct {
+	ChildID          string
+	ParentID         string
+	CreatedBy        string
+	ExpectedRevision *int64
 }
 
 type AddLabelInput struct {
-	IssueID   string
-	Name      string
-	CreatedBy string
+	IssueID          string
+	Name             string
+	CreatedBy        string
+	ExpectedRevision *int64
 }
 
 type TransitionIssueInput struct {
-	IssueID   string
-	Action    string
-	Reason    string
-	CreatedBy string
+	IssueID          string
+	Action           string
+	Reason           string
+	CreatedBy        string
+	ExpectedRevision *int64
+}
+
+type HealthReport struct {
+	IntegrityCheck     string   `json:"integrity_check"`
+	ForeignKeyIssues   int      `json:"foreign_key_issues"`
+	InvalidRelatedRows int      `json:"invalid_related_rows"`
+	OrphanHistoryRows  int      `json:"orphan_history_rows"`
+	Errors             []string `json:"errors"`
+	Warnings           []string `json:"warnings"`
 }
 
 func Open(ctx context.Context, dbPath string, workspaceID string) (*Store, error) {
@@ -335,6 +381,9 @@ func (s *Store) CreateIssue(ctx context.Context, in CreateIssueInput) (model.Iss
 		return model.Issue{}, fmt.Errorf("begin create issue tx: %w", err)
 	}
 	defer tx.Rollback()
+	if err := s.ensureExpectedRevisionTx(ctx, tx, in.ExpectedRevision); err != nil {
+		return model.Issue{}, err
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO issues(
 		id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at, archived_at, deleted_at
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
@@ -436,7 +485,11 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 	if len(where) > 0 {
 		query += " WHERE " + strings.Join(where, " AND ")
 	}
-	query += " ORDER BY status ASC, priority ASC, updated_at DESC, id ASC"
+	orderClause, err := buildIssueOrderClause(filter.SortBy)
+	if err != nil {
+		return nil, err
+	}
+	query += " ORDER BY " + orderClause
 	if filter.Limit > 0 {
 		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
 	}
@@ -567,7 +620,7 @@ func (s *Store) GetIssue(ctx context.Context, id string) (model.Issue, error) {
 	issue, err := scanIssue(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return model.Issue{}, fmt.Errorf("issue %q not found", id)
+			return model.Issue{}, NotFoundError{Entity: "issue", ID: id}
 		}
 		return model.Issue{}, err
 	}
@@ -628,6 +681,9 @@ func (s *Store) UpdateIssue(ctx context.Context, id string, in UpdateIssueInput)
 		return model.Issue{}, fmt.Errorf("begin update issue tx: %w", err)
 	}
 	defer tx.Rollback()
+	if err := s.ensureExpectedRevisionTx(ctx, tx, in.ExpectedRevision); err != nil {
+		return model.Issue{}, err
+	}
 	_, err = tx.ExecContext(ctx, `UPDATE issues SET
 		title = ?, description = ?, status = ?, priority = ?, issue_type = ?, assignee = ?, updated_at = ?, closed_at = ?, archived_at = ?, deleted_at = ?
 		WHERE id = ?`, issue.Title, issue.Description, issue.Status, issue.Priority, issue.IssueType, issue.Assignee, issue.UpdatedAt.Format(time.RFC3339Nano), closedAt, nullableTime(issue.ArchivedAt), nullableTime(issue.DeletedAt), issue.ID)
@@ -666,6 +722,9 @@ func (s *Store) AddComment(ctx context.Context, in AddCommentInput) (model.Comme
 		return model.Comment{}, fmt.Errorf("begin add comment tx: %w", err)
 	}
 	defer tx.Rollback()
+	if err := s.ensureExpectedRevisionTx(ctx, tx, in.ExpectedRevision); err != nil {
+		return model.Comment{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO comments(id, issue_id, body, created_at, created_by) VALUES (?, ?, ?, ?, ?)`, comment.ID, comment.IssueID, comment.Body, comment.CreatedAt.Format(time.RFC3339Nano), comment.CreatedBy); err != nil {
 		return model.Comment{}, fmt.Errorf("insert comment: %w", err)
 	}
@@ -708,6 +767,9 @@ func (s *Store) AddRelation(ctx context.Context, in AddRelationInput) (model.Rel
 		return model.Relation{}, fmt.Errorf("begin add relation tx: %w", err)
 	}
 	defer tx.Rollback()
+	if err := s.ensureExpectedRevisionTx(ctx, tx, in.ExpectedRevision); err != nil {
+		return model.Relation{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO relations(src_id, dst_id, type, created_at, created_by) VALUES (?, ?, ?, ?, ?)`, rel.SrcID, rel.DstID, rel.Type, rel.CreatedAt.Format(time.RFC3339Nano), rel.CreatedBy); err != nil {
 		return model.Relation{}, fmt.Errorf("insert relation: %w", err)
 	}
@@ -720,7 +782,7 @@ func (s *Store) AddRelation(ctx context.Context, in AddRelationInput) (model.Rel
 	return rel, nil
 }
 
-func (s *Store) RemoveRelation(ctx context.Context, srcID, dstID, relType string) error {
+func (s *Store) RemoveRelation(ctx context.Context, srcID, dstID, relType string, expectedRevision *int64) error {
 	if relType == "related-to" {
 		ordered := []string{srcID, dstID}
 		sort.Strings(ordered)
@@ -731,6 +793,9 @@ func (s *Store) RemoveRelation(ctx context.Context, srcID, dstID, relType string
 		return fmt.Errorf("begin remove relation tx: %w", err)
 	}
 	defer tx.Rollback()
+	if err := s.ensureExpectedRevisionTx(ctx, tx, expectedRevision); err != nil {
+		return err
+	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM relations WHERE src_id = ? AND dst_id = ? AND type = ?`, srcID, dstID, relType)
 	if err != nil {
 		return fmt.Errorf("delete relation: %w", err)
@@ -774,6 +839,69 @@ func (s *Store) Export(ctx context.Context) (model.Export, error) {
 		return model.Export{}, err
 	}
 	return model.Export{Version: 1, WorkspaceID: s.workspaceID, WorkspaceRevision: workspaceRevision, ExportedAt: time.Now().UTC(), Issues: issues, Relations: rels, Comments: comments, Labels: labels, History: history}, nil
+}
+
+func (s *Store) Doctor(ctx context.Context) (HealthReport, error) {
+	report := HealthReport{
+		Errors:   []string{},
+		Warnings: []string{},
+	}
+	if err := s.db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&report.IntegrityCheck); err != nil {
+		return report, fmt.Errorf("integrity check: %w", err)
+	}
+	if strings.ToLower(strings.TrimSpace(report.IntegrityCheck)) != "ok" {
+		report.Errors = append(report.Errors, report.IntegrityCheck)
+	}
+	rows, err := s.db.QueryContext(ctx, `PRAGMA foreign_key_check`)
+	if err != nil {
+		return report, fmt.Errorf("foreign_key_check: %w", err)
+	}
+	for rows.Next() {
+		report.ForeignKeyIssues++
+	}
+	_ = rows.Close()
+	if report.ForeignKeyIssues > 0 {
+		report.Errors = append(report.Errors, fmt.Sprintf("foreign key violations: %d", report.ForeignKeyIssues))
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM relations WHERE type='related-to' AND src_id >= dst_id`).Scan(&report.InvalidRelatedRows); err != nil {
+		return report, fmt.Errorf("count invalid related rows: %w", err)
+	}
+	if report.InvalidRelatedRows > 0 {
+		report.Warnings = append(report.Warnings, fmt.Sprintf("invalid related-to ordering rows: %d", report.InvalidRelatedRows))
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_history h LEFT JOIN issues i ON i.id = h.issue_id WHERE i.id IS NULL`).Scan(&report.OrphanHistoryRows); err != nil {
+		return report, fmt.Errorf("count orphan history rows: %w", err)
+	}
+	if report.OrphanHistoryRows > 0 {
+		report.Warnings = append(report.Warnings, fmt.Sprintf("orphan issue history rows: %d", report.OrphanHistoryRows))
+	}
+	return report, nil
+}
+
+func (s *Store) Fsck(ctx context.Context, repair bool) (HealthReport, error) {
+	if repair {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return HealthReport{}, fmt.Errorf("begin fsck repair tx: %w", err)
+		}
+		defer tx.Rollback()
+		if _, err := tx.ExecContext(ctx, `DELETE FROM issue_history WHERE issue_id NOT IN (SELECT id FROM issues)`); err != nil {
+			return HealthReport{}, fmt.Errorf("repair orphan history: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM relations WHERE type='related-to' AND src_id = dst_id`); err != nil {
+			return HealthReport{}, fmt.Errorf("repair self related rows: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE relations SET src_id = dst_id, dst_id = src_id WHERE type='related-to' AND src_id > dst_id`); err != nil {
+			return HealthReport{}, fmt.Errorf("repair related ordering: %w", err)
+		}
+		if _, err := s.bumpWorkspaceRevisionTx(ctx, tx); err != nil {
+			return HealthReport{}, err
+		}
+		if err := tx.Commit(); err != nil {
+			return HealthReport{}, fmt.Errorf("commit fsck repair: %w", err)
+		}
+	}
+	return s.Doctor(ctx)
 }
 
 func (s *Store) ImportIssue(ctx context.Context, in ImportIssue) error {
@@ -980,6 +1108,9 @@ func (s *Store) AddLabel(ctx context.Context, in AddLabelInput) ([]string, error
 		return nil, fmt.Errorf("begin add label tx: %w", err)
 	}
 	defer tx.Rollback()
+	if err := s.ensureExpectedRevisionTx(ctx, tx, in.ExpectedRevision); err != nil {
+		return nil, err
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO labels(issue_id, label, created_at, created_by)
 	VALUES (?, ?, ?, ?)
 	ON CONFLICT(issue_id, label) DO NOTHING`, in.IssueID, label, time.Now().UTC().Format(time.RFC3339Nano), createdBy)
@@ -995,7 +1126,7 @@ func (s *Store) AddLabel(ctx context.Context, in AddLabelInput) ([]string, error
 	return s.ListLabels(ctx, in.IssueID)
 }
 
-func (s *Store) RemoveLabel(ctx context.Context, issueID, labelName string) ([]string, error) {
+func (s *Store) RemoveLabel(ctx context.Context, issueID, labelName string, expectedRevision *int64) ([]string, error) {
 	if _, err := s.GetIssue(ctx, issueID); err != nil {
 		return nil, err
 	}
@@ -1008,6 +1139,9 @@ func (s *Store) RemoveLabel(ctx context.Context, issueID, labelName string) ([]s
 		return nil, fmt.Errorf("begin remove label tx: %w", err)
 	}
 	defer tx.Rollback()
+	if err := s.ensureExpectedRevisionTx(ctx, tx, expectedRevision); err != nil {
+		return nil, err
+	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM labels WHERE issue_id = ? AND label = ?`, issueID, label)
 	if err != nil {
 		return nil, fmt.Errorf("delete label: %w", err)
@@ -1025,7 +1159,7 @@ func (s *Store) RemoveLabel(ctx context.Context, issueID, labelName string) ([]s
 	return s.ListLabels(ctx, issueID)
 }
 
-func (s *Store) ReplaceLabels(ctx context.Context, issueID string, labels []string, createdBy string) error {
+func (s *Store) ReplaceLabels(ctx context.Context, issueID string, labels []string, createdBy string, expectedRevision *int64) error {
 	if _, err := s.GetIssue(ctx, issueID); err != nil {
 		return err
 	}
@@ -1038,6 +1172,9 @@ func (s *Store) ReplaceLabels(ctx context.Context, issueID string, labels []stri
 		return fmt.Errorf("begin replace labels tx: %w", err)
 	}
 	defer tx.Rollback()
+	if err := s.ensureExpectedRevisionTx(ctx, tx, expectedRevision); err != nil {
+		return err
+	}
 	if err := s.replaceLabelsTx(ctx, tx, issueID, normalized, createdBy); err != nil {
 		return err
 	}
@@ -1096,11 +1233,24 @@ func (s *Store) TransitionIssue(ctx context.Context, in TransitionIssueInput) (m
 			return model.Issue{}, errors.New("issue is already archived")
 		}
 		issue.ArchivedAt = &now
+	case "unarchive":
+		if issue.DeletedAt != nil {
+			return model.Issue{}, errors.New("cannot unarchive deleted issue")
+		}
+		if issue.ArchivedAt == nil {
+			return model.Issue{}, errors.New("issue is not archived")
+		}
+		issue.ArchivedAt = nil
 	case "delete":
 		if issue.DeletedAt != nil {
 			return model.Issue{}, errors.New("issue is already deleted")
 		}
 		issue.DeletedAt = &now
+	case "restore":
+		if issue.DeletedAt == nil {
+			return model.Issue{}, errors.New("issue is not deleted")
+		}
+		issue.DeletedAt = nil
 	default:
 		return model.Issue{}, fmt.Errorf("unsupported lifecycle action %q", action)
 	}
@@ -1110,6 +1260,9 @@ func (s *Store) TransitionIssue(ctx context.Context, in TransitionIssueInput) (m
 		return model.Issue{}, fmt.Errorf("begin transition issue tx: %w", err)
 	}
 	defer tx.Rollback()
+	if err := s.ensureExpectedRevisionTx(ctx, tx, in.ExpectedRevision); err != nil {
+		return model.Issue{}, err
+	}
 	if _, err := tx.ExecContext(ctx, `UPDATE issues SET status = ?, updated_at = ?, closed_at = ?, archived_at = ?, deleted_at = ? WHERE id = ?`,
 		issue.Status, issue.UpdatedAt.Format(time.RFC3339Nano), nullableTime(issue.ClosedAt), nullableTime(issue.ArchivedAt), nullableTime(issue.DeletedAt), issue.ID); err != nil {
 		return model.Issue{}, fmt.Errorf("update issue lifecycle: %w", err)
@@ -1124,6 +1277,129 @@ func (s *Store) TransitionIssue(ctx context.Context, in TransitionIssueInput) (m
 		return model.Issue{}, fmt.Errorf("commit transition issue: %w", err)
 	}
 	return issue, nil
+}
+
+func (s *Store) ListRelationsForIssue(ctx context.Context, issueID string, relType string) ([]model.Relation, error) {
+	if _, err := s.GetIssue(ctx, issueID); err != nil {
+		return nil, err
+	}
+	rels, err := s.listRelations(ctx, issueID)
+	if err != nil {
+		return nil, err
+	}
+	normalizedType := strings.TrimSpace(relType)
+	if normalizedType == "" {
+		return rels, nil
+	}
+	out := make([]model.Relation, 0, len(rels))
+	for _, rel := range rels {
+		if rel.Type == normalizedType {
+			out = append(out, rel)
+		}
+	}
+	return out, nil
+}
+
+func (s *Store) SetParent(ctx context.Context, in SetParentInput) (model.Relation, error) {
+	if strings.TrimSpace(in.ChildID) == "" || strings.TrimSpace(in.ParentID) == "" {
+		return model.Relation{}, errors.New("child and parent ids are required")
+	}
+	if in.ChildID == in.ParentID {
+		return model.Relation{}, errors.New("child and parent cannot be the same issue")
+	}
+	if _, err := s.GetIssue(ctx, in.ChildID); err != nil {
+		return model.Relation{}, err
+	}
+	if _, err := s.GetIssue(ctx, in.ParentID); err != nil {
+		return model.Relation{}, err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Relation{}, fmt.Errorf("begin set parent tx: %w", err)
+	}
+	defer tx.Rollback()
+	if err := s.ensureExpectedRevisionTx(ctx, tx, in.ExpectedRevision); err != nil {
+		return model.Relation{}, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM relations WHERE src_id = ? AND type = 'parent-child'`, in.ChildID); err != nil {
+		return model.Relation{}, fmt.Errorf("clear parent relation: %w", err)
+	}
+	rel := model.Relation{
+		SrcID:     in.ChildID,
+		DstID:     in.ParentID,
+		Type:      "parent-child",
+		CreatedAt: time.Now().UTC(),
+		CreatedBy: strings.TrimSpace(in.CreatedBy),
+	}
+	if rel.CreatedBy == "" {
+		rel.CreatedBy = "unknown"
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO relations(src_id, dst_id, type, created_at, created_by) VALUES (?, ?, 'parent-child', ?, ?)`, rel.SrcID, rel.DstID, rel.CreatedAt.Format(time.RFC3339Nano), rel.CreatedBy); err != nil {
+		return model.Relation{}, fmt.Errorf("insert parent relation: %w", err)
+	}
+	if _, err := s.bumpWorkspaceRevisionTx(ctx, tx); err != nil {
+		return model.Relation{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Relation{}, fmt.Errorf("commit set parent: %w", err)
+	}
+	return rel, nil
+}
+
+func (s *Store) ClearParent(ctx context.Context, childID string, expectedRevision *int64) error {
+	if _, err := s.GetIssue(ctx, childID); err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin clear parent tx: %w", err)
+	}
+	defer tx.Rollback()
+	if err := s.ensureExpectedRevisionTx(ctx, tx, expectedRevision); err != nil {
+		return err
+	}
+	res, err := tx.ExecContext(ctx, `DELETE FROM relations WHERE src_id = ? AND type = 'parent-child'`, childID)
+	if err != nil {
+		return fmt.Errorf("delete parent relation: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return NotFoundError{Entity: "parent relation", ID: childID}
+	}
+	if _, err := s.bumpWorkspaceRevisionTx(ctx, tx); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit clear parent: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ListChildren(ctx context.Context, parentID string) ([]model.Issue, error) {
+	if _, err := s.GetIssue(ctx, parentID); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT i.id, i.title, i.description, i.status, i.priority, i.issue_type, i.assignee, i.created_at, i.updated_at, i.closed_at, i.archived_at, i.deleted_at
+		FROM relations r
+		JOIN issues i ON i.id = r.src_id
+		WHERE r.type = 'parent-child' AND r.dst_id = ?
+		ORDER BY i.updated_at DESC`, parentID)
+	if err != nil {
+		return nil, fmt.Errorf("list children: %w", err)
+	}
+	defer rows.Close()
+	children := []model.Issue{}
+	for rows.Next() {
+		issue, err := scanIssue(rows)
+		if err != nil {
+			return nil, err
+		}
+		children = append(children, issue)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return s.attachLabels(ctx, children)
 }
 
 func (s *Store) ListLabels(ctx context.Context, issueID string) ([]string, error) {
@@ -1283,6 +1559,51 @@ func (s *Store) setMeta(ctx context.Context, tx *sql.Tx, key, value string) erro
 		return fmt.Errorf("set meta %q: %w", key, err)
 	}
 	return nil
+}
+
+func (s *Store) ensureExpectedRevisionTx(ctx context.Context, tx *sql.Tx, expected *int64) error {
+	if expected == nil {
+		return nil
+	}
+	current, err := s.getWorkspaceRevision(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if current != *expected {
+		return StaleRevisionError{Expected: *expected, Actual: current}
+	}
+	return nil
+}
+
+func buildIssueOrderClause(specs []SortSpec) (string, error) {
+	if len(specs) == 0 {
+		return "status ASC, priority ASC, updated_at DESC, id ASC", nil
+	}
+	allowed := map[string]string{
+		"id":         "id",
+		"title":      "title",
+		"status":     "status",
+		"priority":   "priority",
+		"type":       "issue_type",
+		"assignee":   "assignee",
+		"created_at": "created_at",
+		"updated_at": "updated_at",
+	}
+	order := make([]string, 0, len(specs))
+	for _, spec := range specs {
+		field := strings.ToLower(strings.TrimSpace(spec.Field))
+		column, ok := allowed[field]
+		if !ok {
+			return "", fmt.Errorf("unsupported sort field %q", spec.Field)
+		}
+		direction := "ASC"
+		if spec.Desc {
+			direction = "DESC"
+		}
+		order = append(order, column+" "+direction)
+	}
+	order = append(order, "id ASC")
+	return strings.Join(order, ", "), nil
 }
 
 func (s *Store) listAllLabels(ctx context.Context) ([]model.Label, error) {

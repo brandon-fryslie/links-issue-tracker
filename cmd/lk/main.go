@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 
@@ -10,7 +11,17 @@ import (
 
 func main() {
 	if err := cli.Run(context.Background(), os.Stdout, os.Stderr, os.Args[1:]); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
+		exitCode := cli.ExitCode(err)
+		if os.Getenv("LK_ERROR_JSON") == "1" {
+			_ = json.NewEncoder(os.Stderr).Encode(map[string]any{
+				"error": map[string]any{
+					"message":   err.Error(),
+					"exit_code": exitCode,
+				},
+			})
+		} else {
+			fmt.Fprintf(os.Stderr, "error (code=%d): %v\n", exitCode, err)
+		}
+		os.Exit(exitCode)
 	}
 }

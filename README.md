@@ -33,23 +33,38 @@ All worktrees in the same clone therefore share one stable, current view of work
 ## Commands
 
 ```txt
-lk new --title <title> [--description <text>] [--type task|feature|bug|chore|epic] [--priority 0-4] [--assignee <user>] [--labels a,b] [--json]
-lk ls [--status open|closed] [--type <type>] [--assignee <user>] [--priority-min N] [--priority-max N] [--search <text>] [--ids a,b] [--labels a,b] [--has-comments] [--include-archived] [--include-deleted] [--updated-after RFC3339] [--updated-before RFC3339] [--query <expr>] [--limit N] [--json]
+lk new --title <title> [--description <text>] [--type task|feature|bug|chore|epic] [--priority 0-4] [--assignee <user>] [--labels a,b] [--expected-revision N] [--json]
+lk ls [--status open|closed] [--type <type>] [--assignee <user>] [--priority-min N] [--priority-max N] [--search <text>] [--ids a,b] [--labels a,b] [--has-comments] [--include-archived] [--include-deleted] [--updated-after RFC3339] [--updated-before RFC3339] [--query <expr>] [--sort field:asc|desc,...] [--columns id,state,title,...] [--format lines|table] [--limit N] [--json]
 lk show <id> [--json]
-lk edit <id> [--title ...] [--description ...] [--type ...] [--priority ...] [--assignee ...|--clear-assignee] [--labels a,b|--clear-labels] [--json]
-lk close <id> --reason <text> [--by <user>] [--json]
-lk open <id> --reason <text> [--by <user>] [--json]
-lk archive <id> --reason <text> [--by <user>] [--json]
-lk delete <id> --reason <text> [--by <user>] [--json]
-lk comment add <id> --body <text> [--by <user>] [--json]
-lk label add <issue-id> <label> [--by <user>] [--json]
-lk label rm <issue-id> <label> [--json]
-lk dep add <src-id> <dst-id> [--type blocks|parent-child|related-to] [--by <user>] [--json]
-lk dep rm <src-id> <dst-id> [--type blocks|parent-child|related-to]
-lk export
+lk edit <id> [--title ...] [--description ...] [--type ...] [--priority ...] [--assignee ...|--clear-assignee] [--labels a,b|--clear-labels] [--expected-revision N] [--json]
+lk close <id> --reason <text> [--by <user>] [--expected-revision N] [--json]
+lk open <id> --reason <text> [--by <user>] [--expected-revision N] [--json]
+lk archive <id> --reason <text> [--by <user>] [--expected-revision N] [--json]
+lk delete <id> --reason <text> [--by <user>] [--expected-revision N] [--json]
+lk unarchive <id> --reason <text> [--by <user>] [--expected-revision N] [--json]
+lk restore <id> --reason <text> [--by <user>] [--expected-revision N] [--json]
+lk comment add <id> --body <text> [--by <user>] [--expected-revision N] [--json]
+lk label add <issue-id> <label> [--by <user>] [--expected-revision N] [--json]
+lk label rm <issue-id> <label> [--expected-revision N] [--json]
+lk parent set <child-id> <parent-id> [--by <user>] [--expected-revision N] [--json]
+lk parent clear <child-id> [--expected-revision N] [--json]
+lk children <parent-id> [--json]
+lk dep add <src-id> <dst-id> [--type blocks|parent-child|related-to] [--by <user>] [--expected-revision N] [--json]
+lk dep rm <src-id> <dst-id> [--type blocks|parent-child|related-to] [--expected-revision N] [--json]
+lk dep ls <issue-id> [--type blocks|parent-child|related-to] [--json]
+lk export [--json]
 lk sync export [--path <path>] [--force] [--json]
-lk sync import [--path <path>] [--force] [--json]
+lk sync import [--path <path>] [--resolve fail|local|remote] [--force] [--json]
 lk sync status [--path <path>] [--json]
+lk doctor [--json]
+lk fsck [--repair] [--json]
+lk backup create [--keep N] [--json]
+lk backup list [--json]
+lk backup restore (--path <snapshot.json> | --latest) [--force] [--json]
+lk recover (--from-sync <path> | --from-backup <path> | --latest-backup) [--force] [--json]
+lk bulk label <add|rm> --ids a,b --label <name> [--by <user>] [--expected-revision N] [--json]
+lk bulk <close|archive> --ids a,b --reason <text> [--by <user>] [--expected-revision N] [--json]
+lk bulk import --path <export.json> [--force] [--json]
 lk beads import --db <path> [--json]
 lk beads export --db <path> [--json]
 lk workspace [--json]
@@ -85,10 +100,33 @@ lk workspace [--json]
 
 - `// [LAW:single-enforcer]` The store owns one canonical `workspace_revision` and bumps it on every successful mutation.
 - `lk workspace --json` exposes the current `workspace_revision` so agents can detect stale views before writing.
+- Mutating commands support `--expected-revision N`; stale writes fail with a dedicated exit code.
 - `lk sync export` writes an atomic snapshot to `links/export.json` by default.
 - `lk sync export` refuses to overwrite a sync file that changed outside `links` unless `--force` is used.
+- `lk sync import` performs a 3-way merge (`base`, `local`, `remote`) and reports per-issue conflicts.
+- `lk sync import` conflict strategy is explicit: `--resolve fail|local|remote`.
 - `lk sync import` refuses to replace local state if the workspace has unsynced local changes since the last recorded sync unless `--force` is used.
 - The export snapshot includes `workspace_revision`, so sync state can be correlated deterministically.
+
+## Health and recovery
+
+- `lk doctor` runs non-mutating checks (`integrity_check`, FK issues, relation invariants, orphan history rows).
+- `lk fsck --repair` applies safe repairs for known integrity faults.
+- `lk backup create/list/restore` manages rotating JSON snapshots.
+- `lk recover` restores from a sync export or backup snapshot.
+
+## Exit codes
+
+`lk` exits with stable machine-friendly codes:
+
+- `0`: success
+- `1`: generic failure
+- `2`: usage error
+- `3`: validation error
+- `4`: not found
+- `5`: conflict
+- `6`: stale revision
+- `7`: corruption/integrity failure
 
 ## Lifecycle history
 

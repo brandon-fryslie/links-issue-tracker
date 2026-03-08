@@ -175,7 +175,7 @@ func TestStoreLabelsAreWritableFirstClassData(t *testing.T) {
 		t.Fatalf("updated.Labels = %#v", updated.Labels)
 	}
 
-	labels, err = st.RemoveLabel(ctx, issue.ID, "critical")
+	labels, err = st.RemoveLabel(ctx, issue.ID, "critical", nil)
 	if err != nil {
 		t.Fatalf("RemoveLabel() error = %v", err)
 	}

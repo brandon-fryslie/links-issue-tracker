@@ -15,7 +15,9 @@ import (
 	"time"
 
 	"github.com/bmf/links-issue-tracker/internal/app"
+	"github.com/bmf/links-issue-tracker/internal/backup"
 	"github.com/bmf/links-issue-tracker/internal/beads"
+	"github.com/bmf/links-issue-tracker/internal/merge"
 	"github.com/bmf/links-issue-tracker/internal/model"
 	"github.com/bmf/links-issue-tracker/internal/query"
 	"github.com/bmf/links-issue-tracker/internal/store"
@@ -61,10 +63,18 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 		return runTransition(ctx, stdout, ap, args[1:], "archive")
 	case "delete":
 		return runTransition(ctx, stdout, ap, args[1:], "delete")
+	case "unarchive":
+		return runTransition(ctx, stdout, ap, args[1:], "unarchive")
+	case "restore":
+		return runTransition(ctx, stdout, ap, args[1:], "restore")
 	case "comment":
 		return runComment(ctx, stdout, ap, args[1:])
 	case "label":
 		return runLabel(ctx, stdout, ap, args[1:])
+	case "parent":
+		return runParent(ctx, stdout, ap, args[1:])
+	case "children":
+		return runChildren(ctx, stdout, ap, args[1:])
 	case "dep":
 		return runDep(ctx, stdout, ap, args[1:])
 	case "export":
@@ -75,6 +85,16 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 		return runWorkspace(stdout, ap, args[1:])
 	case "sync":
 		return runSync(ctx, stdout, ap, args[1:])
+	case "doctor":
+		return runDoctor(ctx, stdout, ap, args[1:])
+	case "fsck":
+		return runFsck(ctx, stdout, ap, args[1:])
+	case "backup":
+		return runBackup(ctx, stdout, ap, args[1:])
+	case "recover":
+		return runRecover(ctx, stdout, ap, args[1:])
+	case "bulk":
+		return runBulk(ctx, stdout, ap, args[1:])
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -89,12 +109,13 @@ func runNew(ctx context.Context, stdout io.Writer, ap *app.App, args []string) e
 	priority := fs.Int("priority", 2, "Priority 0..4 (lower is more important)")
 	assignee := fs.String("assignee", "", "Assignee")
 	labels := fs.String("labels", "", "Comma-separated labels")
+	expectedRevision := fs.Int64("expected-revision", -1, "Expected workspace revision for optimistic concurrency")
 	jsonOut := fs.Bool("json", false, "Output JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	issue, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
-		Title: *title, Description: *description, IssueType: *issueType, Priority: *priority, Assignee: *assignee, Labels: splitCSV(*labels),
+		Title: *title, Description: *description, IssueType: *issueType, Priority: *priority, Assignee: *assignee, Labels: splitCSV(*labels), ExpectedRevision: optionalExpectedRevision(fs, expectedRevision),
 	})
 	if err != nil {
 		return err
@@ -119,6 +140,9 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	updatedAfter := fs.String("updated-after", "", "Only include issues updated at or after RFC3339 timestamp")
 	updatedBefore := fs.String("updated-before", "", "Only include issues updated at or before RFC3339 timestamp")
 	queryExpr := fs.String("query", "", "Query language: status:open type:task priority<=2 has:comments text")
+	sortExpr := fs.String("sort", "", "Sort fields, e.g. priority:asc,updated_at:desc")
+	columnsExpr := fs.String("columns", "", "Comma-separated output columns")
+	format := fs.String("format", "lines", "Output format: lines|table")
 	limit := fs.Int("limit", 0, "Limit results")
 	jsonOut := fs.Bool("json", false, "Output JSON")
 	if err := fs.Parse(args); err != nil {
@@ -133,6 +157,13 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 		IncludeArchived: *includeArchived,
 		IncludeDeleted:  *includeDeleted,
 		Limit:           *limit,
+	}
+	if strings.TrimSpace(*sortExpr) != "" {
+		sortSpecs, err := parseSortSpecs(*sortExpr)
+		if err != nil {
+			return err
+		}
+		filter.SortBy = sortSpecs
 	}
 	if visited["priority-min"] {
 		value := *priorityMin
@@ -186,7 +217,15 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	if *jsonOut {
 		return writeJSON(stdout, issues)
 	}
-	return printIssueTable(stdout, issues)
+	columns := parseColumns(*columnsExpr)
+	switch strings.ToLower(strings.TrimSpace(*format)) {
+	case "", "lines":
+		return printIssueLines(stdout, issues, columns)
+	case "table":
+		return printIssueTable(stdout, issues, columns)
+	default:
+		return fmt.Errorf("unsupported --format %q", *format)
+	}
 }
 
 func runShow(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
@@ -228,6 +267,7 @@ func runEdit(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	labels := fs.String("labels", "", "Replace labels with a comma-separated set")
 	clearAssignee := fs.Bool("clear-assignee", false, "Clear assignee")
 	clearLabels := fs.Bool("clear-labels", false, "Remove all labels")
+	expectedRevision := fs.Int64("expected-revision", -1, "Expected workspace revision for optimistic concurrency")
 	jsonOut := fs.Bool("json", false, "Output JSON")
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
@@ -263,6 +303,7 @@ func runEdit(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 		parsed := splitCSV(*labels)
 		in.Labels = &parsed
 	}
+	in.ExpectedRevision = optionalExpectedRevision(fs, expectedRevision)
 	issue, err := ap.Store.UpdateIssue(ctx, positional[0], in)
 	if err != nil {
 		return err
@@ -279,6 +320,7 @@ func runTransition(ctx context.Context, stdout io.Writer, ap *app.App, args []st
 	fs.SetOutput(io.Discard)
 	reason := fs.String("reason", "", "Lifecycle transition reason")
 	by := fs.String("by", os.Getenv("USER"), "Lifecycle actor")
+	expectedRevision := fs.Int64("expected-revision", -1, "Expected workspace revision for optimistic concurrency")
 	jsonOut := fs.Bool("json", false, "Output JSON")
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
@@ -287,10 +329,11 @@ func runTransition(ctx context.Context, stdout io.Writer, ap *app.App, args []st
 		return fmt.Errorf("usage: lk %s <id> --reason <text>", transitionCommandName(action))
 	}
 	issue, err := ap.Store.TransitionIssue(ctx, store.TransitionIssueInput{
-		IssueID:   positional[0],
-		Action:    action,
-		Reason:    *reason,
-		CreatedBy: *by,
+		IssueID:          positional[0],
+		Action:           action,
+		Reason:           *reason,
+		CreatedBy:        *by,
+		ExpectedRevision: optionalExpectedRevision(fs, expectedRevision),
 	})
 	if err != nil {
 		return err
@@ -310,6 +353,7 @@ func runComment(ctx context.Context, stdout io.Writer, ap *app.App, args []strin
 	fs.SetOutput(io.Discard)
 	body := fs.String("body", "", "Comment body")
 	by := fs.String("by", os.Getenv("USER"), "Comment author")
+	expectedRevision := fs.Int64("expected-revision", -1, "Expected workspace revision for optimistic concurrency")
 	jsonOut := fs.Bool("json", false, "Output JSON")
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
@@ -317,7 +361,7 @@ func runComment(ctx context.Context, stdout io.Writer, ap *app.App, args []strin
 	if fs.NArg() != 0 {
 		return errors.New("usage: lk comment add <id> --body <text>")
 	}
-	comment, err := ap.Store.AddComment(ctx, store.AddCommentInput{IssueID: positional[0], Body: *body, CreatedBy: *by})
+	comment, err := ap.Store.AddComment(ctx, store.AddCommentInput{IssueID: positional[0], Body: *body, CreatedBy: *by, ExpectedRevision: optionalExpectedRevision(fs, expectedRevision)})
 	if err != nil {
 		return err
 	}
@@ -342,6 +386,7 @@ func runDep(ctx context.Context, stdout io.Writer, ap *app.App, args []string) e
 		fs.SetOutput(io.Discard)
 		relType := fs.String("type", "blocks", "Relation type: blocks|parent-child|related-to")
 		by := fs.String("by", os.Getenv("USER"), "Relation creator")
+		expectedRevision := fs.Int64("expected-revision", -1, "Expected workspace revision for optimistic concurrency")
 		jsonOut := fs.Bool("json", false, "Output JSON")
 		if err := fs.Parse(flagArgs); err != nil {
 			return err
@@ -349,7 +394,7 @@ func runDep(ctx context.Context, stdout io.Writer, ap *app.App, args []string) e
 		if fs.NArg() != 0 {
 			return errors.New("usage: lk dep add <src-id> <dst-id> [--type blocks|parent-child|related-to]")
 		}
-		rel, err := ap.Store.AddRelation(ctx, store.AddRelationInput{SrcID: positional[0], DstID: positional[1], Type: *relType, CreatedBy: *by})
+		rel, err := ap.Store.AddRelation(ctx, store.AddRelationInput{SrcID: positional[0], DstID: positional[1], Type: *relType, CreatedBy: *by, ExpectedRevision: optionalExpectedRevision(fs, expectedRevision)})
 		if err != nil {
 			return err
 		}
@@ -366,19 +411,51 @@ func runDep(ctx context.Context, stdout io.Writer, ap *app.App, args []string) e
 		fs := flag.NewFlagSet("dep rm", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		relType := fs.String("type", "blocks", "Relation type: blocks|parent-child|related-to")
+		expectedRevision := fs.Int64("expected-revision", -1, "Expected workspace revision for optimistic concurrency")
+		jsonOut := fs.Bool("json", false, "Output JSON")
 		if err := fs.Parse(flagArgs); err != nil {
 			return err
 		}
 		if fs.NArg() != 0 {
 			return errors.New("usage: lk dep rm <src-id> <dst-id> [--type ...]")
 		}
-		if err := ap.Store.RemoveRelation(ctx, positional[0], positional[1], *relType); err != nil {
+		if err := ap.Store.RemoveRelation(ctx, positional[0], positional[1], *relType, optionalExpectedRevision(fs, expectedRevision)); err != nil {
 			return err
 		}
-		_, err := fmt.Fprintln(stdout, "ok")
-		return err
+		return printValue(stdout, map[string]string{"status": "ok"}, *jsonOut, func(w io.Writer, _ any) error {
+			_, err := fmt.Fprintln(w, "ok")
+			return err
+		})
+	case "ls":
+		positional, flagArgs := splitArgs(args[1:], 1)
+		if len(positional) != 1 {
+			return errors.New("usage: lk dep ls <issue-id> [--type blocks|parent-child|related-to] [--json]")
+		}
+		fs := flag.NewFlagSet("dep ls", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		relType := fs.String("type", "", "Filter relation type")
+		jsonOut := fs.Bool("json", false, "Output JSON")
+		if err := fs.Parse(flagArgs); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return errors.New("usage: lk dep ls <issue-id> [--type blocks|parent-child|related-to] [--json]")
+		}
+		relations, err := ap.Store.ListRelationsForIssue(ctx, positional[0], *relType)
+		if err != nil {
+			return err
+		}
+		return printValue(stdout, relations, *jsonOut, func(w io.Writer, v any) error {
+			list := v.([]model.Relation)
+			for _, rel := range list {
+				if _, err := fmt.Fprintf(w, "%s --%s--> %s\n", rel.SrcID, rel.Type, rel.DstID); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
 	default:
-		return errors.New("usage: lk dep <add|rm> ...")
+		return errors.New("usage: lk dep <add|rm|ls> ...")
 	}
 }
 
@@ -395,6 +472,7 @@ func runLabel(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 		fs := flag.NewFlagSet("label add", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		by := fs.String("by", os.Getenv("USER"), "Label author")
+		expectedRevision := fs.Int64("expected-revision", -1, "Expected workspace revision for optimistic concurrency")
 		jsonOut := fs.Bool("json", false, "Output JSON")
 		if err := fs.Parse(flagArgs); err != nil {
 			return err
@@ -402,7 +480,7 @@ func runLabel(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 		if fs.NArg() != 0 {
 			return errors.New("usage: lk label add <issue-id> <label> [--by <user>] [--json]")
 		}
-		labels, err := ap.Store.AddLabel(ctx, store.AddLabelInput{IssueID: positional[0], Name: positional[1], CreatedBy: *by})
+		labels, err := ap.Store.AddLabel(ctx, store.AddLabelInput{IssueID: positional[0], Name: positional[1], CreatedBy: *by, ExpectedRevision: optionalExpectedRevision(fs, expectedRevision)})
 		if err != nil {
 			return err
 		}
@@ -414,6 +492,7 @@ func runLabel(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 		}
 		fs := flag.NewFlagSet("label rm", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
+		expectedRevision := fs.Int64("expected-revision", -1, "Expected workspace revision for optimistic concurrency")
 		jsonOut := fs.Bool("json", false, "Output JSON")
 		if err := fs.Parse(flagArgs); err != nil {
 			return err
@@ -421,7 +500,7 @@ func runLabel(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 		if fs.NArg() != 0 {
 			return errors.New("usage: lk label rm <issue-id> <label> [--json]")
 		}
-		labels, err := ap.Store.RemoveLabel(ctx, positional[0], positional[1])
+		labels, err := ap.Store.RemoveLabel(ctx, positional[0], positional[1], optionalExpectedRevision(fs, expectedRevision))
 		if err != nil {
 			return err
 		}
@@ -431,9 +510,87 @@ func runLabel(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 	}
 }
 
+func runParent(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: lk parent <set|clear> ...")
+	}
+	switch args[0] {
+	case "set":
+		positional, flagArgs := splitArgs(args[1:], 2)
+		if len(positional) != 2 {
+			return errors.New("usage: lk parent set <child-id> <parent-id> [--by <user>] [--expected-revision N] [--json]")
+		}
+		fs := flag.NewFlagSet("parent set", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		by := fs.String("by", os.Getenv("USER"), "Relation creator")
+		expectedRevision := fs.Int64("expected-revision", -1, "Expected workspace revision for optimistic concurrency")
+		jsonOut := fs.Bool("json", false, "Output JSON")
+		if err := fs.Parse(flagArgs); err != nil {
+			return err
+		}
+		rel, err := ap.Store.SetParent(ctx, store.SetParentInput{
+			ChildID:          positional[0],
+			ParentID:         positional[1],
+			CreatedBy:        *by,
+			ExpectedRevision: optionalExpectedRevision(fs, expectedRevision),
+		})
+		if err != nil {
+			return err
+		}
+		return printValue(stdout, rel, *jsonOut, func(w io.Writer, v any) error {
+			relation := v.(model.Relation)
+			_, err := fmt.Fprintf(w, "%s --parent-child--> %s\n", relation.SrcID, relation.DstID)
+			return err
+		})
+	case "clear":
+		positional, flagArgs := splitArgs(args[1:], 1)
+		if len(positional) != 1 {
+			return errors.New("usage: lk parent clear <child-id> [--expected-revision N] [--json]")
+		}
+		fs := flag.NewFlagSet("parent clear", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		expectedRevision := fs.Int64("expected-revision", -1, "Expected workspace revision for optimistic concurrency")
+		jsonOut := fs.Bool("json", false, "Output JSON")
+		if err := fs.Parse(flagArgs); err != nil {
+			return err
+		}
+		if err := ap.Store.ClearParent(ctx, positional[0], optionalExpectedRevision(fs, expectedRevision)); err != nil {
+			return err
+		}
+		return printValue(stdout, map[string]string{"status": "ok"}, *jsonOut, func(w io.Writer, _ any) error {
+			_, err := fmt.Fprintln(w, "ok")
+			return err
+		})
+	default:
+		return errors.New("usage: lk parent <set|clear> ...")
+	}
+}
+
+func runChildren(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
+	positional, flagArgs := splitArgs(args, 1)
+	if len(positional) != 1 {
+		return errors.New("usage: lk children <parent-id> [--json]")
+	}
+	fs := flag.NewFlagSet("children", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	jsonOut := fs.Bool("json", false, "Output JSON")
+	if err := fs.Parse(flagArgs); err != nil {
+		return err
+	}
+	children, err := ap.Store.ListChildren(ctx, positional[0])
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return writeJSON(stdout, children)
+	}
+	return printIssueLines(stdout, children, []string{"id", "state", "title"})
+}
+
 func runExport(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	jsonOut := fs.Bool("json", true, "Output JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -441,7 +598,9 @@ func runExport(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 	if err != nil {
 		return err
 	}
-	return writeJSON(stdout, export)
+	return printValue(stdout, export, *jsonOut, func(w io.Writer, _ any) error {
+		return writeJSON(w, export)
+	})
 }
 
 func runBeads(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
@@ -495,7 +654,12 @@ func runBeads(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 }
 
 func runWorkspace(stdout io.Writer, ap *app.App, args []string) error {
-	jsonOut := len(args) > 0 && args[0] == "--json"
+	fs := flag.NewFlagSet("workspace", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	jsonOut := fs.Bool("json", false, "Output JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
 	payload := map[string]string{
 		"workspace_id":   ap.Workspace.WorkspaceID,
 		"git_common_dir": ap.Workspace.GitCommonDir,
@@ -505,7 +669,7 @@ func runWorkspace(stdout io.Writer, ap *app.App, args []string) error {
 	if revision, err := ap.Store.GetWorkspaceRevision(context.Background()); err == nil {
 		payload["workspace_revision"] = strconv.FormatInt(revision, 10)
 	}
-	if jsonOut {
+	if *jsonOut {
 		return writeJSON(stdout, payload)
 	}
 	for _, key := range []string{"workspace_id", "workspace_revision", "git_common_dir", "storage_dir", "database_path"} {
@@ -530,6 +694,16 @@ func runSync(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
+		export, err := ap.Store.Export(ctx)
+		if err != nil {
+			return err
+		}
+		if _, err := backup.Create(ap.Workspace.StorageDir, export); err != nil {
+			return err
+		}
+		if err := backup.Prune(ap.Workspace.StorageDir, 20); err != nil {
+			return err
+		}
 		state, err := ap.Store.GetSyncState(ctx)
 		if err != nil {
 			return err
@@ -539,14 +713,13 @@ func runSync(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 			return err
 		}
 		if existingHash != "" && state.Path == filepath.Clean(*path) && state.ContentHash != "" && existingHash != state.ContentHash && !*force {
-			return fmt.Errorf("sync export conflict: %s changed outside links; rerun with --force to overwrite", filepath.Clean(*path))
-		}
-		export, err := ap.Store.Export(ctx)
-		if err != nil {
-			return err
+			return MergeConflictError{Message: fmt.Sprintf("sync export conflict: %s changed outside links", filepath.Clean(*path))}
 		}
 		contentHash, err := syncfile.WriteAtomic(*path, export)
 		if err != nil {
+			return err
+		}
+		if _, err := syncfile.WriteAtomic(syncBasePath(ap), export); err != nil {
 			return err
 		}
 		if err := ap.Store.RecordSyncState(ctx, store.SyncState{
@@ -571,10 +744,45 @@ func runSync(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 		fs.SetOutput(io.Discard)
 		path := fs.String("path", defaultSyncPath(ap), "Path to import snapshot file")
 		force := fs.Bool("force", false, "Import even if local workspace has unsynced changes")
+		resolve := fs.String("resolve", "fail", "Conflict strategy for 3-way merge: fail|local|remote")
 		jsonOut := fs.Bool("json", false, "Output JSON")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
+		remoteExport, contentHash, err := syncfile.Read(*path)
+		if err != nil {
+			return err
+		}
+		localExport, err := ap.Store.Export(ctx)
+		if err != nil {
+			return err
+		}
+		baseExport, _, err := syncfile.Read(syncBasePath(ap))
+		if err != nil {
+			baseExport = localExport
+		}
+		result := merge.ThreeWay(baseExport, localExport, remoteExport)
+		merged := result.Export
+		conflicts := result.Conflicts
+		if len(conflicts) > 0 {
+			switch strings.ToLower(strings.TrimSpace(*resolve)) {
+			case "remote":
+				merged = remoteExport
+			case "local":
+				merged = localExport
+			case "fail":
+				if !*force {
+					return MergeConflictError{
+						Message:   fmt.Sprintf("sync import merge conflicts: %d issue(s)", len(conflicts)),
+						Conflicts: conflicts,
+					}
+				}
+				merged = remoteExport
+			default:
+				return fmt.Errorf("unsupported --resolve strategy %q", *resolve)
+			}
+		}
+
 		state, err := ap.Store.GetSyncState(ctx)
 		if err != nil {
 			return err
@@ -584,30 +792,36 @@ func runSync(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 			return err
 		}
 		if state.WorkspaceRevision != 0 && currentRevision != state.WorkspaceRevision && !*force {
-			return fmt.Errorf("sync import conflict: local workspace revision %d has unsynced changes since last sync revision %d; rerun with --force to replace local state", currentRevision, state.WorkspaceRevision)
+			return MergeConflictError{Message: fmt.Sprintf("sync import conflict: local workspace revision %d has unsynced changes since last sync revision %d", currentRevision, state.WorkspaceRevision)}
 		}
-		export, contentHash, err := syncfile.Read(*path)
-		if err != nil {
+		if _, err := backup.Create(ap.Workspace.StorageDir, localExport); err != nil {
 			return err
 		}
-		if err := ap.Store.ReplaceFromExport(ctx, export); err != nil {
+		if err := backup.Prune(ap.Workspace.StorageDir, 20); err != nil {
+			return err
+		}
+		if err := ap.Store.ReplaceFromExport(ctx, merged); err != nil {
+			return err
+		}
+		if _, err := syncfile.WriteAtomic(syncBasePath(ap), merged); err != nil {
 			return err
 		}
 		if err := ap.Store.RecordSyncState(ctx, store.SyncState{
 			Path:              filepath.Clean(*path),
 			ContentHash:       contentHash,
-			WorkspaceRevision: export.WorkspaceRevision,
+			WorkspaceRevision: merged.WorkspaceRevision,
 		}); err != nil {
 			return err
 		}
 		payload := map[string]any{
 			"path":               filepath.Clean(*path),
 			"content_hash":       contentHash,
-			"workspace_revision": export.WorkspaceRevision,
+			"workspace_revision": merged.WorkspaceRevision,
+			"conflict_count":     len(conflicts),
 		}
 		return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
 			p := v.(map[string]any)
-			_, err := fmt.Fprintf(w, "imported %s revision=%v hash=%v\n", p["path"], p["workspace_revision"], p["content_hash"])
+			_, err := fmt.Fprintf(w, "imported %s revision=%v hash=%v conflicts=%v\n", p["path"], p["workspace_revision"], p["content_hash"], p["conflict_count"])
 			return err
 		})
 	case "status":
@@ -649,6 +863,325 @@ func runSync(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	}
 }
 
+func runDoctor(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
+	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	jsonOut := fs.Bool("json", false, "Output JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	report, err := ap.Store.Doctor(ctx)
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		if err := writeJSON(stdout, report); err != nil {
+			return err
+		}
+	} else {
+		if _, err := fmt.Fprintf(stdout, "integrity_check=%s foreign_key_issues=%d invalid_related_rows=%d orphan_history_rows=%d\n", report.IntegrityCheck, report.ForeignKeyIssues, report.InvalidRelatedRows, report.OrphanHistoryRows); err != nil {
+			return err
+		}
+	}
+	// [LAW:single-enforcer] Corruption classification is output-format agnostic and always enforced here.
+	if len(report.Errors) > 0 {
+		return CorruptionError{Message: strings.Join(report.Errors, "; ")}
+	}
+	return nil
+}
+
+func runFsck(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
+	fs := flag.NewFlagSet("fsck", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	repair := fs.Bool("repair", false, "Attempt safe repairs")
+	jsonOut := fs.Bool("json", false, "Output JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	report, err := ap.Store.Fsck(ctx, *repair)
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		if err := writeJSON(stdout, report); err != nil {
+			return err
+		}
+	} else {
+		if _, err := fmt.Fprintf(stdout, "integrity_check=%s foreign_key_issues=%d invalid_related_rows=%d orphan_history_rows=%d repair=%t\n", report.IntegrityCheck, report.ForeignKeyIssues, report.InvalidRelatedRows, report.OrphanHistoryRows, *repair); err != nil {
+			return err
+		}
+	}
+	// [LAW:single-enforcer] Corruption classification is output-format agnostic and always enforced here.
+	if len(report.Errors) > 0 {
+		return CorruptionError{Message: strings.Join(report.Errors, "; ")}
+	}
+	return nil
+}
+
+func runBackup(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: lk backup <create|list|restore> ...")
+	}
+	switch args[0] {
+	case "create":
+		fs := flag.NewFlagSet("backup create", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		keep := fs.Int("keep", 20, "Snapshots to keep after rotation")
+		jsonOut := fs.Bool("json", false, "Output JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		export, err := ap.Store.Export(ctx)
+		if err != nil {
+			return err
+		}
+		snapshot, err := backup.Create(ap.Workspace.StorageDir, export)
+		if err != nil {
+			return err
+		}
+		if err := backup.Prune(ap.Workspace.StorageDir, *keep); err != nil {
+			return err
+		}
+		return printValue(stdout, snapshot, *jsonOut, func(w io.Writer, v any) error {
+			s := v.(backup.Snapshot)
+			_, err := fmt.Fprintf(w, "%s %s\n", s.Name, s.Path)
+			return err
+		})
+	case "list":
+		fs := flag.NewFlagSet("backup list", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		jsonOut := fs.Bool("json", false, "Output JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		snapshots, err := backup.List(ap.Workspace.StorageDir)
+		if err != nil {
+			return err
+		}
+		return printValue(stdout, snapshots, *jsonOut, func(w io.Writer, v any) error {
+			list := v.([]backup.Snapshot)
+			for _, snapshot := range list {
+				if _, err := fmt.Fprintf(w, "%s %d %s\n", snapshot.Name, snapshot.Size, snapshot.Path); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	case "restore":
+		fs := flag.NewFlagSet("backup restore", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		path := fs.String("path", "", "Backup snapshot path")
+		latest := fs.Bool("latest", false, "Restore latest backup snapshot")
+		force := fs.Bool("force", false, "Force restore over unsynced state")
+		jsonOut := fs.Bool("json", false, "Output JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		restorePath := strings.TrimSpace(*path)
+		if *latest {
+			latestSnapshot, err := backup.Latest(ap.Workspace.StorageDir)
+			if err != nil {
+				return err
+			}
+			if latestSnapshot == nil {
+				return errors.New("no backups available")
+			}
+			restorePath = latestSnapshot.Path
+		}
+		if restorePath == "" {
+			return errors.New("usage: lk backup restore --path <snapshot.json> [--force] [--json] or --latest")
+		}
+		if err := restoreFromExportPath(ctx, ap, restorePath, *force); err != nil {
+			return err
+		}
+		payload := map[string]string{"status": "restored", "path": restorePath}
+		return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
+			p := v.(map[string]string)
+			_, err := fmt.Fprintf(w, "%s %s\n", p["status"], p["path"])
+			return err
+		})
+	default:
+		return errors.New("usage: lk backup <create|list|restore> ...")
+	}
+}
+
+func runRecover(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
+	fs := flag.NewFlagSet("recover", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	fromSync := fs.String("from-sync", "", "Restore from sync file")
+	fromBackup := fs.String("from-backup", "", "Restore from backup snapshot")
+	latestBackup := fs.Bool("latest-backup", false, "Restore from latest backup snapshot")
+	force := fs.Bool("force", false, "Force restore over unsynced state")
+	jsonOut := fs.Bool("json", false, "Output JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	var restorePath string
+	switch {
+	case strings.TrimSpace(*fromSync) != "":
+		restorePath = strings.TrimSpace(*fromSync)
+	case strings.TrimSpace(*fromBackup) != "":
+		restorePath = strings.TrimSpace(*fromBackup)
+	case *latestBackup:
+		latest, err := backup.Latest(ap.Workspace.StorageDir)
+		if err != nil {
+			return err
+		}
+		if latest == nil {
+			return errors.New("no backups available")
+		}
+		restorePath = latest.Path
+	default:
+		return errors.New("usage: lk recover --from-sync <path> | --from-backup <path> | --latest-backup [--force] [--json]")
+	}
+	if err := restoreFromExportPath(ctx, ap, restorePath, *force); err != nil {
+		return err
+	}
+	payload := map[string]string{"status": "recovered", "path": restorePath}
+	return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
+		p := v.(map[string]string)
+		_, err := fmt.Fprintf(w, "%s %s\n", p["status"], p["path"])
+		return err
+	})
+}
+
+func runBulk(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: lk bulk <label|close|archive|import> ...")
+	}
+	switch args[0] {
+	case "label":
+		if len(args) < 2 {
+			return errors.New("usage: lk bulk label <add|rm> ...")
+		}
+		action := args[1]
+		fs := flag.NewFlagSet("bulk label", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		ids := fs.String("ids", "", "Comma-separated issue IDs")
+		label := fs.String("label", "", "Label name")
+		by := fs.String("by", os.Getenv("USER"), "Label actor")
+		expectedRevision := fs.Int64("expected-revision", -1, "Expected workspace revision for optimistic concurrency")
+		jsonOut := fs.Bool("json", false, "Output JSON")
+		if err := fs.Parse(args[2:]); err != nil {
+			return err
+		}
+		issueIDs := splitCSV(*ids)
+		if len(issueIDs) == 0 {
+			return errors.New("--ids is required")
+		}
+		if strings.TrimSpace(*label) == "" {
+			return errors.New("--label is required")
+		}
+		results := map[string]string{}
+		nextExpected := optionalExpectedRevision(fs, expectedRevision)
+		for _, issueID := range issueIDs {
+			switch action {
+			case "add":
+				_, err := ap.Store.AddLabel(ctx, store.AddLabelInput{
+					IssueID:          issueID,
+					Name:             *label,
+					CreatedBy:        *by,
+					ExpectedRevision: nextExpected,
+				})
+				if err != nil {
+					results[issueID] = err.Error()
+					continue
+				}
+			case "rm":
+				_, err := ap.Store.RemoveLabel(ctx, issueID, *label, nextExpected)
+				if err != nil {
+					results[issueID] = err.Error()
+					continue
+				}
+			default:
+				return errors.New("usage: lk bulk label <add|rm> ...")
+			}
+			results[issueID] = "ok"
+			if nextExpected != nil {
+				*nextExpected = *nextExpected + 1
+			}
+		}
+		return printValue(stdout, results, *jsonOut, func(w io.Writer, v any) error {
+			entries := v.(map[string]string)
+			for issueID, status := range entries {
+				if _, err := fmt.Fprintf(w, "%s %s\n", issueID, status); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	case "close", "archive":
+		fs := flag.NewFlagSet("bulk transition", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		ids := fs.String("ids", "", "Comma-separated issue IDs")
+		reason := fs.String("reason", "", "Lifecycle reason")
+		by := fs.String("by", os.Getenv("USER"), "Lifecycle actor")
+		expectedRevision := fs.Int64("expected-revision", -1, "Expected workspace revision for optimistic concurrency")
+		jsonOut := fs.Bool("json", false, "Output JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		issueIDs := splitCSV(*ids)
+		if len(issueIDs) == 0 {
+			return errors.New("--ids is required")
+		}
+		if strings.TrimSpace(*reason) == "" {
+			return errors.New("--reason is required")
+		}
+		results := map[string]string{}
+		nextExpected := optionalExpectedRevision(fs, expectedRevision)
+		for _, issueID := range issueIDs {
+			_, err := ap.Store.TransitionIssue(ctx, store.TransitionIssueInput{
+				IssueID:          issueID,
+				Action:           args[0],
+				Reason:           *reason,
+				CreatedBy:        *by,
+				ExpectedRevision: nextExpected,
+			})
+			if err != nil {
+				results[issueID] = err.Error()
+				continue
+			}
+			results[issueID] = "ok"
+			if nextExpected != nil {
+				*nextExpected = *nextExpected + 1
+			}
+		}
+		return printValue(stdout, results, *jsonOut, func(w io.Writer, v any) error {
+			entries := v.(map[string]string)
+			for issueID, status := range entries {
+				if _, err := fmt.Fprintf(w, "%s %s\n", issueID, status); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	case "import":
+		fs := flag.NewFlagSet("bulk import", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		path := fs.String("path", "", "Path to JSON export")
+		force := fs.Bool("force", false, "Force import over unsynced local state")
+		jsonOut := fs.Bool("json", false, "Output JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if strings.TrimSpace(*path) == "" {
+			return errors.New("--path is required")
+		}
+		if err := restoreFromExportPath(ctx, ap, *path, *force); err != nil {
+			return err
+		}
+		payload := map[string]string{"status": "imported", "path": filepath.Clean(*path)}
+		return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
+			p := v.(map[string]string)
+			_, err := fmt.Fprintf(w, "%s %s\n", p["status"], p["path"])
+			return err
+		})
+	default:
+		return errors.New("usage: lk bulk <label|close|archive|import> ...")
+	}
+}
+
 func runCompletion(stdout io.Writer, args []string) error {
 	if len(args) != 1 {
 		return errors.New("usage: lk completion <bash|zsh|fish>")
@@ -687,21 +1220,28 @@ func printIssueSummary(w io.Writer, v any) error {
 	return err
 }
 
-func printIssueTable(w io.Writer, issues []model.Issue) error {
+func printIssueTable(w io.Writer, issues []model.Issue, columns []string) error {
+	resolved := resolveColumns(columns)
 	tw := tabwriter.NewWriter(w, 2, 2, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "ID\tSTATUS\tTYPE\tP\tASSIGNEE\tLABELS\tTITLE"); err != nil {
+	if _, err := fmt.Fprintln(tw, strings.ToUpper(strings.Join(resolved, "\t"))); err != nil {
 		return err
 	}
 	for _, issue := range issues {
-		assignee := issue.Assignee
-		if assignee == "" {
-			assignee = "-"
-		}
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n", issue.ID, formatIssueState(issue), issue.IssueType, issue.Priority, assignee, strings.Join(issue.Labels, ","), issue.Title); err != nil {
+		if _, err := fmt.Fprintln(tw, formatIssueColumns(issue, resolved, "\t")); err != nil {
 			return err
 		}
 	}
 	return tw.Flush()
+}
+
+func printIssueLines(w io.Writer, issues []model.Issue, columns []string) error {
+	resolved := resolveColumns(columns)
+	for _, issue := range issues {
+		if _, err := fmt.Fprintln(w, formatIssueColumns(issue, resolved, " | ")); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func printIssueDetail(w io.Writer, detail model.IssueDetail) error {
@@ -769,6 +1309,57 @@ func printIssueGroup(w io.Writer, label string, issues []model.Issue) error {
 	return nil
 }
 
+func formatIssueColumns(issue model.Issue, columns []string, delimiter string) string {
+	values := make([]string, 0, len(columns))
+	for _, column := range columns {
+		switch column {
+		case "id":
+			values = append(values, issue.ID)
+		case "state":
+			values = append(values, formatIssueState(issue))
+		case "type":
+			values = append(values, issue.IssueType)
+		case "priority":
+			values = append(values, strconv.Itoa(issue.Priority))
+		case "title":
+			values = append(values, issue.Title)
+		case "assignee":
+			values = append(values, emptyDash(issue.Assignee))
+		case "labels":
+			values = append(values, emptyDash(strings.Join(issue.Labels, ",")))
+		case "updated_at":
+			values = append(values, issue.UpdatedAt.Format(time.RFC3339))
+		case "created_at":
+			values = append(values, issue.CreatedAt.Format(time.RFC3339))
+		}
+	}
+	return strings.Join(values, delimiter)
+}
+
+func resolveColumns(columns []string) []string {
+	if len(columns) == 0 {
+		// [LAW:dataflow-not-control-flow] Default listing still flows through the same projection path.
+		return []string{"id", "state", "title"}
+	}
+	valid := map[string]struct{}{
+		"id": {}, "state": {}, "type": {}, "priority": {}, "title": {}, "assignee": {}, "labels": {}, "updated_at": {}, "created_at": {},
+	}
+	out := make([]string, 0, len(columns))
+	for _, column := range columns {
+		normalized := strings.ToLower(strings.TrimSpace(column))
+		if normalized == "" {
+			continue
+		}
+		if _, ok := valid[normalized]; ok {
+			out = append(out, normalized)
+		}
+	}
+	if len(out) == 0 {
+		return []string{"id", "state", "title"}
+	}
+	return out
+}
+
 func emptyDash(s string) string {
 	if strings.TrimSpace(s) == "" {
 		return "-"
@@ -831,31 +1422,158 @@ func splitCSV(input string) []string {
 	return out
 }
 
+func parseColumns(input string) []string {
+	return splitCSV(strings.ToLower(input))
+}
+
+func parseSortSpecs(input string) ([]store.SortSpec, error) {
+	parts := splitCSV(input)
+	if len(parts) == 0 {
+		return nil, nil
+	}
+	out := make([]store.SortSpec, 0, len(parts))
+	for _, part := range parts {
+		spec := strings.TrimSpace(part)
+		field := spec
+		desc := false
+		if strings.Contains(spec, ":") {
+			chunks := strings.SplitN(spec, ":", 2)
+			field = strings.TrimSpace(chunks[0])
+			direction := strings.ToLower(strings.TrimSpace(chunks[1]))
+			switch direction {
+			case "asc":
+				desc = false
+			case "desc":
+				desc = true
+			default:
+				return nil, fmt.Errorf("unsupported sort direction %q", direction)
+			}
+		}
+		out = append(out, store.SortSpec{Field: field, Desc: desc})
+	}
+	return out, nil
+}
+
+func optionalExpectedRevision(fs *flag.FlagSet, value *int64) *int64 {
+	if fs.Lookup("expected-revision") == nil {
+		return nil
+	}
+	visited := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "expected-revision" {
+			visited = true
+		}
+	})
+	if !visited {
+		return nil
+	}
+	out := *value
+	return &out
+}
+
 func defaultSyncPath(ap *app.App) string {
 	return filepath.Join(ap.Workspace.RootDir, "links", "export.json")
 }
+
+func syncBasePath(ap *app.App) string {
+	return filepath.Join(ap.Workspace.StorageDir, "last-sync-base.json")
+}
+
+func restoreFromExportPath(ctx context.Context, ap *app.App, path string, force bool) error {
+	restorePath := filepath.Clean(path)
+	targetExport, _, err := syncfile.Read(restorePath)
+	if err != nil {
+		return err
+	}
+	localExport, err := ap.Store.Export(ctx)
+	if err != nil {
+		return err
+	}
+	state, err := ap.Store.GetSyncState(ctx)
+	if err != nil {
+		return err
+	}
+	currentRevision, err := ap.Store.GetWorkspaceRevision(ctx)
+	if err != nil {
+		return err
+	}
+	if state.WorkspaceRevision != 0 && currentRevision != state.WorkspaceRevision && !force {
+		return MergeConflictError{Message: fmt.Sprintf("restore conflict: local workspace revision %d has unsynced changes since last sync revision %d", currentRevision, state.WorkspaceRevision)}
+	}
+	if _, err := backup.Create(ap.Workspace.StorageDir, localExport); err != nil {
+		return err
+	}
+	if err := backup.Prune(ap.Workspace.StorageDir, 20); err != nil {
+		return err
+	}
+	if err := ap.Store.ReplaceFromExport(ctx, targetExport); err != nil {
+		return err
+	}
+	if _, err := syncfile.WriteAtomic(syncBasePath(ap), targetExport); err != nil {
+		return err
+	}
+	hash, err := syncfile.HashFile(restorePath)
+	if err != nil {
+		return err
+	}
+	return ap.Store.RecordSyncState(ctx, store.SyncState{
+		Path:              restorePath,
+		ContentHash:       hash,
+		WorkspaceRevision: targetExport.WorkspaceRevision,
+	})
+}
+
+type MergeConflictError struct {
+	Message   string
+	Conflicts []merge.IssueConflict
+}
+
+func (e MergeConflictError) Error() string {
+	return e.Message
+}
+
+type CorruptionError struct {
+	Message string
+}
+
+func (e CorruptionError) Error() string { return e.Message }
 
 func printUsage(w io.Writer) {
 	fmt.Fprint(w, `links / lk
 
 Usage:
-  lk new --title <title> [--description <text>] [--type task|feature|bug|chore|epic] [--priority 0-4] [--assignee <user>] [--labels a,b] [--json]
-  lk ls [--status open|closed] [--type <type>] [--assignee <user>] [--priority-min N] [--priority-max N] [--search <text>] [--ids a,b] [--labels a,b] [--has-comments] [--include-archived] [--include-deleted] [--updated-after RFC3339] [--updated-before RFC3339] [--query <expr>] [--limit N] [--json]
+  lk new --title <title> [--description <text>] [--type task|feature|bug|chore|epic] [--priority 0-4] [--assignee <user>] [--labels a,b] [--expected-revision N] [--json]
+  lk ls [--status open|closed] [--type <type>] [--assignee <user>] [--priority-min N] [--priority-max N] [--search <text>] [--ids a,b] [--labels a,b] [--has-comments] [--include-archived] [--include-deleted] [--updated-after RFC3339] [--updated-before RFC3339] [--query <expr>] [--sort field:asc|desc,...] [--columns id,state,title,...] [--format lines|table] [--limit N] [--json]
   lk show <id> [--json]
-  lk edit <id> [--title ...] [--description ...] [--type ...] [--priority ...] [--assignee ...|--clear-assignee] [--labels a,b|--clear-labels] [--json]
-  lk close <id> --reason <text> [--by <user>] [--json]
-  lk open <id> --reason <text> [--by <user>] [--json]
-  lk archive <id> --reason <text> [--by <user>] [--json]
-  lk delete <id> --reason <text> [--by <user>] [--json]
-  lk comment add <id> --body <text> [--by <user>] [--json]
-  lk label add <issue-id> <label> [--by <user>] [--json]
-  lk label rm <issue-id> <label> [--json]
-  lk dep add <src-id> <dst-id> [--type blocks|parent-child|related-to] [--by <user>] [--json]
-  lk dep rm <src-id> <dst-id> [--type blocks|parent-child|related-to]
-  lk export
+  lk edit <id> [--title ...] [--description ...] [--type ...] [--priority ...] [--assignee ...|--clear-assignee] [--labels a,b|--clear-labels] [--expected-revision N] [--json]
+  lk close <id> --reason <text> [--by <user>] [--expected-revision N] [--json]
+  lk open <id> --reason <text> [--by <user>] [--expected-revision N] [--json]
+  lk archive <id> --reason <text> [--by <user>] [--expected-revision N] [--json]
+  lk delete <id> --reason <text> [--by <user>] [--expected-revision N] [--json]
+  lk unarchive <id> --reason <text> [--by <user>] [--expected-revision N] [--json]
+  lk restore <id> --reason <text> [--by <user>] [--expected-revision N] [--json]
+  lk comment add <id> --body <text> [--by <user>] [--expected-revision N] [--json]
+  lk label add <issue-id> <label> [--by <user>] [--expected-revision N] [--json]
+  lk label rm <issue-id> <label> [--expected-revision N] [--json]
+  lk parent set <child-id> <parent-id> [--by <user>] [--expected-revision N] [--json]
+  lk parent clear <child-id> [--expected-revision N] [--json]
+  lk children <parent-id> [--json]
+  lk dep add <src-id> <dst-id> [--type blocks|parent-child|related-to] [--by <user>] [--expected-revision N] [--json]
+  lk dep rm <src-id> <dst-id> [--type blocks|parent-child|related-to] [--expected-revision N] [--json]
+  lk dep ls <issue-id> [--type blocks|parent-child|related-to] [--json]
+  lk export [--json]
   lk sync export [--path <path>] [--force] [--json]
-  lk sync import [--path <path>] [--force] [--json]
+  lk sync import [--path <path>] [--resolve fail|local|remote] [--force] [--json]
   lk sync status [--path <path>] [--json]
+  lk doctor [--json]
+  lk fsck [--repair] [--json]
+  lk backup create [--keep N] [--json]
+  lk backup list [--json]
+  lk backup restore (--path <snapshot.json> | --latest) [--force] [--json]
+  lk recover (--from-sync <path> | --from-backup <path> | --latest-backup) [--force] [--json]
+  lk bulk label <add|rm> --ids a,b --label <name> [--by <user>] [--expected-revision N] [--json]
+  lk bulk <close|archive> --ids a,b --reason <text> [--by <user>] [--expected-revision N] [--json]
+  lk bulk import --path <export.json> [--force] [--json]
   lk completion <bash|zsh|fish>
   lk beads import --db <path> [--json]
   lk beads export --db <path> [--json]

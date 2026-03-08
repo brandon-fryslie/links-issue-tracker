@@ -5,11 +5,14 @@ _lk_completions() {
   local current prev words cword
   _init_completion || return
 
-  local commands="new ls show edit close open archive delete comment label dep export sync beads workspace completion help"
+  local commands="new ls show edit close open archive delete unarchive restore comment label parent children dep export sync doctor fsck backup recover bulk beads workspace completion help"
   local comment_subcommands="add"
   local label_subcommands="add rm"
-  local dep_subcommands="add rm"
+  local parent_subcommands="set clear"
+  local dep_subcommands="add rm ls"
   local sync_subcommands="export import status"
+  local backup_subcommands="create list restore"
+  local bulk_subcommands="label close archive import"
   local beads_subcommands="import export"
 
   case "${prev}" in
@@ -25,12 +28,24 @@ _lk_completions() {
       COMPREPLY=( $(compgen -W "${label_subcommands}" -- "${current}") )
       return
       ;;
+    parent)
+      COMPREPLY=( $(compgen -W "${parent_subcommands}" -- "${current}") )
+      return
+      ;;
     dep)
       COMPREPLY=( $(compgen -W "${dep_subcommands}" -- "${current}") )
       return
       ;;
     sync)
       COMPREPLY=( $(compgen -W "${sync_subcommands}" -- "${current}") )
+      return
+      ;;
+    backup)
+      COMPREPLY=( $(compgen -W "${backup_subcommands}" -- "${current}") )
+      return
+      ;;
+    bulk)
+      COMPREPLY=( $(compgen -W "${bulk_subcommands}" -- "${current}") )
       return
       ;;
     beads)
@@ -62,11 +77,20 @@ _lk() {
     'open:reopen issue'
     'archive:archive issue'
     'delete:delete issue'
+    'unarchive:unarchive issue'
+    'restore:restore deleted issue'
     'comment:add comment'
     'label:manage labels'
+    'parent:manage parent relationship'
+    'children:list child issues'
     'dep:manage dependencies'
     'export:write JSON export to stdout'
     'sync:sync export file'
+    'doctor:database health check'
+    'fsck:database integrity check and repair'
+    'backup:snapshot management'
+    'recover:restore from backup or sync file'
+    'bulk:bulk issue operations'
     'beads:beads sqlite import export'
     'workspace:show workspace info'
     'completion:emit shell completion'
@@ -88,11 +112,20 @@ _lk() {
         label)
           _values 'label commands' add rm
           ;;
+        parent)
+          _values 'parent commands' set clear
+          ;;
         dep)
-          _values 'dep commands' add rm
+          _values 'dep commands' add rm ls
           ;;
         sync)
           _values 'sync commands' export import status
+          ;;
+        backup)
+          _values 'backup commands' create list restore
+          ;;
+        bulk)
+          _values 'bulk commands' label close archive import
           ;;
         beads)
           _values 'beads commands' import export
@@ -109,11 +142,14 @@ _lk "$@"
 `
 
 const fishCompletionScript = `complete -c lk -f
-complete -c lk -n '__fish_use_subcommand' -a 'new ls show edit close open archive delete comment label dep export sync beads workspace completion help'
+complete -c lk -n '__fish_use_subcommand' -a 'new ls show edit close open archive delete unarchive restore comment label parent children dep export sync doctor fsck backup recover bulk beads workspace completion help'
 complete -c lk -n '__fish_seen_subcommand_from comment' -a 'add'
 complete -c lk -n '__fish_seen_subcommand_from label' -a 'add rm'
-complete -c lk -n '__fish_seen_subcommand_from dep' -a 'add rm'
+complete -c lk -n '__fish_seen_subcommand_from parent' -a 'set clear'
+complete -c lk -n '__fish_seen_subcommand_from dep' -a 'add rm ls'
 complete -c lk -n '__fish_seen_subcommand_from sync' -a 'export import status'
+complete -c lk -n '__fish_seen_subcommand_from backup' -a 'create list restore'
+complete -c lk -n '__fish_seen_subcommand_from bulk' -a 'label close archive import'
 complete -c lk -n '__fish_seen_subcommand_from beads' -a 'import export'
 complete -c lk -n '__fish_seen_subcommand_from completion' -a 'bash zsh fish'
 `
