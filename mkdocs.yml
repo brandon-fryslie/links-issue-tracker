@@ -1,0 +1,35 @@
+site_name: links
+site_description: Worktree-native issue tracking with Dolt-backed sync
+site_url: https://github.com/brandon-fryslie/links-issue-tracker
+repo_url: https://github.com/brandon-fryslie/links-issue-tracker
+repo_name: brandon-fryslie/links-issue-tracker
+docs_dir: docs
+
+theme:
+  name: material
+  features:
+    - navigation.sections
+    - navigation.expand
+    - navigation.instant
+    - content.code.copy
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+
+nav:
+  - Introduction:
+      - What is links?: introduction/what-is-links.md
+      - Installation: introduction/installation.md
+      - Getting started: introduction/getting-started.md
+  - Concepts:
+      - Core concepts: concepts.md
+  - Architecture:
+      - Overview: architecture.md
+  - CLI reference:
+      - Commands: cli-reference.md
+  - Guides:
+      - Sync and remotes: dolt-remote-sync.md
+      - Agent workflow: guides/agent-workflow.md
+      - Troubleshooting: guides/troubleshooting.md

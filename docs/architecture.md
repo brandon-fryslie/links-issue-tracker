@@ -1,0 +1,35 @@
+# Architecture overview
+
+## Storage model
+
+`links` uses Dolt as an embedded SQL database with commit semantics. A normal write flow is:
+
+1. command validates input
+2. rows are updated in a transaction
+3. workspace revision is updated
+4. working set is committed
+
+This keeps local state durable and auditable after every mutation.
+
+## Sync model
+
+Sync uses Dolt remotes, but remote configuration comes from Git remotes.
+
+Before every `lk sync` command, `links` reconciles Dolt remotes from `git remote -v` fetch URLs.
+
+## Automation model
+
+`lk hooks install` installs a shared `pre-push` hook that:
+
+- attempts `lk sync push` for pushed branches
+- never blocks `git push`
+- emits one yellow warning line on sync failure
+
+## Failure model
+
+`links` prefers explicit errors over silent fallback:
+
+- invalid input -> validation error
+- missing entities -> not found error
+- stale revision -> stale write error
+- integrity faults -> corruption error
