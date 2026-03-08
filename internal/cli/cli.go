@@ -40,6 +40,19 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 		return runQuickstart(stdout, args[1:])
 	case "completion":
 		return runCompletion(stdout, args[1:])
+	case "hooks":
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("get cwd: %w", err)
+		}
+		ws, err := workspace.Resolve(cwd)
+		if err != nil {
+			if errors.Is(err, workspace.ErrNotGitRepo) {
+				return fmt.Errorf("links requires running inside a git repository/worktree")
+			}
+			return err
+		}
+		return runHooks(stdout, ws, args[1:])
 	case "sync":
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -1404,6 +1417,7 @@ func runQuickstart(stdout io.Writer, args []string) error {
 		"summary": "Agent quickstart for links issue tracking",
 		"workflow": []string{
 			"Discover workspace identity and revision with `lk workspace --json`.",
+			"Install git hook automation once with `lk hooks install`.",
 			"List active issues with `lk ls --format lines --json` or narrow with `--query`.",
 			"Create issues with `lk new ...`; use `--type epic` for epics.",
 			"Connect issues using `lk parent set` and `lk dep add --type related-to|blocks`.",
@@ -1413,6 +1427,7 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"Snapshot and rollback using `lk backup create`, `lk backup restore`, or `lk recover`.",
 		},
 		"examples": []string{
+			"lk hooks install --json",
 			"lk workspace --json",
 			"lk ls --query \"status:open type:task\" --sort priority:asc,updated_at:desc --json",
 			"lk new --title \"Fix renderer race\" --type bug --priority 1 --labels renderer,urgent --json",
@@ -1441,6 +1456,7 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"links agent quickstart",
 			"",
 			"1) Discover context",
+			"   `lk hooks install --json`",
 			"   `lk workspace --json`",
 			"",
 			"2) Find work",
@@ -1462,6 +1478,7 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"   `lk sync fetch --remote origin --json`",
 			"   `lk sync pull --remote origin --branch main --json`",
 			"   `lk sync push --remote origin --branch main --json`",
+			"   If sync warning appears, agent should auto-retry silently before escalating.",
 			"",
 			"6) Integrity and recovery",
 			"   `lk doctor --json`",
@@ -1851,6 +1868,7 @@ Usage:
   lk bulk label <add|rm> --ids a,b --label <name> [--by <user>] [--expected-revision N] [--json]
   lk bulk <close|archive> --ids a,b --reason <text> [--by <user>] [--expected-revision N] [--json]
   lk bulk import --path <export.json> [--force] [--json]
+  lk hooks install [--json]
   lk quickstart [--json]
   lk completion <bash|zsh|fish>
   lk beads import --db <path> [--json]

@@ -72,6 +72,7 @@ lk recover (--from-sync <path> | --from-backup <path> | --latest-backup) [--forc
 lk bulk label <add|rm> --ids a,b --label <name> [--by <user>] [--expected-revision N] [--json]
 lk bulk <close|archive> --ids a,b --reason <text> [--by <user>] [--expected-revision N] [--json]
 lk bulk import --path <export.json> [--force] [--json]
+lk hooks install [--json]
 lk quickstart [--json]
 lk beads import --db <path> [--json]
 lk beads export --db <path> [--json]
@@ -114,6 +115,11 @@ lk workspace [--json]
 - `// [LAW:single-enforcer]` The store owns one canonical `workspace_revision` and bumps it on every successful mutation.
 - `lk workspace --json` exposes the current `workspace_revision` so agents can detect stale views before writing.
 - Mutating commands support `--expected-revision N`; stale writes fail with a dedicated exit code.
+- `lk hooks install` installs a shared `pre-push` hook in `$(git rev-parse --git-common-dir)/hooks/pre-push`.
+- Hook behavior is fixed:
+  - auto-attempts `lk sync push` for pushed branches
+  - never blocks git push (always exits success)
+  - prints exactly one yellow warning line if sync fails
 - `// [LAW:one-source-of-truth]` Git remotes are the canonical remote config; `lk sync` mirrors them into Dolt before every sync operation.
 - `lk sync` commands:
   - `lk sync remote ls` shows canonical git remotes, mirrored Dolt remotes, and reconcile changes.

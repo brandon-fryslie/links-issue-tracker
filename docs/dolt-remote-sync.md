@@ -21,6 +21,7 @@ $(git rev-parse --git-common-dir)/links/dolt
 ## Typical setup
 
 ```sh
+lk hooks install
 git remote add origin https://github.com/<org>/<repo>.git
 lk sync remote ls --json
 lk sync fetch --remote origin
@@ -49,3 +50,8 @@ Before each `lk sync` command, `lk` reconciles Dolt remotes to exactly match `gi
 - add missing Dolt remotes
 - update changed remote URLs
 - remove Dolt remotes that no longer exist in Git
+
+## Push automation
+
+`lk hooks install` writes `$(git rev-parse --git-common-dir)/hooks/pre-push` and chains any existing user hook.
+The hook auto-runs `lk sync push` for pushed branches, never blocks the git push, and emits one yellow warning line if DB sync fails.
