@@ -53,6 +53,19 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 			return err
 		}
 		return runHooks(stdout, ws, args[1:])
+	case "migrate":
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("get cwd: %w", err)
+		}
+		ws, err := workspace.Resolve(cwd)
+		if err != nil {
+			if errors.Is(err, workspace.ErrNotGitRepo) {
+				return fmt.Errorf("links requires running inside a git repository/worktree")
+			}
+			return err
+		}
+		return runMigrate(stdout, ws, args[1:])
 	case "sync":
 		cwd, err := os.Getwd()
 		if err != nil {
@@ -1417,6 +1430,7 @@ func runQuickstart(stdout io.Writer, args []string) error {
 		"summary": "Agent quickstart for links issue tracking",
 		"workflow": []string{
 			"Discover workspace identity and revision with `lit workspace --json`.",
+			"Migrate legacy Beads wiring with `lit migrate beads --apply --json` when needed.",
 			"Install git hook automation once with `lit hooks install`.",
 			"List active issues with `lit ls --format lines --json` or narrow with `--query`.",
 			"Create issues with `lit new ...`; use `--type epic` for epics.",
@@ -1427,6 +1441,7 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"Snapshot and rollback using `lit backup create`, `lit backup restore`, or `lit recover`.",
 		},
 		"examples": []string{
+			"lit migrate beads --apply --json",
 			"lit hooks install --json",
 			"lit workspace --json",
 			"lit ls --query \"status:open type:task\" --sort priority:asc,updated_at:desc --json",
@@ -1456,6 +1471,7 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"links agent quickstart",
 			"",
 			"1) Discover context",
+			"   `lit migrate beads --apply --json`  # for legacy Beads repos",
 			"   `lit hooks install --json`",
 			"   `lit workspace --json`",
 			"",
@@ -1869,6 +1885,7 @@ Usage:
   lit bulk <close|archive> --ids a,b --reason <text> [--by <user>] [--expected-revision N] [--json]
   lit bulk import --path <export.json> [--force] [--json]
   lit hooks install [--json]
+  lit migrate beads [--apply] [--json]
   lit quickstart [--json]
   lit completion <bash|zsh|fish>
   lit beads import --db <path> [--json]

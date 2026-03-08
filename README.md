@@ -22,6 +22,12 @@ git remote -v
 lit sync remote ls --json
 ```
 
+If the repo previously used Beads automation, migrate it first:
+
+```sh
+lit migrate beads --apply --json
+```
+
 Create and inspect work:
 
 ```sh

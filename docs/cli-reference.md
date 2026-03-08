@@ -37,6 +37,7 @@ lit label add <issue-id> <label> --json
 ### Sync and automation
 
 ```sh
+lit migrate beads --apply --json
 lit hooks install
 lit sync status --json
 lit sync pull --remote origin --branch main

@@ -13,6 +13,11 @@ import (
 
 const linksPrePushHookMarker = "# links-hook: pre-push v1"
 
+type hookInstallResult struct {
+	HookPath   string
+	LegacyPath string
+}
+
 func runHooks(stdout io.Writer, ws workspace.Info, args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: lit hooks install [--json]")
@@ -35,39 +40,47 @@ func runHooksInstall(stdout io.Writer, ws workspace.Info, args []string) error {
 		return errors.New("usage: lit hooks install [--json]")
 	}
 
-	hooksDir := filepath.Join(ws.GitCommonDir, "hooks")
-	hookPath := filepath.Join(hooksDir, "pre-push")
-	legacyPath := filepath.Join(hooksDir, "pre-push.links.user")
-	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
-		return fmt.Errorf("create hooks dir: %w", err)
-	}
-
-	existing, err := os.ReadFile(hookPath)
-	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("read existing pre-push hook: %w", err)
-	}
-	if len(existing) > 0 && !strings.Contains(string(existing), linksPrePushHookMarker) {
-		if _, backupErr := os.Stat(legacyPath); errors.Is(backupErr, os.ErrNotExist) {
-			if renameErr := os.Rename(hookPath, legacyPath); renameErr != nil {
-				return fmt.Errorf("preserve existing pre-push hook: %w", renameErr)
-			}
-		}
-	}
-
-	if err := os.WriteFile(hookPath, []byte(renderLinksPrePushHook()), 0o755); err != nil {
-		return fmt.Errorf("write pre-push hook: %w", err)
+	result, err := installHooks(ws)
+	if err != nil {
+		return err
 	}
 
 	payload := map[string]any{
 		"status":       "installed",
-		"hook":         hookPath,
-		"legacy_chain": legacyPath,
+		"hook":         result.HookPath,
+		"legacy_chain": result.LegacyPath,
 	}
 	return printValue(stdout, payload, jsonOut, func(w io.Writer, v any) error {
 		p := v.(map[string]any)
 		_, printErr := fmt.Fprintf(w, "installed %s\n", p["hook"])
 		return printErr
 	})
+}
+
+func installHooks(ws workspace.Info) (hookInstallResult, error) {
+	hooksDir := filepath.Join(ws.GitCommonDir, "hooks")
+	hookPath := filepath.Join(hooksDir, "pre-push")
+	legacyPath := filepath.Join(hooksDir, "pre-push.links.user")
+	if err := os.MkdirAll(hooksDir, 0o755); err != nil {
+		return hookInstallResult{}, fmt.Errorf("create hooks dir: %w", err)
+	}
+
+	existing, err := os.ReadFile(hookPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return hookInstallResult{}, fmt.Errorf("read existing pre-push hook: %w", err)
+	}
+	if len(existing) > 0 && !strings.Contains(string(existing), linksPrePushHookMarker) {
+		if _, backupErr := os.Stat(legacyPath); errors.Is(backupErr, os.ErrNotExist) {
+			if renameErr := os.Rename(hookPath, legacyPath); renameErr != nil {
+				return hookInstallResult{}, fmt.Errorf("preserve existing pre-push hook: %w", renameErr)
+			}
+		}
+	}
+
+	if err := os.WriteFile(hookPath, []byte(renderLinksPrePushHook()), 0o755); err != nil {
+		return hookInstallResult{}, fmt.Errorf("write pre-push hook: %w", err)
+	}
+	return hookInstallResult{HookPath: hookPath, LegacyPath: legacyPath}, nil
 }
 
 func renderLinksPrePushHook() string {
