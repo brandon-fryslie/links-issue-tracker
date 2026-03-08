@@ -613,7 +613,7 @@ func runBeads(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 	case "import":
 		fs := flag.NewFlagSet("beads import", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
-		dbPath := fs.String("db", "", "Path to beads sqlite database")
+		dbPath := fs.String("db", "", "Path to beads Dolt root/database")
 		jsonOut := fs.Bool("json", false, "Output JSON")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
@@ -633,7 +633,7 @@ func runBeads(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 	case "export":
 		fs := flag.NewFlagSet("beads export", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
-		dbPath := fs.String("db", "", "Path to beads sqlite database")
+		dbPath := fs.String("db", "", "Path to beads Dolt root/database")
 		jsonOut := fs.Bool("json", false, "Output JSON")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err

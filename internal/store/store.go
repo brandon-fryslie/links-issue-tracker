@@ -5,19 +5,25 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
+	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/dolthub/driver"
 
 	"github.com/google/uuid"
 
 	"github.com/bmf/links-issue-tracker/internal/model"
 )
 
-const sqliteDriverName = "sqlite"
+const (
+	doltDriverName   = "dolt"
+	doltDatabaseName = "links"
+)
 
 type Store struct {
 	db          *sql.DB
@@ -175,20 +181,19 @@ type HealthReport struct {
 	Warnings           []string `json:"warnings"`
 }
 
-func Open(ctx context.Context, dbPath string, workspaceID string) (*Store, error) {
-	db, err := sql.Open(sqliteDriverName, dbPath)
-	if err != nil {
-		return nil, fmt.Errorf("open sqlite: %w", err)
+func Open(ctx context.Context, doltRootDir string, workspaceID string) (*Store, error) {
+	if strings.TrimSpace(doltRootDir) == "" {
+		return nil, errors.New("dolt root dir is required")
 	}
-	for _, pragma := range []string{
-		"PRAGMA journal_mode=WAL;",
-		"PRAGMA foreign_keys=ON;",
-		"PRAGMA busy_timeout=5000;",
-	} {
-		if _, err := db.ExecContext(ctx, pragma); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("apply pragma %q: %w", pragma, err)
-		}
+	if strings.TrimSpace(workspaceID) == "" {
+		return nil, errors.New("workspace id is required")
+	}
+	if err := ensureDoltDatabase(ctx, doltRootDir, workspaceID); err != nil {
+		return nil, err
+	}
+	db, err := sql.Open(doltDriverName, buildDoltDSN(doltRootDir, workspaceID, true))
+	if err != nil {
+		return nil, fmt.Errorf("open dolt: %w", err)
 	}
 	s := &Store{db: db, workspaceID: workspaceID}
 	if err := s.migrate(ctx); err != nil {
@@ -202,98 +207,93 @@ func (s *Store) Close() error { return s.db.Close() }
 
 func (s *Store) migrate(ctx context.Context) error {
 	schema := []string{
-		`CREATE TABLE IF NOT EXISTS meta (
-			key TEXT PRIMARY KEY,
-			value TEXT NOT NULL
+		`CREATE TABLE meta (
+			meta_key VARCHAR(191) PRIMARY KEY,
+			meta_value TEXT NOT NULL
 		);`,
-		`CREATE TABLE IF NOT EXISTS issues (
-			id TEXT PRIMARY KEY,
+		`CREATE TABLE issues (
+			id VARCHAR(191) PRIMARY KEY,
 			title TEXT NOT NULL,
-			description TEXT NOT NULL DEFAULT '',
-			status TEXT NOT NULL,
-			priority INTEGER NOT NULL,
-			issue_type TEXT NOT NULL,
-			assignee TEXT NOT NULL DEFAULT '',
-			created_at TEXT NOT NULL,
-			updated_at TEXT NOT NULL,
-			closed_at TEXT,
+			description TEXT NOT NULL,
+			status VARCHAR(32) NOT NULL,
+			priority INT NOT NULL,
+			issue_type VARCHAR(32) NOT NULL,
+			assignee TEXT NOT NULL,
+			created_at VARCHAR(64) NOT NULL,
+			updated_at VARCHAR(64) NOT NULL,
+			closed_at VARCHAR(64) NULL,
+			archived_at VARCHAR(64) NULL,
+			deleted_at VARCHAR(64) NULL,
 			CHECK(status IN ('open','closed')),
 			CHECK(priority >= 0 AND priority <= 4),
 			CHECK(issue_type IN ('task','feature','bug','chore','epic'))
 		);`,
-		`CREATE TABLE IF NOT EXISTS relations (
-			src_id TEXT NOT NULL,
-			dst_id TEXT NOT NULL,
-			type TEXT NOT NULL,
-			created_at TEXT NOT NULL,
+		`CREATE TABLE relations (
+			src_id VARCHAR(191) NOT NULL,
+			dst_id VARCHAR(191) NOT NULL,
+			type VARCHAR(32) NOT NULL,
+			created_at VARCHAR(64) NOT NULL,
 			created_by TEXT NOT NULL,
 			PRIMARY KEY (src_id, dst_id, type),
 			FOREIGN KEY (src_id) REFERENCES issues(id) ON DELETE CASCADE,
 			FOREIGN KEY (dst_id) REFERENCES issues(id) ON DELETE CASCADE,
 			CHECK(type IN ('blocks','parent-child','related-to'))
 		);`,
-		`CREATE TABLE IF NOT EXISTS comments (
-			id TEXT PRIMARY KEY,
-			issue_id TEXT NOT NULL,
+		`CREATE TABLE comments (
+			id VARCHAR(191) PRIMARY KEY,
+			issue_id VARCHAR(191) NOT NULL,
 			body TEXT NOT NULL,
-			created_at TEXT NOT NULL,
+			created_at VARCHAR(64) NOT NULL,
 			created_by TEXT NOT NULL,
 			FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
 		);`,
-		`CREATE TABLE IF NOT EXISTS labels (
-			issue_id TEXT NOT NULL,
-			label TEXT NOT NULL,
-			created_at TEXT NOT NULL,
+		`CREATE TABLE labels (
+			issue_id VARCHAR(191) NOT NULL,
+			label VARCHAR(191) NOT NULL,
+			created_at VARCHAR(64) NOT NULL,
 			created_by TEXT NOT NULL,
 			PRIMARY KEY (issue_id, label),
 			FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_issues_status_priority ON issues(status, priority, updated_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_relations_src_type ON relations(src_id, type);`,
-		`CREATE INDEX IF NOT EXISTS idx_relations_dst_type ON relations(dst_id, type);`,
-		`CREATE INDEX IF NOT EXISTS idx_comments_issue_created ON comments(issue_id, created_at);`,
-		`CREATE INDEX IF NOT EXISTS idx_labels_issue ON labels(issue_id, label);`,
-		`CREATE INDEX IF NOT EXISTS idx_labels_name ON labels(label, issue_id);`,
-		`CREATE TABLE IF NOT EXISTS issue_history (
-			id TEXT PRIMARY KEY,
-			issue_id TEXT NOT NULL,
+		`CREATE INDEX idx_issues_status_priority ON issues(status, priority, updated_at);`,
+		`CREATE INDEX idx_relations_src_type ON relations(src_id, type);`,
+		`CREATE INDEX idx_relations_dst_type ON relations(dst_id, type);`,
+		`CREATE INDEX idx_comments_issue_created ON comments(issue_id, created_at);`,
+		`CREATE INDEX idx_labels_issue ON labels(issue_id, label);`,
+		`CREATE INDEX idx_labels_name ON labels(label, issue_id);`,
+		`CREATE TABLE issue_history (
+			id VARCHAR(191) PRIMARY KEY,
+			issue_id VARCHAR(191) NOT NULL,
 			action TEXT NOT NULL,
 			reason TEXT NOT NULL,
 			from_status TEXT NOT NULL,
 			to_status TEXT NOT NULL,
-			created_at TEXT NOT NULL,
+			created_at VARCHAR(64) NOT NULL,
 			created_by TEXT NOT NULL,
 			FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_issue_history_issue_created ON issue_history(issue_id, created_at);`,
+		`CREATE INDEX idx_issue_history_issue_created ON issue_history(issue_id, created_at);`,
 	}
 	for _, stmt := range schema {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("migrate schema: %w", err)
+		if err := execIgnoreAlreadyExists(ctx, s.db, stmt); err != nil {
+			return err
 		}
 	}
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO meta(key, value) VALUES ('workspace_id', ?)
-		 ON CONFLICT(key) DO UPDATE SET value = excluded.value`, s.workspaceID); err != nil {
+		`INSERT INTO meta(meta_key, meta_value) VALUES ('workspace_id', ?)
+		 ON DUPLICATE KEY UPDATE meta_value = VALUES(meta_value)`, s.workspaceID); err != nil {
 		return fmt.Errorf("store workspace_id: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO meta(key, value) VALUES ('schema_version', '1')
-		 ON CONFLICT(key) DO NOTHING`); err != nil {
+		`INSERT IGNORE INTO meta(meta_key, meta_value) VALUES ('schema_version', '1')`); err != nil {
 		return fmt.Errorf("store schema_version: %w", err)
 	}
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO meta(key, value) VALUES ('workspace_revision', '0')
-		 ON CONFLICT(key) DO NOTHING`); err != nil {
+		`INSERT IGNORE INTO meta(meta_key, meta_value) VALUES ('workspace_revision', '0')`); err != nil {
 		return fmt.Errorf("store workspace_revision: %w", err)
 	}
-	for _, stmt := range []string{
-		`ALTER TABLE issues ADD COLUMN archived_at TEXT`,
-		`ALTER TABLE issues ADD COLUMN deleted_at TEXT`,
-	} {
-		if err := execIgnoreDuplicateColumn(ctx, s.db, stmt); err != nil {
-			return err
-		}
+	if err := s.commitWorkingSet(ctx, "Initialize links schema"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -343,6 +343,9 @@ func (s *Store) RecordSyncState(ctx context.Context, state SyncState) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit record sync state: %w", err)
+	}
+	if err := s.commitWorkingSet(ctx, "record sync state"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -404,50 +407,56 @@ func (s *Store) CreateIssue(ctx context.Context, in CreateIssueInput) (model.Iss
 	if err := tx.Commit(); err != nil {
 		return model.Issue{}, fmt.Errorf("commit create issue: %w", err)
 	}
+	if err := s.commitWorkingSet(ctx, "create issue"); err != nil {
+		return model.Issue{}, err
+	}
 	return issue, nil
 }
 
 func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]model.Issue, error) {
-	query := `SELECT id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at, archived_at, deleted_at FROM issues`
+	query := `SELECT i.id, i.title, i.description, i.status, i.priority, i.issue_type, i.assignee, i.created_at, i.updated_at, i.closed_at, i.archived_at, i.deleted_at FROM issues i`
 	var where []string
 	var args []any
 	if !filter.IncludeArchived {
-		where = append(where, "archived_at IS NULL")
+		where = append(where, "i.archived_at IS NULL")
 	}
 	if !filter.IncludeDeleted {
-		where = append(where, "deleted_at IS NULL")
+		where = append(where, "i.deleted_at IS NULL")
 	}
 	if filter.Status != "" {
-		where = append(where, "status = ?")
+		where = append(where, "i.status = ?")
 		args = append(args, filter.Status)
 	}
 	if filter.IssueType != "" {
-		where = append(where, "issue_type = ?")
+		where = append(where, "i.issue_type = ?")
 		args = append(args, filter.IssueType)
 	}
 	if filter.Assignee != "" {
-		where = append(where, "assignee = ?")
+		where = append(where, "i.assignee = ?")
 		args = append(args, filter.Assignee)
 	}
 	if filter.PriorityMin != nil {
-		where = append(where, "priority >= ?")
+		where = append(where, "i.priority >= ?")
 		args = append(args, *filter.PriorityMin)
 	}
 	if filter.PriorityMax != nil {
-		where = append(where, "priority <= ?")
+		where = append(where, "i.priority <= ?")
 		args = append(args, *filter.PriorityMax)
 	}
 	if filter.UpdatedAfter != nil {
-		where = append(where, "updated_at >= ?")
+		where = append(where, "i.updated_at >= ?")
 		args = append(args, filter.UpdatedAfter.UTC().Format(time.RFC3339Nano))
 	}
 	if filter.UpdatedBefore != nil {
-		where = append(where, "updated_at <= ?")
+		where = append(where, "i.updated_at <= ?")
 		args = append(args, filter.UpdatedBefore.UTC().Format(time.RFC3339Nano))
 	}
 	if filter.HasComments != nil {
-		where = append(where, "EXISTS (SELECT 1 FROM comments WHERE comments.issue_id = issues.id) = ?")
-		args = append(args, boolToInt(*filter.HasComments))
+		if *filter.HasComments {
+			where = append(where, "EXISTS (SELECT 1 FROM comments c WHERE c.issue_id = i.id)")
+		} else {
+			where = append(where, "NOT EXISTS (SELECT 1 FROM comments c WHERE c.issue_id = i.id)")
+		}
 	}
 	if len(filter.LabelsAll) > 0 {
 		labels, err := canonicalizeLabels(filter.LabelsAll)
@@ -455,7 +464,7 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 			return nil, err
 		}
 		for _, label := range labels {
-			where = append(where, "EXISTS (SELECT 1 FROM labels WHERE labels.issue_id = issues.id AND labels.label = ?)")
+			where = append(where, "EXISTS (SELECT 1 FROM labels l WHERE l.issue_id = i.id AND l.label = ?)")
 			args = append(args, label)
 		}
 	}
@@ -470,7 +479,7 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 			args = append(args, trimmed)
 		}
 		if len(placeholders) > 0 {
-			where = append(where, "id IN ("+strings.Join(placeholders, ", ")+")")
+			where = append(where, "i.id IN ("+strings.Join(placeholders, ", ")+")")
 		}
 	}
 	for _, term := range filter.SearchTerms {
@@ -478,7 +487,7 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 		if trimmed == "" {
 			continue
 		}
-		where = append(where, "(LOWER(title) LIKE ? OR LOWER(description) LIKE ?)")
+		where = append(where, "(LOWER(i.title) LIKE ? OR LOWER(i.description) LIKE ?)")
 		like := "%" + trimmed + "%"
 		args = append(args, like, like)
 	}
@@ -495,7 +504,7 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 	}
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
-		return nil, fmt.Errorf("list issues: %w", err)
+		return nil, fmt.Errorf("list issues: %w (query=%s)", err, query)
 	}
 	defer rows.Close()
 	issues := []model.Issue{}
@@ -701,6 +710,9 @@ func (s *Store) UpdateIssue(ctx context.Context, id string, in UpdateIssueInput)
 	if err := tx.Commit(); err != nil {
 		return model.Issue{}, fmt.Errorf("commit update issue: %w", err)
 	}
+	if err := s.commitWorkingSet(ctx, "update issue"); err != nil {
+		return model.Issue{}, err
+	}
 	return issue, nil
 }
 
@@ -733,6 +745,9 @@ func (s *Store) AddComment(ctx context.Context, in AddCommentInput) (model.Comme
 	}
 	if err := tx.Commit(); err != nil {
 		return model.Comment{}, fmt.Errorf("commit add comment: %w", err)
+	}
+	if err := s.commitWorkingSet(ctx, "add comment"); err != nil {
+		return model.Comment{}, err
 	}
 	return comment, nil
 }
@@ -779,6 +794,9 @@ func (s *Store) AddRelation(ctx context.Context, in AddRelationInput) (model.Rel
 	if err := tx.Commit(); err != nil {
 		return model.Relation{}, fmt.Errorf("commit add relation: %w", err)
 	}
+	if err := s.commitWorkingSet(ctx, "add relation"); err != nil {
+		return model.Relation{}, err
+	}
 	return rel, nil
 }
 
@@ -809,6 +827,9 @@ func (s *Store) RemoveRelation(ctx context.Context, srcID, dstID, relType string
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit remove relation: %w", err)
+	}
+	if err := s.commitWorkingSet(ctx, "remove relation"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -846,20 +867,26 @@ func (s *Store) Doctor(ctx context.Context) (HealthReport, error) {
 		Errors:   []string{},
 		Warnings: []string{},
 	}
-	if err := s.db.QueryRowContext(ctx, `PRAGMA integrity_check`).Scan(&report.IntegrityCheck); err != nil {
-		return report, fmt.Errorf("integrity check: %w", err)
+	report.IntegrityCheck = "ok"
+	var violations int
+	if err := s.db.QueryRowContext(ctx, `CALL DOLT_VERIFY_CONSTRAINTS()`).Scan(&violations); err != nil {
+		return report, fmt.Errorf("verify constraints: %w", err)
 	}
-	if strings.ToLower(strings.TrimSpace(report.IntegrityCheck)) != "ok" {
-		report.Errors = append(report.Errors, report.IntegrityCheck)
+	if violations > 0 {
+		report.IntegrityCheck = "constraint_violations"
+		report.Errors = append(report.Errors, fmt.Sprintf("constraint violations: %d", violations))
 	}
-	rows, err := s.db.QueryContext(ctx, `PRAGMA foreign_key_check`)
-	if err != nil {
-		return report, fmt.Errorf("foreign_key_check: %w", err)
+	for _, query := range []string{
+		`SELECT COUNT(*) FROM relations r LEFT JOIN issues s ON s.id = r.src_id LEFT JOIN issues d ON d.id = r.dst_id WHERE s.id IS NULL OR d.id IS NULL`,
+		`SELECT COUNT(*) FROM comments c LEFT JOIN issues i ON i.id = c.issue_id WHERE i.id IS NULL`,
+		`SELECT COUNT(*) FROM labels l LEFT JOIN issues i ON i.id = l.issue_id WHERE i.id IS NULL`,
+	} {
+		var count int
+		if err := s.db.QueryRowContext(ctx, query).Scan(&count); err != nil {
+			return report, fmt.Errorf("count foreign key issues: %w", err)
+		}
+		report.ForeignKeyIssues += count
 	}
-	for rows.Next() {
-		report.ForeignKeyIssues++
-	}
-	_ = rows.Close()
 	if report.ForeignKeyIssues > 0 {
 		report.Errors = append(report.Errors, fmt.Sprintf("foreign key violations: %d", report.ForeignKeyIssues))
 	}
@@ -900,6 +927,9 @@ func (s *Store) Fsck(ctx context.Context, repair bool) (HealthReport, error) {
 		if err := tx.Commit(); err != nil {
 			return HealthReport{}, fmt.Errorf("commit fsck repair: %w", err)
 		}
+		if err := s.commitWorkingSet(ctx, "fsck repair"); err != nil {
+			return HealthReport{}, err
+		}
 	}
 	return s.Doctor(ctx)
 }
@@ -932,18 +962,18 @@ func (s *Store) ImportIssue(ctx context.Context, in ImportIssue) error {
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `INSERT INTO issues(
-		id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at, archived_at, deleted_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
-	ON CONFLICT(id) DO UPDATE SET
-		title = excluded.title,
-		description = excluded.description,
-		status = excluded.status,
-		priority = excluded.priority,
-		issue_type = excluded.issue_type,
-		assignee = excluded.assignee,
-		created_at = excluded.created_at,
-		updated_at = excluded.updated_at,
-		closed_at = excluded.closed_at`,
+			id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at, archived_at, deleted_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+		ON DUPLICATE KEY UPDATE
+			title = VALUES(title),
+			description = VALUES(description),
+			status = VALUES(status),
+			priority = VALUES(priority),
+			issue_type = VALUES(issue_type),
+			assignee = VALUES(assignee),
+			created_at = VALUES(created_at),
+			updated_at = VALUES(updated_at),
+			closed_at = VALUES(closed_at)`,
 		in.ID,
 		strings.TrimSpace(in.Title),
 		strings.TrimSpace(in.Description),
@@ -971,6 +1001,9 @@ func (s *Store) ImportIssue(ctx context.Context, in ImportIssue) error {
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit import issue: %w", err)
 	}
+	if err := s.commitWorkingSet(ctx, "import issue"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -994,12 +1027,12 @@ func (s *Store) ImportComment(ctx context.Context, in ImportComment) error {
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `INSERT INTO comments(id, issue_id, body, created_at, created_by)
-	VALUES (?, ?, ?, ?, ?)
-	ON CONFLICT(id) DO UPDATE SET
-		issue_id = excluded.issue_id,
-		body = excluded.body,
-		created_at = excluded.created_at,
-		created_by = excluded.created_by`,
+		VALUES (?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			issue_id = VALUES(issue_id),
+			body = VALUES(body),
+			created_at = VALUES(created_at),
+			created_by = VALUES(created_by)`,
 		in.ID, in.IssueID, strings.TrimSpace(in.Body), in.CreatedAt.Format(time.RFC3339Nano), createdBy)
 	if err != nil {
 		return fmt.Errorf("import comment: %w", err)
@@ -1009,6 +1042,9 @@ func (s *Store) ImportComment(ctx context.Context, in ImportComment) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit import comment: %w", err)
+	}
+	if err := s.commitWorkingSet(ctx, "import comment"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1040,10 +1076,10 @@ func (s *Store) ImportRelation(ctx context.Context, in ImportRelation) error {
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `INSERT INTO relations(src_id, dst_id, type, created_at, created_by)
-	VALUES (?, ?, ?, ?, ?)
-	ON CONFLICT(src_id, dst_id, type) DO UPDATE SET
-		created_at = excluded.created_at,
-		created_by = excluded.created_by`,
+		VALUES (?, ?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			created_at = VALUES(created_at),
+			created_by = VALUES(created_by)`,
 		srcID, dstID, relType, in.CreatedAt.Format(time.RFC3339Nano), createdBy)
 	if err != nil {
 		return fmt.Errorf("import relation: %w", err)
@@ -1053,6 +1089,9 @@ func (s *Store) ImportRelation(ctx context.Context, in ImportRelation) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit import relation: %w", err)
+	}
+	if err := s.commitWorkingSet(ctx, "import relation"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1075,10 +1114,10 @@ func (s *Store) ImportLabel(ctx context.Context, in ImportLabel) error {
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `INSERT INTO labels(issue_id, label, created_at, created_by)
-	VALUES (?, ?, ?, ?)
-	ON CONFLICT(issue_id, label) DO UPDATE SET
-		created_at = excluded.created_at,
-		created_by = excluded.created_by`, in.IssueID, label, in.CreatedAt.Format(time.RFC3339Nano), createdBy)
+		VALUES (?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE
+			created_at = VALUES(created_at),
+			created_by = VALUES(created_by)`, in.IssueID, label, in.CreatedAt.Format(time.RFC3339Nano), createdBy)
 	if err != nil {
 		return fmt.Errorf("import label: %w", err)
 	}
@@ -1087,6 +1126,9 @@ func (s *Store) ImportLabel(ctx context.Context, in ImportLabel) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit import label: %w", err)
+	}
+	if err := s.commitWorkingSet(ctx, "import label"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1112,8 +1154,8 @@ func (s *Store) AddLabel(ctx context.Context, in AddLabelInput) ([]string, error
 		return nil, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO labels(issue_id, label, created_at, created_by)
-	VALUES (?, ?, ?, ?)
-	ON CONFLICT(issue_id, label) DO NOTHING`, in.IssueID, label, time.Now().UTC().Format(time.RFC3339Nano), createdBy)
+		VALUES (?, ?, ?, ?)
+		ON DUPLICATE KEY UPDATE issue_id = issue_id`, in.IssueID, label, time.Now().UTC().Format(time.RFC3339Nano), createdBy)
 	if err != nil {
 		return nil, fmt.Errorf("insert label: %w", err)
 	}
@@ -1122,6 +1164,9 @@ func (s *Store) AddLabel(ctx context.Context, in AddLabelInput) ([]string, error
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit add label: %w", err)
+	}
+	if err := s.commitWorkingSet(ctx, "add label"); err != nil {
+		return nil, err
 	}
 	return s.ListLabels(ctx, in.IssueID)
 }
@@ -1156,6 +1201,9 @@ func (s *Store) RemoveLabel(ctx context.Context, issueID, labelName string, expe
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit remove label: %w", err)
 	}
+	if err := s.commitWorkingSet(ctx, "remove label"); err != nil {
+		return nil, err
+	}
 	return s.ListLabels(ctx, issueID)
 }
 
@@ -1183,6 +1231,9 @@ func (s *Store) ReplaceLabels(ctx context.Context, issueID string, labels []stri
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit replace labels: %w", err)
+	}
+	if err := s.commitWorkingSet(ctx, "replace labels"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1276,6 +1327,9 @@ func (s *Store) TransitionIssue(ctx context.Context, in TransitionIssueInput) (m
 	if err := tx.Commit(); err != nil {
 		return model.Issue{}, fmt.Errorf("commit transition issue: %w", err)
 	}
+	if err := s.commitWorkingSet(ctx, "transition issue"); err != nil {
+		return model.Issue{}, err
+	}
 	return issue, nil
 }
 
@@ -1343,6 +1397,9 @@ func (s *Store) SetParent(ctx context.Context, in SetParentInput) (model.Relatio
 	if err := tx.Commit(); err != nil {
 		return model.Relation{}, fmt.Errorf("commit set parent: %w", err)
 	}
+	if err := s.commitWorkingSet(ctx, "set parent"); err != nil {
+		return model.Relation{}, err
+	}
 	return rel, nil
 }
 
@@ -1371,6 +1428,9 @@ func (s *Store) ClearParent(ctx context.Context, childID string, expectedRevisio
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit clear parent: %w", err)
+	}
+	if err := s.commitWorkingSet(ctx, "clear parent"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1475,6 +1535,9 @@ func (s *Store) ReplaceFromExport(ctx context.Context, export model.Export) erro
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit replace from export: %w", err)
 	}
+	if err := s.commitWorkingSet(ctx, "replace from export"); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -1531,9 +1594,9 @@ func (s *Store) bumpWorkspaceRevisionTx(ctx context.Context, tx *sql.Tx) (int64,
 func (s *Store) getMeta(ctx context.Context, tx *sql.Tx, key string) (string, error) {
 	var row *sql.Row
 	if tx != nil {
-		row = tx.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, key)
+		row = tx.QueryRowContext(ctx, `SELECT meta_value FROM meta WHERE meta_key = ?`, key)
 	} else {
-		row = s.db.QueryRowContext(ctx, `SELECT value FROM meta WHERE key = ?`, key)
+		row = s.db.QueryRowContext(ctx, `SELECT meta_value FROM meta WHERE meta_key = ?`, key)
 	}
 	var value string
 	if err := row.Scan(&value); err != nil {
@@ -1554,8 +1617,8 @@ func (s *Store) setMeta(ctx context.Context, tx *sql.Tx, key, value string) erro
 	} else {
 		execer = s.db
 	}
-	if _, err := execer.ExecContext(ctx, `INSERT INTO meta(key, value) VALUES (?, ?)
-		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value); err != nil {
+	if _, err := execer.ExecContext(ctx, `INSERT INTO meta(meta_key, meta_value) VALUES (?, ?)
+			ON DUPLICATE KEY UPDATE meta_value = VALUES(meta_value)`, key, value); err != nil {
 		return fmt.Errorf("set meta %q: %w", key, err)
 	}
 	return nil
@@ -1577,17 +1640,17 @@ func (s *Store) ensureExpectedRevisionTx(ctx context.Context, tx *sql.Tx, expect
 
 func buildIssueOrderClause(specs []SortSpec) (string, error) {
 	if len(specs) == 0 {
-		return "status ASC, priority ASC, updated_at DESC, id ASC", nil
+		return "i.status ASC, i.priority ASC, i.updated_at DESC, i.id ASC", nil
 	}
 	allowed := map[string]string{
-		"id":         "id",
-		"title":      "title",
-		"status":     "status",
-		"priority":   "priority",
-		"type":       "issue_type",
-		"assignee":   "assignee",
-		"created_at": "created_at",
-		"updated_at": "updated_at",
+		"id":         "i.id",
+		"title":      "i.title",
+		"status":     "i.status",
+		"priority":   "i.priority",
+		"type":       "i.issue_type",
+		"assignee":   "i.assignee",
+		"created_at": "i.created_at",
+		"updated_at": "i.updated_at",
 	}
 	order := make([]string, 0, len(specs))
 	for _, spec := range specs {
@@ -1602,7 +1665,7 @@ func buildIssueOrderClause(specs []SortSpec) (string, error) {
 		}
 		order = append(order, column+" "+direction)
 	}
-	order = append(order, "id ASC")
+	order = append(order, "i.id ASC")
 	return strings.Join(order, ", "), nil
 }
 
@@ -1925,14 +1988,63 @@ func nullableTime(value *time.Time) any {
 	return value.Format(time.RFC3339Nano)
 }
 
-func execIgnoreDuplicateColumn(ctx context.Context, db *sql.DB, stmt string) error {
-	if _, err := db.ExecContext(ctx, stmt); err != nil {
-		if strings.Contains(err.Error(), "duplicate column name") {
-			return nil
-		}
-		return fmt.Errorf("migrate alter table: %w", err)
+func ensureDoltDatabase(ctx context.Context, doltRootDir string, workspaceID string) error {
+	root := filepath.Clean(doltRootDir)
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		return fmt.Errorf("create dolt root dir: %w", err)
+	}
+	db, err := sql.Open(doltDriverName, buildDoltDSN(root, workspaceID, false))
+	if err != nil {
+		return fmt.Errorf("open dolt bootstrap: %w", err)
+	}
+	defer db.Close()
+	if _, err := db.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", doltDatabaseName)); err != nil {
+		return fmt.Errorf("create dolt database: %w", err)
 	}
 	return nil
+}
+
+func buildDoltDSN(doltRootDir, workspaceID string, includeDatabase bool) string {
+	author := strings.TrimSpace(workspaceID)
+	if author == "" {
+		author = "links"
+	}
+	author = strings.ReplaceAll(author, "@", "_")
+	query := url.Values{}
+	query.Set("commitname", author)
+	query.Set("commitemail", fmt.Sprintf("%s@links.local", author))
+	if includeDatabase {
+		query.Set("database", doltDatabaseName)
+	}
+	return "file://" + filepath.ToSlash(filepath.Clean(doltRootDir)) + "?" + query.Encode()
+}
+
+func execIgnoreAlreadyExists(ctx context.Context, db *sql.DB, stmt string) error {
+	if _, err := db.ExecContext(ctx, stmt); err != nil {
+		normalized := strings.ToLower(err.Error())
+		if strings.Contains(normalized, "already exists") {
+			return nil
+		}
+		return fmt.Errorf("migrate schema: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) commitWorkingSet(ctx context.Context, message string) error {
+	trimmed := strings.TrimSpace(message)
+	if trimmed == "" {
+		trimmed = "links mutation"
+	}
+	var commitHash string
+	err := s.db.QueryRowContext(ctx, `CALL DOLT_COMMIT('-Am', ?)`, trimmed).Scan(&commitHash)
+	if err == nil {
+		return nil
+	}
+	normalized := strings.ToLower(err.Error())
+	if strings.Contains(normalized, "nothing to commit") {
+		return nil
+	}
+	return fmt.Errorf("dolt commit working set: %w", err)
 }
 
 func newIssueID(workspaceID string) string {

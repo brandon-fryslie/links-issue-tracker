@@ -91,7 +91,7 @@ _lk() {
     'backup:snapshot management'
     'recover:restore from backup or sync file'
     'bulk:bulk issue operations'
-    'beads:beads sqlite import export'
+    'beads:beads dolt import export'
     'workspace:show workspace info'
     'quickstart:agent usage guide'
     'completion:emit shell completion'

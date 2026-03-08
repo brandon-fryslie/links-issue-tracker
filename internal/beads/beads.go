@@ -3,12 +3,16 @@ package beads
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"net/url"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/dolthub/driver"
 
 	"github.com/google/uuid"
 
@@ -16,7 +20,12 @@ import (
 	"github.com/bmf/links-issue-tracker/internal/store"
 )
 
-const driverName = "sqlite"
+const (
+	driverName         = "dolt"
+	defaultBeadsDBName = "beads"
+	defaultCommitName  = "links-beads"
+	defaultCommitEmail = "links-beads@links.local"
+)
 
 type Summary struct {
 	Issues    int `json:"issues"`
@@ -26,7 +35,7 @@ type Summary struct {
 }
 
 func Import(ctx context.Context, st *store.Store, beadsDBPath string) (Summary, error) {
-	db, err := sql.Open(driverName, fmt.Sprintf("file:%s?mode=ro", filepath.Clean(beadsDBPath)))
+	db, _, err := openDoltDatabase(ctx, beadsDBPath, false)
 	if err != nil {
 		return Summary{}, fmt.Errorf("open beads db: %w", err)
 	}
@@ -149,36 +158,35 @@ func Import(ctx context.Context, st *store.Store, beadsDBPath string) (Summary, 
 }
 
 func Export(ctx context.Context, st *store.Store, beadsDBPath string) (Summary, error) {
-	db, err := sql.Open(driverName, beadsDBPath)
+	db, dbName, err := openDoltDatabase(ctx, beadsDBPath, true)
 	if err != nil {
 		return Summary{}, fmt.Errorf("open beads export db: %w", err)
 	}
 	defer db.Close()
 	for _, stmt := range []string{
-		`PRAGMA foreign_keys=ON;`,
-		`CREATE TABLE IF NOT EXISTS issues (
-			id TEXT PRIMARY KEY,
+		`CREATE TABLE issues (
+			id VARCHAR(191) PRIMARY KEY,
 			title TEXT NOT NULL,
 			description TEXT NOT NULL DEFAULT '',
 			design TEXT NOT NULL DEFAULT '',
 			acceptance_criteria TEXT NOT NULL DEFAULT '',
 			notes TEXT NOT NULL DEFAULT '',
-			status TEXT NOT NULL DEFAULT 'open',
+			status VARCHAR(32) NOT NULL DEFAULT 'open',
 			priority INTEGER NOT NULL DEFAULT 2,
-			issue_type TEXT NOT NULL DEFAULT 'task',
+			issue_type VARCHAR(32) NOT NULL DEFAULT 'task',
 			assignee TEXT,
 			estimated_minutes INTEGER,
-			created_at DATETIME NOT NULL,
+			created_at VARCHAR(64) NOT NULL,
 			created_by TEXT DEFAULT '',
-			updated_at DATETIME NOT NULL,
-			closed_at DATETIME,
+			updated_at VARCHAR(64) NOT NULL,
+			closed_at VARCHAR(64),
 			closed_by_session TEXT DEFAULT '',
 			external_ref TEXT,
 			compaction_level INTEGER DEFAULT 0,
-			compacted_at DATETIME,
+			compacted_at VARCHAR(64),
 			compacted_at_commit TEXT,
 			original_size INTEGER,
-			deleted_at DATETIME,
+			deleted_at VARCHAR(64),
 			deleted_by TEXT DEFAULT '',
 			delete_reason TEXT DEFAULT '',
 			original_type TEXT DEFAULT '',
@@ -190,32 +198,32 @@ func Export(ctx context.Context, st *store.Store, beadsDBPath string) (Summary, 
 			event_kind TEXT DEFAULT '',
 			actor TEXT DEFAULT '',
 			target TEXT DEFAULT '',
-			payload TEXT DEFAULT '', source_repo TEXT DEFAULT '.', close_reason TEXT DEFAULT '', await_type TEXT, await_id TEXT, timeout_ns INTEGER, waiters TEXT, hook_bead TEXT DEFAULT '', role_bead TEXT DEFAULT '', agent_state TEXT DEFAULT '', last_activity DATETIME, role_type TEXT DEFAULT '', rig TEXT DEFAULT '', due_at DATETIME, defer_until DATETIME, owner TEXT DEFAULT '', crystallizes INTEGER DEFAULT 0, work_type TEXT DEFAULT 'mutex', source_system TEXT DEFAULT '', quality_score REAL
+			payload TEXT DEFAULT '', source_repo TEXT DEFAULT '.', close_reason TEXT DEFAULT '', await_type TEXT, await_id TEXT, timeout_ns INTEGER, waiters TEXT, hook_bead TEXT DEFAULT '', role_bead TEXT DEFAULT '', agent_state TEXT DEFAULT '', last_activity VARCHAR(64), role_type TEXT DEFAULT '', rig TEXT DEFAULT '', due_at VARCHAR(64), defer_until VARCHAR(64), owner TEXT DEFAULT '', crystallizes INTEGER DEFAULT 0, work_type TEXT DEFAULT 'mutex', source_system TEXT DEFAULT '', quality_score REAL
 		);`,
-		`CREATE TABLE IF NOT EXISTS dependencies (
-			issue_id TEXT NOT NULL,
-			depends_on_id TEXT NOT NULL,
-			type TEXT NOT NULL DEFAULT 'blocks',
-			created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		`CREATE TABLE dependencies (
+			issue_id VARCHAR(191) NOT NULL,
+			depends_on_id VARCHAR(191) NOT NULL,
+			type VARCHAR(32) NOT NULL DEFAULT 'blocks',
+			created_at VARCHAR(64) NOT NULL,
 			created_by TEXT NOT NULL,
 			metadata TEXT,
 			thread_id TEXT,
 			PRIMARY KEY (issue_id, depends_on_id, type)
 		);`,
-		`CREATE TABLE IF NOT EXISTS comments (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			issue_id TEXT NOT NULL,
+		`CREATE TABLE comments (
+			id BIGINT PRIMARY KEY AUTO_INCREMENT,
+			issue_id VARCHAR(191) NOT NULL,
 			author TEXT NOT NULL,
 			text TEXT NOT NULL,
-			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+			created_at VARCHAR(64) NOT NULL
 		);`,
-		`CREATE TABLE IF NOT EXISTS labels (
-			issue_id TEXT NOT NULL,
-			label TEXT NOT NULL,
+		`CREATE TABLE labels (
+			issue_id VARCHAR(191) NOT NULL,
+			label VARCHAR(191) NOT NULL,
 			PRIMARY KEY (issue_id, label)
 		);`,
 	} {
-		if _, err := db.ExecContext(ctx, stmt); err != nil {
+		if err := execIgnoreAlreadyExists(ctx, db, stmt); err != nil {
 			return Summary{}, fmt.Errorf("prepare export db: %w", err)
 		}
 	}
@@ -269,7 +277,102 @@ func Export(ctx context.Context, st *store.Store, beadsDBPath string) (Summary, 
 	if err := tx.Commit(); err != nil {
 		return Summary{}, err
 	}
+	if err := commitWorkingSet(ctx, db, fmt.Sprintf("beads export (%s)", dbName)); err != nil {
+		return Summary{}, err
+	}
 	return summary, nil
+}
+
+func openDoltDatabase(ctx context.Context, inputPath string, create bool) (*sql.DB, string, error) {
+	rootDir, dbName, err := resolveDoltTarget(inputPath)
+	if err != nil {
+		return nil, "", err
+	}
+	if create {
+		if err := os.MkdirAll(rootDir, 0o755); err != nil {
+			return nil, "", fmt.Errorf("create beads root dir: %w", err)
+		}
+		bootstrap, err := sql.Open(driverName, buildDoltDSN(rootDir, ""))
+		if err != nil {
+			return nil, "", fmt.Errorf("open beads bootstrap: %w", err)
+		}
+		if _, err := bootstrap.ExecContext(ctx, fmt.Sprintf("CREATE DATABASE IF NOT EXISTS %s", dbName)); err != nil {
+			_ = bootstrap.Close()
+			return nil, "", fmt.Errorf("create beads database: %w", err)
+		}
+		_ = bootstrap.Close()
+	}
+	db, err := sql.Open(driverName, buildDoltDSN(rootDir, dbName))
+	if err != nil {
+		return nil, "", fmt.Errorf("open beads database: %w", err)
+	}
+	return db, dbName, nil
+}
+
+func resolveDoltTarget(inputPath string) (string, string, error) {
+	clean := filepath.Clean(strings.TrimSpace(inputPath))
+	if clean == "" || clean == "." {
+		return "", "", errors.New("beads path is required")
+	}
+	base := filepath.Base(clean)
+	ext := filepath.Ext(base)
+	if ext != "" {
+		rootDir := filepath.Dir(clean)
+		dbName := normalizeDatabaseName(strings.TrimSuffix(base, ext))
+		if dbName == "" {
+			dbName = defaultBeadsDBName
+		}
+		return rootDir, dbName, nil
+	}
+	if stat, err := os.Stat(filepath.Join(clean, ".dolt")); err == nil && stat.IsDir() {
+		return filepath.Dir(clean), normalizeDatabaseName(base), nil
+	}
+	return clean, defaultBeadsDBName, nil
+}
+
+func buildDoltDSN(rootDir, dbName string) string {
+	query := url.Values{}
+	query.Set("commitname", defaultCommitName)
+	query.Set("commitemail", defaultCommitEmail)
+	if strings.TrimSpace(dbName) != "" {
+		query.Set("database", normalizeDatabaseName(dbName))
+	}
+	return "file://" + filepath.ToSlash(filepath.Clean(rootDir)) + "?" + query.Encode()
+}
+
+func normalizeDatabaseName(value string) string {
+	normalized := strings.TrimSpace(strings.ToLower(value))
+	if normalized == "" {
+		return ""
+	}
+	reInvalid := regexp.MustCompile(`[^a-z0-9_]`)
+	normalized = reInvalid.ReplaceAllString(normalized, "_")
+	normalized = strings.Trim(normalized, "_")
+	if normalized == "" {
+		return ""
+	}
+	return normalized
+}
+
+func execIgnoreAlreadyExists(ctx context.Context, db *sql.DB, stmt string) error {
+	if _, err := db.ExecContext(ctx, stmt); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "already exists") {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func commitWorkingSet(ctx context.Context, db *sql.DB, message string) error {
+	var commitHash string
+	if err := db.QueryRowContext(ctx, `CALL DOLT_COMMIT('-Am', ?)`, message).Scan(&commitHash); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
+			return nil
+		}
+		return fmt.Errorf("commit beads working set: %w", err)
+	}
+	return nil
 }
 
 func parseTime(value string) (time.Time, error) {

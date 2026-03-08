@@ -12,7 +12,7 @@ import (
 
 func TestStoreCreateEpicAndRelations(t *testing.T) {
 	ctx := context.Background()
-	st, err := Open(ctx, filepath.Join(t.TempDir(), "links.db"), "test-workspace-id")
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -71,7 +71,7 @@ func TestStoreCreateEpicAndRelations(t *testing.T) {
 
 func TestStoreRejectsInvalidIssueType(t *testing.T) {
 	ctx := context.Background()
-	st, err := Open(ctx, filepath.Join(t.TempDir(), "links.db"), "test-workspace-id")
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -83,7 +83,7 @@ func TestStoreRejectsInvalidIssueType(t *testing.T) {
 
 func TestStoreListIssuesSupportsAdvancedFilters(t *testing.T) {
 	ctx := context.Background()
-	st, err := Open(ctx, filepath.Join(t.TempDir(), "links.db"), "test-workspace-id")
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -140,7 +140,7 @@ func TestStoreListIssuesSupportsAdvancedFilters(t *testing.T) {
 
 func TestStoreLabelsAreWritableFirstClassData(t *testing.T) {
 	ctx := context.Background()
-	st, err := Open(ctx, filepath.Join(t.TempDir(), "links.db"), "test-workspace-id")
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -204,7 +204,7 @@ func intPtr(value int) *int { return &value }
 
 func TestWorkspaceRevisionAndReplaceFromExport(t *testing.T) {
 	ctx := context.Background()
-	st, err := Open(ctx, filepath.Join(t.TempDir(), "links.db"), "test-workspace-id")
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -305,7 +305,7 @@ func TestWorkspaceRevisionAndReplaceFromExport(t *testing.T) {
 
 func TestIssueLifecycleTracksReasonHistory(t *testing.T) {
 	ctx := context.Background()
-	st, err := Open(ctx, filepath.Join(t.TempDir(), "links.db"), "test-workspace-id")
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}

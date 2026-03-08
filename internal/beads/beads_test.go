@@ -2,61 +2,58 @@ package beads
 
 import (
 	"context"
-	"database/sql"
 	"path/filepath"
 	"testing"
-
-	_ "modernc.org/sqlite"
 
 	"github.com/bmf/links-issue-tracker/internal/store"
 )
 
-func TestImportFromBeadsSQLite(t *testing.T) {
+func TestImportFromBeadsDolt(t *testing.T) {
 	ctx := context.Background()
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "links.db"), "workspace-test")
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "links"), "workspace-test")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
 	defer st.Close()
 
 	beadsDBPath := filepath.Join(t.TempDir(), "beads.db")
-	beadsDB, err := sql.Open(driverName, beadsDBPath)
+	beadsDB, _, err := openDoltDatabase(ctx, beadsDBPath, true)
 	if err != nil {
-		t.Fatalf("sql.Open() error = %v", err)
+		t.Fatalf("openDoltDatabase() error = %v", err)
 	}
 	defer beadsDB.Close()
 
 	for _, stmt := range []string{
 		`CREATE TABLE issues (
-			id TEXT PRIMARY KEY,
+			id VARCHAR(191) PRIMARY KEY,
 			title TEXT NOT NULL,
 			description TEXT NOT NULL DEFAULT '',
-			status TEXT NOT NULL DEFAULT 'open',
+			status VARCHAR(32) NOT NULL DEFAULT 'open',
 			priority INTEGER NOT NULL DEFAULT 2,
-			issue_type TEXT NOT NULL DEFAULT 'task',
+			issue_type VARCHAR(32) NOT NULL DEFAULT 'task',
 			assignee TEXT,
-			created_at DATETIME NOT NULL,
-			updated_at DATETIME NOT NULL,
-			closed_at DATETIME,
-			deleted_at DATETIME
+			created_at VARCHAR(64) NOT NULL,
+			updated_at VARCHAR(64) NOT NULL,
+			closed_at VARCHAR(64),
+			deleted_at VARCHAR(64)
 		);`,
 		`CREATE TABLE dependencies (
-			issue_id TEXT NOT NULL,
-			depends_on_id TEXT NOT NULL,
-			type TEXT NOT NULL DEFAULT 'blocks',
-			created_at TIMESTAMP NOT NULL,
+			issue_id VARCHAR(191) NOT NULL,
+			depends_on_id VARCHAR(191) NOT NULL,
+			type VARCHAR(32) NOT NULL DEFAULT 'blocks',
+			created_at VARCHAR(64) NOT NULL,
 			created_by TEXT NOT NULL
 		);`,
 		`CREATE TABLE comments (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			issue_id TEXT NOT NULL,
+			id BIGINT PRIMARY KEY AUTO_INCREMENT,
+			issue_id VARCHAR(191) NOT NULL,
 			author TEXT NOT NULL,
 			text TEXT NOT NULL,
-			created_at DATETIME NOT NULL
+			created_at VARCHAR(64) NOT NULL
 		);`,
 		`CREATE TABLE labels (
-			issue_id TEXT NOT NULL,
-			label TEXT NOT NULL,
+			issue_id VARCHAR(191) NOT NULL,
+			label VARCHAR(191) NOT NULL,
 			PRIMARY KEY (issue_id, label)
 		);`,
 	} {
@@ -107,9 +104,9 @@ func TestImportFromBeadsSQLite(t *testing.T) {
 	}
 }
 
-func TestExportToBeadsSQLite(t *testing.T) {
+func TestExportToBeadsDolt(t *testing.T) {
 	ctx := context.Background()
-	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "links.db"), "workspace-test")
+	st, err := store.Open(ctx, filepath.Join(t.TempDir(), "links"), "workspace-test")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
@@ -142,9 +139,9 @@ func TestExportToBeadsSQLite(t *testing.T) {
 		t.Fatalf("summary = %#v", summary)
 	}
 
-	beadsDB, err := sql.Open(driverName, beadsDBPath)
+	beadsDB, _, err := openDoltDatabase(ctx, beadsDBPath, false)
 	if err != nil {
-		t.Fatalf("sql.Open() error = %v", err)
+		t.Fatalf("openDoltDatabase() error = %v", err)
 	}
 	defer beadsDB.Close()
 

@@ -18,7 +18,7 @@ lk completion fish > ~/.config/fish/completions/lk.fish
 
 ## Design
 
-- `// [LAW:one-source-of-truth]` One canonical SQLite database per git clone, stored under the shared git common dir.
+- `// [LAW:one-source-of-truth]` One canonical Dolt database per git clone, stored under the shared git common dir.
 - `// [LAW:single-enforcer]` The `lk` CLI is the only write boundary.
 - `// [LAW:no-silent-fallbacks]` Running outside a git repo is an explicit error.
 
@@ -144,6 +144,6 @@ lk workspace [--json]
 ## Beads compatibility
 
 - `// [LAW:locality-or-seam]` Beads compatibility is isolated in `internal/beads` so the core store keeps one canonical data model.
-- `lk beads import` reads Beads' SQLite tables `issues`, `dependencies`, `comments`, and `labels`.
-- `lk beads export` writes a Beads-compatible SQLite database with those same core tables populated from Links data.
+- `lk beads import` reads Beads data tables `issues`, `dependencies`, `comments`, and `labels` from a Dolt database target.
+- `lk beads export` writes those same tables to a Dolt database target for interoperability.
 - Only the implemented core relationship types are imported/exported: `blocks`, `parent-child`, and `related-to`.

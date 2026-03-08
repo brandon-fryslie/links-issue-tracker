@@ -45,7 +45,7 @@ func Resolve(cwd string) (Info, error) {
 	}
 	storageDir := filepath.Join(filepath.Clean(gitCommonDir), "links")
 	configPath := filepath.Join(storageDir, "config.json")
-	databasePath := filepath.Join(storageDir, "links.db")
+	databasePath := filepath.Join(storageDir, "dolt")
 	if err := os.MkdirAll(storageDir, 0o755); err != nil {
 		return Info{}, fmt.Errorf("create storage dir: %w", err)
 	}
