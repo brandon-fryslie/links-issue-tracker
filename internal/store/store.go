@@ -521,13 +521,6 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 	return s.attachLabels(ctx, issues)
 }
 
-func boolToInt(value bool) int {
-	if value {
-		return 1
-	}
-	return 0
-}
-
 func (s *Store) GetIssueDetail(ctx context.Context, id string) (model.IssueDetail, error) {
 	issue, err := s.GetIssue(ctx, id)
 	if err != nil {

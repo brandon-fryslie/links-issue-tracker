@@ -27,6 +27,7 @@ type Info struct {
 	StorageDir   string
 	ConfigPath   string
 	DatabasePath string
+	DoltRepoPath string
 	WorkspaceID  string
 }
 
@@ -46,6 +47,7 @@ func Resolve(cwd string) (Info, error) {
 	storageDir := filepath.Join(filepath.Clean(gitCommonDir), "links")
 	configPath := filepath.Join(storageDir, "config.json")
 	databasePath := filepath.Join(storageDir, "dolt")
+	doltRepoPath := filepath.Join(databasePath, "links")
 	if err := os.MkdirAll(storageDir, 0o755); err != nil {
 		return Info{}, fmt.Errorf("create storage dir: %w", err)
 	}
@@ -59,6 +61,7 @@ func Resolve(cwd string) (Info, error) {
 		StorageDir:   storageDir,
 		ConfigPath:   configPath,
 		DatabasePath: databasePath,
+		DoltRepoPath: doltRepoPath,
 		WorkspaceID:  cfg.WorkspaceID,
 	}, nil
 }

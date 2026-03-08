@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/bmf/links-issue-tracker/internal/doltcli"
 	"github.com/bmf/links-issue-tracker/internal/store"
 	"github.com/bmf/links-issue-tracker/internal/workspace"
 )
@@ -17,6 +18,10 @@ type App struct {
 func Open(ctx context.Context, cwd string) (*App, error) {
 	ws, err := workspace.Resolve(cwd)
 	if err != nil {
+		return nil, err
+	}
+	// [LAW:single-enforcer] Runtime Dolt version policy is enforced exactly once at app bootstrap.
+	if _, err := doltcli.RequireMinimumVersion(ctx, ws.RootDir, doltcli.MinSupportedVersion); err != nil {
 		return nil, err
 	}
 	st, err := store.Open(ctx, ws.DatabasePath, ws.WorkspaceID)

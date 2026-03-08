@@ -2,6 +2,11 @@
 
 `links` is a small, worktree-native issue tracker with a flat CLI: `lk`.
 
+## Requirements
+
+- Dolt CLI `v1.81.10` or later is required.
+- `lk` enforces this at runtime and fails fast if the installed Dolt version is older.
+
 ## Install
 
 ```sh
@@ -53,9 +58,13 @@ lk dep add <src-id> <dst-id> [--type blocks|parent-child|related-to] [--by <user
 lk dep rm <src-id> <dst-id> [--type blocks|parent-child|related-to] [--expected-revision N] [--json]
 lk dep ls <issue-id> [--type blocks|parent-child|related-to] [--json]
 lk export [--json]
-lk sync export [--path <path>] [--force] [--json]
-lk sync import [--path <path>] [--resolve fail|local|remote] [--force] [--json]
-lk sync status [--path <path>] [--json]
+lk sync status [--json]
+lk sync remote ls [--json]
+lk sync remote add --name <name> --url <url> [--json]
+lk sync remote rm --name <name> [--json]
+lk sync fetch [--remote <name>] [--prune] [--json]
+lk sync pull [--remote <name>] [--branch <name>] [--json]
+lk sync push [--remote <name>] [--branch <name>] [--set-upstream] [--force] [--json]
 lk doctor [--json]
 lk fsck [--repair] [--json]
 lk backup create [--keep N] [--json]
@@ -107,19 +116,21 @@ lk workspace [--json]
 - `// [LAW:single-enforcer]` The store owns one canonical `workspace_revision` and bumps it on every successful mutation.
 - `lk workspace --json` exposes the current `workspace_revision` so agents can detect stale views before writing.
 - Mutating commands support `--expected-revision N`; stale writes fail with a dedicated exit code.
-- `lk sync export` writes an atomic snapshot to `links/export.json` by default.
-- `lk sync export` refuses to overwrite a sync file that changed outside `links` unless `--force` is used.
-- `lk sync import` performs a 3-way merge (`base`, `local`, `remote`) and reports per-issue conflicts.
-- `lk sync import` conflict strategy is explicit: `--resolve fail|local|remote`.
-- `lk sync import` refuses to replace local state if the workspace has unsynced local changes since the last recorded sync unless `--force` is used.
-- The export snapshot includes `workspace_revision`, so sync state can be correlated deterministically.
+- `lk sync` uses Dolt git-remote support directly:
+  - `lk sync remote add|rm|ls` manages remotes
+  - `lk sync fetch` fetches remote refs
+  - `lk sync pull` pulls/merges from a remote branch
+  - `lk sync push` pushes local commits to a remote branch
+  - `lk sync status` shows local branch/head/status plus configured remotes
+- By default all sync operations run in the current repo/worktree root and operate on the shared Dolt database at `$(git rev-parse --git-common-dir)/links/dolt`.
+- See [docs/dolt-remote-sync.md](docs/dolt-remote-sync.md) for full examples.
 
 ## Health and recovery
 
 - `lk doctor` runs non-mutating checks (`integrity_check`, FK issues, relation invariants, orphan history rows).
 - `lk fsck --repair` applies safe repairs for known integrity faults.
 - `lk backup create/list/restore` manages rotating JSON snapshots.
-- `lk recover` restores from a sync export or backup snapshot.
+- `lk recover` restores from a sync export file or backup snapshot.
 
 ## Exit codes
 

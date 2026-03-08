@@ -10,7 +10,8 @@ _lk_completions() {
   local label_subcommands="add rm"
   local parent_subcommands="set clear"
   local dep_subcommands="add rm ls"
-  local sync_subcommands="export import status"
+  local sync_subcommands="status remote fetch pull push"
+  local sync_remote_subcommands="ls add rm"
   local backup_subcommands="create list restore"
   local bulk_subcommands="label close archive import"
   local beads_subcommands="import export"
@@ -39,6 +40,12 @@ _lk_completions() {
     sync)
       COMPREPLY=( $(compgen -W "${sync_subcommands}" -- "${current}") )
       return
+      ;;
+    remote)
+      if [[ "${words[1]}" == "sync" ]]; then
+        COMPREPLY=( $(compgen -W "${sync_remote_subcommands}" -- "${current}") )
+        return
+      fi
       ;;
     backup)
       COMPREPLY=( $(compgen -W "${backup_subcommands}" -- "${current}") )
@@ -85,7 +92,7 @@ _lk() {
     'children:list child issues'
     'dep:manage dependencies'
     'export:write JSON export to stdout'
-    'sync:sync export file'
+    'sync:sync via dolt remotes'
     'doctor:database health check'
     'fsck:database integrity check and repair'
     'backup:snapshot management'
@@ -120,7 +127,12 @@ _lk() {
           _values 'dep commands' add rm ls
           ;;
         sync)
-          _values 'sync commands' export import status
+          _values 'sync commands' status remote fetch pull push
+          ;;
+        remote)
+          if [[ "$line[1]" = "sync" ]]; then
+            _values 'sync remote commands' ls add rm
+          fi
           ;;
         backup)
           _values 'backup commands' create list restore
@@ -148,7 +160,8 @@ complete -c lk -n '__fish_seen_subcommand_from comment' -a 'add'
 complete -c lk -n '__fish_seen_subcommand_from label' -a 'add rm'
 complete -c lk -n '__fish_seen_subcommand_from parent' -a 'set clear'
 complete -c lk -n '__fish_seen_subcommand_from dep' -a 'add rm ls'
-complete -c lk -n '__fish_seen_subcommand_from sync' -a 'export import status'
+complete -c lk -n '__fish_seen_subcommand_from sync' -a 'status remote fetch pull push'
+complete -c lk -n '__fish_seen_subcommand_from remote' -a 'ls add rm'
 complete -c lk -n '__fish_seen_subcommand_from backup' -a 'create list restore'
 complete -c lk -n '__fish_seen_subcommand_from bulk' -a 'label close archive import'
 complete -c lk -n '__fish_seen_subcommand_from beads' -a 'import export'

@@ -17,6 +17,7 @@ import (
 	"github.com/bmf/links-issue-tracker/internal/app"
 	"github.com/bmf/links-issue-tracker/internal/backup"
 	"github.com/bmf/links-issue-tracker/internal/beads"
+	"github.com/bmf/links-issue-tracker/internal/doltcli"
 	"github.com/bmf/links-issue-tracker/internal/merge"
 	"github.com/bmf/links-issue-tracker/internal/model"
 	"github.com/bmf/links-issue-tracker/internal/query"
@@ -38,6 +39,22 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 		return runQuickstart(stdout, args[1:])
 	case "completion":
 		return runCompletion(stdout, args[1:])
+	case "sync":
+		cwd, err := os.Getwd()
+		if err != nil {
+			return fmt.Errorf("get cwd: %w", err)
+		}
+		ws, err := workspace.Resolve(cwd)
+		if err != nil {
+			if errors.Is(err, workspace.ErrNotGitRepo) {
+				return fmt.Errorf("links requires running inside a git repository/worktree")
+			}
+			return err
+		}
+		if _, err := doltcli.RequireMinimumVersion(ctx, ws.RootDir, doltcli.MinSupportedVersion); err != nil {
+			return err
+		}
+		return runSync(ctx, stdout, ws, args[1:])
 	}
 	ap, err := app.OpenFromWD(ctx)
 	if err != nil {
@@ -85,8 +102,6 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 		return runBeads(ctx, stdout, ap, args[1:])
 	case "workspace":
 		return runWorkspace(stdout, ap, args[1:])
-	case "sync":
-		return runSync(ctx, stdout, ap, args[1:])
 	case "doctor":
 		return runDoctor(ctx, stdout, ap, args[1:])
 	case "fsck":
@@ -667,6 +682,7 @@ func runWorkspace(stdout io.Writer, ap *app.App, args []string) error {
 		"git_common_dir": ap.Workspace.GitCommonDir,
 		"storage_dir":    ap.Workspace.StorageDir,
 		"database_path":  ap.Workspace.DatabasePath,
+		"dolt_repo_path": ap.Workspace.DoltRepoPath,
 	}
 	if revision, err := ap.Store.GetWorkspaceRevision(context.Background()); err == nil {
 		payload["workspace_revision"] = strconv.FormatInt(revision, 10)
@@ -674,7 +690,7 @@ func runWorkspace(stdout io.Writer, ap *app.App, args []string) error {
 	if *jsonOut {
 		return writeJSON(stdout, payload)
 	}
-	for _, key := range []string{"workspace_id", "workspace_revision", "git_common_dir", "storage_dir", "database_path"} {
+	for _, key := range []string{"workspace_id", "workspace_revision", "git_common_dir", "storage_dir", "database_path", "dolt_repo_path"} {
 		if _, err := fmt.Fprintf(stdout, "%s: %s\n", key, payload[key]); err != nil {
 			return err
 		}
@@ -682,187 +698,278 @@ func runWorkspace(stdout io.Writer, ap *app.App, args []string) error {
 	return nil
 }
 
-func runSync(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
+func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: lk sync <export|import|status> [--path <path>] [--force] [--json]")
+		return errors.New("usage: lk sync <status|remote|fetch|pull|push> ...")
 	}
 	switch args[0] {
-	case "export":
-		fs := flag.NewFlagSet("sync export", flag.ContinueOnError)
+	case "remote":
+		if len(args) < 2 {
+			return errors.New("usage: lk sync remote <ls|add|rm> ...")
+		}
+		switch args[1] {
+		case "ls":
+			fs := flag.NewFlagSet("sync remote ls", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			jsonOut := fs.Bool("json", false, "Output JSON")
+			if err := fs.Parse(args[2:]); err != nil {
+				return err
+			}
+			output, err := doltcli.Run(ctx, ws.DoltRepoPath, "remote", "-v")
+			if err != nil {
+				return err
+			}
+			payload := map[string]any{
+				"remotes": parseDoltRemoteVerbose(output),
+				"raw":     output,
+			}
+			return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
+				p := v.(map[string]any)
+				_, err := fmt.Fprintln(w, strings.TrimSpace(p["raw"].(string)))
+				return err
+			})
+		case "add":
+			fs := flag.NewFlagSet("sync remote add", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			name := fs.String("name", "", "Remote name")
+			url := fs.String("url", "", "Remote URL")
+			jsonOut := fs.Bool("json", false, "Output JSON")
+			if err := fs.Parse(args[2:]); err != nil {
+				return err
+			}
+			if strings.TrimSpace(*name) == "" || strings.TrimSpace(*url) == "" {
+				return errors.New("usage: lk sync remote add --name <name> --url <url> [--json]")
+			}
+			output, err := doltcli.Run(ctx, ws.DoltRepoPath, "remote", "add", strings.TrimSpace(*name), strings.TrimSpace(*url))
+			if err != nil {
+				return err
+			}
+			payload := map[string]any{
+				"status": "ok",
+				"name":   strings.TrimSpace(*name),
+				"url":    strings.TrimSpace(*url),
+				"raw":    output,
+			}
+			return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
+				p := v.(map[string]any)
+				if strings.TrimSpace(p["raw"].(string)) != "" {
+					_, err := fmt.Fprintln(w, strings.TrimSpace(p["raw"].(string)))
+					return err
+				}
+				_, err := fmt.Fprintf(w, "remote %s added\n", p["name"])
+				return err
+			})
+		case "rm", "remove":
+			fs := flag.NewFlagSet("sync remote rm", flag.ContinueOnError)
+			fs.SetOutput(io.Discard)
+			name := fs.String("name", "", "Remote name")
+			jsonOut := fs.Bool("json", false, "Output JSON")
+			if err := fs.Parse(args[2:]); err != nil {
+				return err
+			}
+			if strings.TrimSpace(*name) == "" {
+				return errors.New("usage: lk sync remote rm --name <name> [--json]")
+			}
+			output, err := doltcli.Run(ctx, ws.DoltRepoPath, "remote", "remove", strings.TrimSpace(*name))
+			if err != nil {
+				return err
+			}
+			payload := map[string]any{
+				"status": "ok",
+				"name":   strings.TrimSpace(*name),
+				"raw":    output,
+			}
+			return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
+				p := v.(map[string]any)
+				if strings.TrimSpace(p["raw"].(string)) != "" {
+					_, err := fmt.Fprintln(w, strings.TrimSpace(p["raw"].(string)))
+					return err
+				}
+				_, err := fmt.Fprintf(w, "remote %s removed\n", p["name"])
+				return err
+			})
+		default:
+			return errors.New("usage: lk sync remote <ls|add|rm> ...")
+		}
+	case "fetch":
+		fs := flag.NewFlagSet("sync fetch", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
-		path := fs.String("path", defaultSyncPath(ap), "Path to export snapshot file")
-		force := fs.Bool("force", false, "Overwrite sync file even if it changed outside links")
+		remote := fs.String("remote", "origin", "Remote name")
+		prune := fs.Bool("prune", false, "Pass --prune to dolt fetch")
 		jsonOut := fs.Bool("json", false, "Output JSON")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		export, err := ap.Store.Export(ctx)
+		commandArgs := []string{"fetch", strings.TrimSpace(*remote)}
+		if *prune {
+			commandArgs = append(commandArgs, "--prune")
+		}
+		output, err := doltcli.Run(ctx, ws.DoltRepoPath, commandArgs...)
 		if err != nil {
-			return err
-		}
-		if _, err := backup.Create(ap.Workspace.StorageDir, export); err != nil {
-			return err
-		}
-		if err := backup.Prune(ap.Workspace.StorageDir, 20); err != nil {
-			return err
-		}
-		state, err := ap.Store.GetSyncState(ctx)
-		if err != nil {
-			return err
-		}
-		existingHash, err := syncfile.HashFile(*path)
-		if err != nil {
-			return err
-		}
-		if existingHash != "" && state.Path == filepath.Clean(*path) && state.ContentHash != "" && existingHash != state.ContentHash && !*force {
-			return MergeConflictError{Message: fmt.Sprintf("sync export conflict: %s changed outside links", filepath.Clean(*path))}
-		}
-		contentHash, err := syncfile.WriteAtomic(*path, export)
-		if err != nil {
-			return err
-		}
-		if _, err := syncfile.WriteAtomic(syncBasePath(ap), export); err != nil {
-			return err
-		}
-		if err := ap.Store.RecordSyncState(ctx, store.SyncState{
-			Path:              filepath.Clean(*path),
-			ContentHash:       contentHash,
-			WorkspaceRevision: export.WorkspaceRevision,
-		}); err != nil {
 			return err
 		}
 		payload := map[string]any{
-			"path":               filepath.Clean(*path),
-			"content_hash":       contentHash,
-			"workspace_revision": export.WorkspaceRevision,
+			"status": "ok",
+			"remote": strings.TrimSpace(*remote),
+			"raw":    output,
 		}
 		return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
 			p := v.(map[string]any)
-			_, err := fmt.Fprintf(w, "exported %s revision=%v hash=%v\n", p["path"], p["workspace_revision"], p["content_hash"])
+			if strings.TrimSpace(p["raw"].(string)) != "" {
+				_, err := fmt.Fprintln(w, strings.TrimSpace(p["raw"].(string)))
+				return err
+			}
+			_, err := fmt.Fprintf(w, "fetched %s\n", p["remote"])
 			return err
 		})
-	case "import":
-		fs := flag.NewFlagSet("sync import", flag.ContinueOnError)
+	case "pull":
+		fs := flag.NewFlagSet("sync pull", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
-		path := fs.String("path", defaultSyncPath(ap), "Path to import snapshot file")
-		force := fs.Bool("force", false, "Import even if local workspace has unsynced changes")
-		resolve := fs.String("resolve", "fail", "Conflict strategy for 3-way merge: fail|local|remote")
+		remote := fs.String("remote", "origin", "Remote name")
+		branch := fs.String("branch", "", "Branch name (defaults to current)")
 		jsonOut := fs.Bool("json", false, "Output JSON")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		remoteExport, contentHash, err := syncfile.Read(*path)
+		commandArgs := []string{"pull", strings.TrimSpace(*remote)}
+		if strings.TrimSpace(*branch) != "" {
+			commandArgs = append(commandArgs, strings.TrimSpace(*branch))
+		}
+		output, err := doltcli.Run(ctx, ws.DoltRepoPath, commandArgs...)
 		if err != nil {
-			return err
-		}
-		localExport, err := ap.Store.Export(ctx)
-		if err != nil {
-			return err
-		}
-		baseExport, _, err := syncfile.Read(syncBasePath(ap))
-		if err != nil {
-			baseExport = localExport
-		}
-		result := merge.ThreeWay(baseExport, localExport, remoteExport)
-		merged := result.Export
-		conflicts := result.Conflicts
-		if len(conflicts) > 0 {
-			switch strings.ToLower(strings.TrimSpace(*resolve)) {
-			case "remote":
-				merged = remoteExport
-			case "local":
-				merged = localExport
-			case "fail":
-				if !*force {
-					return MergeConflictError{
-						Message:   fmt.Sprintf("sync import merge conflicts: %d issue(s)", len(conflicts)),
-						Conflicts: conflicts,
-					}
-				}
-				merged = remoteExport
-			default:
-				return fmt.Errorf("unsupported --resolve strategy %q", *resolve)
-			}
-		}
-
-		state, err := ap.Store.GetSyncState(ctx)
-		if err != nil {
-			return err
-		}
-		currentRevision, err := ap.Store.GetWorkspaceRevision(ctx)
-		if err != nil {
-			return err
-		}
-		if state.WorkspaceRevision != 0 && currentRevision != state.WorkspaceRevision && !*force {
-			return MergeConflictError{Message: fmt.Sprintf("sync import conflict: local workspace revision %d has unsynced changes since last sync revision %d", currentRevision, state.WorkspaceRevision)}
-		}
-		if _, err := backup.Create(ap.Workspace.StorageDir, localExport); err != nil {
-			return err
-		}
-		if err := backup.Prune(ap.Workspace.StorageDir, 20); err != nil {
-			return err
-		}
-		if err := ap.Store.ReplaceFromExport(ctx, merged); err != nil {
-			return err
-		}
-		if _, err := syncfile.WriteAtomic(syncBasePath(ap), merged); err != nil {
-			return err
-		}
-		if err := ap.Store.RecordSyncState(ctx, store.SyncState{
-			Path:              filepath.Clean(*path),
-			ContentHash:       contentHash,
-			WorkspaceRevision: merged.WorkspaceRevision,
-		}); err != nil {
 			return err
 		}
 		payload := map[string]any{
-			"path":               filepath.Clean(*path),
-			"content_hash":       contentHash,
-			"workspace_revision": merged.WorkspaceRevision,
-			"conflict_count":     len(conflicts),
+			"status": "ok",
+			"remote": strings.TrimSpace(*remote),
+			"branch": strings.TrimSpace(*branch),
+			"raw":    output,
 		}
 		return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
 			p := v.(map[string]any)
-			_, err := fmt.Fprintf(w, "imported %s revision=%v hash=%v conflicts=%v\n", p["path"], p["workspace_revision"], p["content_hash"], p["conflict_count"])
+			if strings.TrimSpace(p["raw"].(string)) != "" {
+				_, err := fmt.Fprintln(w, strings.TrimSpace(p["raw"].(string)))
+				return err
+			}
+			if strings.TrimSpace(p["branch"].(string)) != "" {
+				_, err := fmt.Fprintf(w, "pulled %s/%s\n", p["remote"], p["branch"])
+				return err
+			}
+			_, err := fmt.Fprintf(w, "pulled %s\n", p["remote"])
+			return err
+		})
+	case "push":
+		fs := flag.NewFlagSet("sync push", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		remote := fs.String("remote", "origin", "Remote name")
+		branch := fs.String("branch", "", "Branch name (defaults to current)")
+		setUpstream := fs.Bool("set-upstream", false, "Pass -u to dolt push")
+		force := fs.Bool("force", false, "Pass --force to dolt push")
+		jsonOut := fs.Bool("json", false, "Output JSON")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		commandArgs := []string{"push"}
+		if *setUpstream {
+			commandArgs = append(commandArgs, "-u")
+		}
+		if *force {
+			commandArgs = append(commandArgs, "--force")
+		}
+		commandArgs = append(commandArgs, strings.TrimSpace(*remote))
+		if strings.TrimSpace(*branch) != "" {
+			commandArgs = append(commandArgs, strings.TrimSpace(*branch))
+		}
+		output, err := doltcli.Run(ctx, ws.DoltRepoPath, commandArgs...)
+		if err != nil {
+			return err
+		}
+		payload := map[string]any{
+			"status": "ok",
+			"remote": strings.TrimSpace(*remote),
+			"branch": strings.TrimSpace(*branch),
+			"raw":    output,
+		}
+		return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
+			p := v.(map[string]any)
+			if strings.TrimSpace(p["raw"].(string)) != "" {
+				_, err := fmt.Fprintln(w, strings.TrimSpace(p["raw"].(string)))
+				return err
+			}
+			if strings.TrimSpace(p["branch"].(string)) != "" {
+				_, err := fmt.Fprintf(w, "pushed %s/%s\n", p["remote"], p["branch"])
+				return err
+			}
+			_, err := fmt.Fprintf(w, "pushed %s\n", p["remote"])
 			return err
 		})
 	case "status":
 		fs := flag.NewFlagSet("sync status", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
-		path := fs.String("path", defaultSyncPath(ap), "Path to sync snapshot file")
 		jsonOut := fs.Bool("json", false, "Output JSON")
 		if err := fs.Parse(args[1:]); err != nil {
 			return err
 		}
-		state, err := ap.Store.GetSyncState(ctx)
+		version, err := doltcli.InstalledVersion(ctx, ws.DoltRepoPath)
 		if err != nil {
 			return err
 		}
-		currentRevision, err := ap.Store.GetWorkspaceRevision(ctx)
+		branch, err := doltcli.Run(ctx, ws.DoltRepoPath, "branch", "--show-current")
 		if err != nil {
 			return err
 		}
-		existingHash, err := syncfile.HashFile(*path)
+		remotesOutput, err := doltcli.Run(ctx, ws.DoltRepoPath, "remote", "-v")
+		if err != nil {
+			return err
+		}
+		statusOutput, err := doltcli.Run(ctx, ws.DoltRepoPath, "status")
+		if err != nil {
+			return err
+		}
+		logOutput, err := doltcli.Run(ctx, ws.DoltRepoPath, "log", "-n", "1", "--oneline")
 		if err != nil {
 			return err
 		}
 		payload := map[string]any{
-			"path":                         filepath.Clean(*path),
-			"current_workspace_revision":   currentRevision,
-			"last_sync_path":               state.Path,
-			"last_sync_hash":               state.ContentHash,
-			"last_sync_workspace_revision": state.WorkspaceRevision,
-			"current_file_hash":            existingHash,
-			"file_matches_last_sync":       existingHash != "" && existingHash == state.ContentHash,
+			"dolt_version": version.String(),
+			"branch":       strings.TrimSpace(branch),
+			"head":         strings.TrimSpace(logOutput),
+			"remotes":      parseDoltRemoteVerbose(remotesOutput),
+			"status":       strings.TrimSpace(statusOutput),
 		}
 		return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
 			p := v.(map[string]any)
-			_, err := fmt.Fprintf(w, "path=%v current_revision=%v last_sync_revision=%v file_hash=%v\n", p["path"], p["current_workspace_revision"], p["last_sync_workspace_revision"], p["current_file_hash"])
+			_, err := fmt.Fprintf(w, "version=%v branch=%v head=%v remotes=%d\n", p["dolt_version"], p["branch"], p["head"], len(p["remotes"].([]map[string]string)))
 			return err
 		})
 	default:
-		return errors.New("usage: lk sync <export|import|status> [--path <path>] [--force] [--json]")
+		return errors.New("usage: lk sync <status|remote|fetch|pull|push> ...")
 	}
+}
+
+func parseDoltRemoteVerbose(output string) []map[string]string {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	remotes := make([]map[string]string, 0, len(lines))
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if trimmed == "" {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		if len(fields) < 2 {
+			remotes = append(remotes, map[string]string{"raw": trimmed})
+			continue
+		}
+		entry := map[string]string{
+			"name": fields[0],
+			"url":  fields[1],
+		}
+		if len(fields) >= 3 {
+			entry["scope"] = strings.Trim(fields[2], "()")
+		}
+		remotes = append(remotes, entry)
+	}
+	return remotes
 }
 
 func runDoctor(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
@@ -1222,7 +1329,7 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"Create issues with `lk new ...`; use `--type epic` for epics.",
 			"Connect issues using `lk parent set` and `lk dep add --type related-to|blocks`.",
 			"Mutate safely with `--expected-revision` from `workspace_revision`.",
-			"Sync state via `lk sync export` and `lk sync import --resolve fail|local|remote`.",
+			"Sync via Dolt git remotes using `lk sync remote`, `lk sync fetch`, `lk sync pull`, and `lk sync push`.",
 			"Run health checks with `lk doctor` and repair known corruption with `lk fsck --repair`.",
 			"Snapshot and rollback using `lk backup create`, `lk backup restore`, or `lk recover`.",
 		},
@@ -1233,7 +1340,9 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"lk parent set lk-124 lk-100 --json",
 			"lk dep add lk-124 lk-122 --type related-to --json",
 			"lk edit lk-124 --priority 1 --expected-revision 42 --json",
-			"lk sync import --path links/export.json --resolve fail --json",
+			"lk sync remote add --name origin --url https://github.com/org/repo.git --json",
+			"lk sync pull --remote origin --branch main --json",
+			"lk sync push --remote origin --branch main --json",
 		},
 		"exit_codes": map[string]int{
 			"ok":             ExitOK,
@@ -1266,9 +1375,11 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"4) Safe mutations",
 			"   Read `workspace_revision` and pass `--expected-revision N` on writes.",
 			"",
-			"5) Sync + merge",
-			"   `lk sync export --json`",
-			"   `lk sync import --resolve fail|local|remote --json`",
+			"5) Dolt remote sync",
+			"   `lk sync remote ls --json`",
+			"   `lk sync fetch --remote origin --json`",
+			"   `lk sync pull --remote origin --branch main --json`",
+			"   `lk sync push --remote origin --branch main --json`",
 			"",
 			"6) Integrity and recovery",
 			"   `lk doctor --json`",
@@ -1557,10 +1668,6 @@ func optionalExpectedRevision(fs *flag.FlagSet, value *int64) *int64 {
 	return &out
 }
 
-func defaultSyncPath(ap *app.App) string {
-	return filepath.Join(ap.Workspace.RootDir, "links", "export.json")
-}
-
 func syncBasePath(ap *app.App) string {
 	return filepath.Join(ap.Workspace.StorageDir, "last-sync-base.json")
 }
@@ -1648,9 +1755,13 @@ Usage:
   lk dep rm <src-id> <dst-id> [--type blocks|parent-child|related-to] [--expected-revision N] [--json]
   lk dep ls <issue-id> [--type blocks|parent-child|related-to] [--json]
   lk export [--json]
-  lk sync export [--path <path>] [--force] [--json]
-  lk sync import [--path <path>] [--resolve fail|local|remote] [--force] [--json]
-  lk sync status [--path <path>] [--json]
+  lk sync status [--json]
+  lk sync remote ls [--json]
+  lk sync remote add --name <name> --url <url> [--json]
+  lk sync remote rm --name <name> [--json]
+  lk sync fetch [--remote <name>] [--prune] [--json]
+  lk sync pull [--remote <name>] [--branch <name>] [--json]
+  lk sync push [--remote <name>] [--branch <name>] [--set-upstream] [--force] [--json]
   lk doctor [--json]
   lk fsck [--repair] [--json]
   lk backup create [--keep N] [--json]
