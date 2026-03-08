@@ -22,6 +22,7 @@ type Summary struct {
 	Issues    int `json:"issues"`
 	Relations int `json:"relations"`
 	Comments  int `json:"comments"`
+	Labels    int `json:"labels"`
 }
 
 func Import(ctx context.Context, st *store.Store, beadsDBPath string) (Summary, error) {
@@ -122,6 +123,28 @@ func Import(ctx context.Context, st *store.Store, beadsDBPath string) (Summary, 
 	if err := commentRows.Err(); err != nil {
 		return Summary{}, err
 	}
+	labelRows, err := db.QueryContext(ctx, `SELECT issue_id, label FROM labels`)
+	if err == nil {
+		defer labelRows.Close()
+		for labelRows.Next() {
+			var issueID, label string
+			if err := labelRows.Scan(&issueID, &label); err != nil {
+				return Summary{}, err
+			}
+			if err := st.ImportLabel(ctx, store.ImportLabel{
+				IssueID:   issueID,
+				Name:      label,
+				CreatedAt: time.Now().UTC(),
+				CreatedBy: "beads",
+			}); err != nil {
+				return Summary{}, err
+			}
+			summary.Labels++
+		}
+		if err := labelRows.Err(); err != nil {
+			return Summary{}, err
+		}
+	}
 	return summary, nil
 }
 
@@ -186,6 +209,11 @@ func Export(ctx context.Context, st *store.Store, beadsDBPath string) (Summary, 
 			text TEXT NOT NULL,
 			created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 		);`,
+		`CREATE TABLE IF NOT EXISTS labels (
+			issue_id TEXT NOT NULL,
+			label TEXT NOT NULL,
+			PRIMARY KEY (issue_id, label)
+		);`,
 	} {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			return Summary{}, fmt.Errorf("prepare export db: %w", err)
@@ -200,7 +228,7 @@ func Export(ctx context.Context, st *store.Store, beadsDBPath string) (Summary, 
 		return Summary{}, err
 	}
 	defer tx.Rollback()
-	for _, table := range []string{"issues", "dependencies", "comments"} {
+	for _, table := range []string{"issues", "dependencies", "comments", "labels"} {
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table); err != nil {
 			return Summary{}, err
 		}
@@ -231,6 +259,12 @@ func Export(ctx context.Context, st *store.Store, beadsDBPath string) (Summary, 
 			return Summary{}, fmt.Errorf("export comment %s: %w", comment.ID, err)
 		}
 		summary.Comments++
+	}
+	for _, label := range export.Labels {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO labels(issue_id, label) VALUES (?, ?)`, label.IssueID, label.Name); err != nil {
+			return Summary{}, fmt.Errorf("export label %s:%s: %w", label.IssueID, label.Name, err)
+		}
+		summary.Labels++
 	}
 	if err := tx.Commit(); err != nil {
 		return Summary{}, err
@@ -264,5 +298,5 @@ func nullString(value string, fallback string) string {
 }
 
 func FromExport(export model.Export) Summary {
-	return Summary{Issues: len(export.Issues), Relations: len(export.Relations), Comments: len(export.Comments)}
+	return Summary{Issues: len(export.Issues), Relations: len(export.Relations), Comments: len(export.Comments), Labels: len(export.Labels)}
 }

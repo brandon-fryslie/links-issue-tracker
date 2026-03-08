@@ -49,6 +49,8 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 		return runStatus(ctx, stdout, ap, args[1:], "open")
 	case "comment":
 		return runComment(ctx, stdout, ap, args[1:])
+	case "label":
+		return runLabel(ctx, stdout, ap, args[1:])
 	case "dep":
 		return runDep(ctx, stdout, ap, args[1:])
 	case "export":
@@ -73,12 +75,13 @@ func runNew(ctx context.Context, stdout io.Writer, ap *app.App, args []string) e
 	issueType := fs.String("type", "task", "Issue type: task|feature|bug|chore|epic")
 	priority := fs.Int("priority", 2, "Priority 0..4 (lower is more important)")
 	assignee := fs.String("assignee", "", "Assignee")
+	labels := fs.String("labels", "", "Comma-separated labels")
 	jsonOut := fs.Bool("json", false, "Output JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	issue, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
-		Title: *title, Description: *description, IssueType: *issueType, Priority: *priority, Assignee: *assignee,
+		Title: *title, Description: *description, IssueType: *issueType, Priority: *priority, Assignee: *assignee, Labels: splitCSV(*labels),
 	})
 	if err != nil {
 		return err
@@ -96,6 +99,7 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	priorityMax := fs.Int("priority-max", -1, "Maximum priority 0..4")
 	search := fs.String("search", "", "Search title and description text")
 	ids := fs.String("ids", "", "Comma-separated issue IDs")
+	labels := fs.String("labels", "", "Comma-separated labels all of which must match")
 	hasComments := fs.Bool("has-comments", false, "Only include issues with comments")
 	updatedAfter := fs.String("updated-after", "", "Only include issues updated at or after RFC3339 timestamp")
 	updatedBefore := fs.String("updated-before", "", "Only include issues updated at or before RFC3339 timestamp")
@@ -126,6 +130,9 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	}
 	if visited["ids"] {
 		filter.IDs = splitCSV(*ids)
+	}
+	if visited["labels"] {
+		filter.LabelsAll = splitCSV(*labels)
 	}
 	if visited["has-comments"] {
 		value := *hasComments
@@ -202,7 +209,9 @@ func runEdit(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	status := fs.String("status", "", "New status")
 	priority := fs.Int("priority", -1, "New priority")
 	assignee := fs.String("assignee", "", "New assignee")
+	labels := fs.String("labels", "", "Replace labels with a comma-separated set")
 	clearAssignee := fs.Bool("clear-assignee", false, "Clear assignee")
+	clearLabels := fs.Bool("clear-labels", false, "Remove all labels")
 	jsonOut := fs.Bool("json", false, "Output JSON")
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
@@ -233,6 +242,13 @@ func runEdit(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 		in.Assignee = &empty
 	} else if visited["assignee"] {
 		in.Assignee = assignee
+	}
+	if *clearLabels {
+		empty := []string{}
+		in.Labels = &empty
+	} else if visited["labels"] {
+		parsed := splitCSV(*labels)
+		in.Labels = &parsed
 	}
 	issue, err := ap.Store.UpdateIssue(ctx, positional[0], in)
 	if err != nil {
@@ -346,6 +362,55 @@ func runDep(ctx context.Context, stdout io.Writer, ap *app.App, args []string) e
 	}
 }
 
+func runLabel(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
+	if len(args) == 0 {
+		return errors.New("usage: lk label <add|rm> ...")
+	}
+	switch args[0] {
+	case "add":
+		positional, flagArgs := splitArgs(args[1:], 2)
+		if len(positional) != 2 {
+			return errors.New("usage: lk label add <issue-id> <label> [--by <user>] [--json]")
+		}
+		fs := flag.NewFlagSet("label add", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		by := fs.String("by", os.Getenv("USER"), "Label author")
+		jsonOut := fs.Bool("json", false, "Output JSON")
+		if err := fs.Parse(flagArgs); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return errors.New("usage: lk label add <issue-id> <label> [--by <user>] [--json]")
+		}
+		labels, err := ap.Store.AddLabel(ctx, store.AddLabelInput{IssueID: positional[0], Name: positional[1], CreatedBy: *by})
+		if err != nil {
+			return err
+		}
+		return printValue(stdout, labels, *jsonOut, printLabels)
+	case "rm":
+		positional, flagArgs := splitArgs(args[1:], 2)
+		if len(positional) != 2 {
+			return errors.New("usage: lk label rm <issue-id> <label> [--json]")
+		}
+		fs := flag.NewFlagSet("label rm", flag.ContinueOnError)
+		fs.SetOutput(io.Discard)
+		jsonOut := fs.Bool("json", false, "Output JSON")
+		if err := fs.Parse(flagArgs); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return errors.New("usage: lk label rm <issue-id> <label> [--json]")
+		}
+		labels, err := ap.Store.RemoveLabel(ctx, positional[0], positional[1])
+		if err != nil {
+			return err
+		}
+		return printValue(stdout, labels, *jsonOut, printLabels)
+	default:
+		return errors.New("usage: lk label <add|rm> ...")
+	}
+}
+
 func runExport(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -381,7 +446,7 @@ func runBeads(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 		}
 		return printValue(stdout, summary, *jsonOut, func(w io.Writer, v any) error {
 			s := v.(beads.Summary)
-			_, err := fmt.Fprintf(w, "imported issues=%d relations=%d comments=%d\n", s.Issues, s.Relations, s.Comments)
+			_, err := fmt.Fprintf(w, "imported issues=%d relations=%d comments=%d labels=%d\n", s.Issues, s.Relations, s.Comments, s.Labels)
 			return err
 		})
 	case "export":
@@ -401,7 +466,7 @@ func runBeads(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 		}
 		return printValue(stdout, summary, *jsonOut, func(w io.Writer, v any) error {
 			s := v.(beads.Summary)
-			_, err := fmt.Fprintf(w, "exported issues=%d relations=%d comments=%d\n", s.Issues, s.Relations, s.Comments)
+			_, err := fmt.Fprintf(w, "exported issues=%d relations=%d comments=%d labels=%d\n", s.Issues, s.Relations, s.Comments, s.Labels)
 			return err
 		})
 	default:
@@ -443,13 +508,13 @@ func printValue(w io.Writer, v any, jsonOut bool, textFn func(io.Writer, any) er
 
 func printIssueSummary(w io.Writer, v any) error {
 	issue := v.(model.Issue)
-	_, err := fmt.Fprintf(w, "%s [%s/%s/P%d] %s\n", issue.ID, issue.Status, issue.IssueType, issue.Priority, issue.Title)
+	_, err := fmt.Fprintf(w, "%s [%s/%s/P%d] %s%s\n", issue.ID, issue.Status, issue.IssueType, issue.Priority, issue.Title, formatLabels(issue.Labels))
 	return err
 }
 
 func printIssueTable(w io.Writer, issues []model.Issue) error {
 	tw := tabwriter.NewWriter(w, 2, 2, 2, ' ', 0)
-	if _, err := fmt.Fprintln(tw, "ID\tSTATUS\tTYPE\tP\tASSIGNEE\tTITLE"); err != nil {
+	if _, err := fmt.Fprintln(tw, "ID\tSTATUS\tTYPE\tP\tASSIGNEE\tLABELS\tTITLE"); err != nil {
 		return err
 	}
 	for _, issue := range issues {
@@ -457,7 +522,7 @@ func printIssueTable(w io.Writer, issues []model.Issue) error {
 		if assignee == "" {
 			assignee = "-"
 		}
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\n", issue.ID, issue.Status, issue.IssueType, issue.Priority, assignee, issue.Title); err != nil {
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n", issue.ID, issue.Status, issue.IssueType, issue.Priority, assignee, strings.Join(issue.Labels, ","), issue.Title); err != nil {
 			return err
 		}
 	}
@@ -466,7 +531,7 @@ func printIssueTable(w io.Writer, issues []model.Issue) error {
 
 func printIssueDetail(w io.Writer, detail model.IssueDetail) error {
 	issue := detail.Issue
-	if _, err := fmt.Fprintf(w, "%s\n%s\n\nstatus: %s\ntype: %s\npriority: %d\nassignee: %s\n", issue.ID, issue.Title, issue.Status, issue.IssueType, issue.Priority, emptyDash(issue.Assignee)); err != nil {
+	if _, err := fmt.Fprintf(w, "%s\n%s\n\nstatus: %s\ntype: %s\npriority: %d\nassignee: %s\nlabels: %s\n", issue.ID, issue.Title, issue.Status, issue.IssueType, issue.Priority, emptyDash(issue.Assignee), emptyDash(strings.Join(issue.Labels, ", "))); err != nil {
 		return err
 	}
 	if issue.Description != "" {
@@ -526,6 +591,19 @@ func emptyDash(s string) string {
 	return s
 }
 
+func printLabels(w io.Writer, v any) error {
+	labels := v.([]string)
+	_, err := fmt.Fprintln(w, strings.Join(labels, ","))
+	return err
+}
+
+func formatLabels(labels []string) string {
+	if len(labels) == 0 {
+		return ""
+	}
+	return " [" + strings.Join(labels, ",") + "]"
+}
+
 func splitCSV(input string) []string {
 	if strings.TrimSpace(input) == "" {
 		return nil
@@ -545,13 +623,15 @@ func printUsage(w io.Writer) {
 	fmt.Fprint(w, `links / lk
 
 Usage:
-  lk new --title <title> [--description <text>] [--type task|feature|bug|chore|epic] [--priority 0-4] [--assignee <user>] [--json]
-  lk ls [--status open|closed] [--type <type>] [--assignee <user>] [--priority-min N] [--priority-max N] [--search <text>] [--ids a,b] [--has-comments] [--updated-after RFC3339] [--updated-before RFC3339] [--query <expr>] [--limit N] [--json]
+  lk new --title <title> [--description <text>] [--type task|feature|bug|chore|epic] [--priority 0-4] [--assignee <user>] [--labels a,b] [--json]
+  lk ls [--status open|closed] [--type <type>] [--assignee <user>] [--priority-min N] [--priority-max N] [--search <text>] [--ids a,b] [--labels a,b] [--has-comments] [--updated-after RFC3339] [--updated-before RFC3339] [--query <expr>] [--limit N] [--json]
   lk show <id> [--json]
-  lk edit <id> [--title ...] [--description ...] [--type ...] [--status ...] [--priority ...] [--assignee ...|--clear-assignee] [--json]
+  lk edit <id> [--title ...] [--description ...] [--type ...] [--status ...] [--priority ...] [--assignee ...|--clear-assignee] [--labels a,b|--clear-labels] [--json]
   lk close <id> [--json]
   lk open <id> [--json]
   lk comment add <id> --body <text> [--by <user>] [--json]
+  lk label add <issue-id> <label> [--by <user>] [--json]
+  lk label rm <issue-id> <label> [--json]
   lk dep add <src-id> <dst-id> [--type blocks|parent-child|related-to] [--by <user>] [--json]
   lk dep rm <src-id> <dst-id> [--type blocks|parent-child|related-to]
   lk export

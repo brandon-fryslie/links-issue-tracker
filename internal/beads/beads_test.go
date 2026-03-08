@@ -54,6 +54,11 @@ func TestImportFromBeadsSQLite(t *testing.T) {
 			text TEXT NOT NULL,
 			created_at DATETIME NOT NULL
 		);`,
+		`CREATE TABLE labels (
+			issue_id TEXT NOT NULL,
+			label TEXT NOT NULL,
+			PRIMARY KEY (issue_id, label)
+		);`,
 	} {
 		if _, err := beadsDB.ExecContext(ctx, stmt); err != nil {
 			t.Fatalf("ExecContext(%q) error = %v", stmt, err)
@@ -69,6 +74,7 @@ func TestImportFromBeadsSQLite(t *testing.T) {
 		 VALUES ('issue-task', 'issue-epic', 'parent-child', '2026-03-07T03:30:00Z', 'bmf')`,
 		`INSERT INTO comments(issue_id, author, text, created_at)
 		 VALUES ('issue-task', 'bmf', 'Need compiler contract first.', '2026-03-07T03:45:00Z')`,
+		`INSERT INTO labels(issue_id, label) VALUES ('issue-task', 'renderer')`,
 	} {
 		if _, err := beadsDB.ExecContext(ctx, stmt); err != nil {
 			t.Fatalf("seed beads db error = %v", err)
@@ -79,7 +85,7 @@ func TestImportFromBeadsSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Import() error = %v", err)
 	}
-	if summary.Issues != 2 || summary.Relations != 1 || summary.Comments != 1 {
+	if summary.Issues != 2 || summary.Relations != 1 || summary.Comments != 1 || summary.Labels != 1 {
 		t.Fatalf("summary = %#v", summary)
 	}
 
@@ -92,6 +98,9 @@ func TestImportFromBeadsSQLite(t *testing.T) {
 	}
 	if len(detail.Comments) != 1 || detail.Comments[0].Body != "Need compiler contract first." {
 		t.Fatalf("detail.Comments = %#v", detail.Comments)
+	}
+	if len(detail.Issue.Labels) != 1 || detail.Issue.Labels[0] != "renderer" {
+		t.Fatalf("detail.Issue.Labels = %#v", detail.Issue.Labels)
 	}
 	if detail.Issue.Status != "closed" || detail.Issue.ClosedAt == nil {
 		t.Fatalf("detail.Issue = %#v", detail.Issue)
@@ -120,13 +129,16 @@ func TestExportToBeadsSQLite(t *testing.T) {
 	if _, err := st.AddComment(ctx, store.AddCommentInput{IssueID: task.ID, Body: "Need compiler contract first.", CreatedBy: "bmf"}); err != nil {
 		t.Fatalf("AddComment() error = %v", err)
 	}
+	if _, err := st.AddLabel(ctx, store.AddLabelInput{IssueID: task.ID, Name: "renderer", CreatedBy: "bmf"}); err != nil {
+		t.Fatalf("AddLabel() error = %v", err)
+	}
 
 	beadsDBPath := filepath.Join(t.TempDir(), "exported-beads.db")
 	summary, err := Export(ctx, st, beadsDBPath)
 	if err != nil {
 		t.Fatalf("Export() error = %v", err)
 	}
-	if summary.Issues != 2 || summary.Relations != 1 || summary.Comments != 1 {
+	if summary.Issues != 2 || summary.Relations != 1 || summary.Comments != 1 || summary.Labels != 1 {
 		t.Fatalf("summary = %#v", summary)
 	}
 
@@ -136,7 +148,7 @@ func TestExportToBeadsSQLite(t *testing.T) {
 	}
 	defer beadsDB.Close()
 
-	var issueCount, relationCount, commentCount int
+	var issueCount, relationCount, commentCount, labelCount int
 	if err := beadsDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues`).Scan(&issueCount); err != nil {
 		t.Fatalf("count issues error = %v", err)
 	}
@@ -146,8 +158,11 @@ func TestExportToBeadsSQLite(t *testing.T) {
 	if err := beadsDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM comments`).Scan(&commentCount); err != nil {
 		t.Fatalf("count comments error = %v", err)
 	}
-	if issueCount != 2 || relationCount != 1 || commentCount != 1 {
-		t.Fatalf("counts = issues:%d relations:%d comments:%d", issueCount, relationCount, commentCount)
+	if err := beadsDB.QueryRowContext(ctx, `SELECT COUNT(*) FROM labels`).Scan(&labelCount); err != nil {
+		t.Fatalf("count labels error = %v", err)
+	}
+	if issueCount != 2 || relationCount != 1 || commentCount != 1 || labelCount != 1 {
+		t.Fatalf("counts = issues:%d relations:%d comments:%d labels:%d", issueCount, relationCount, commentCount, labelCount)
 	}
 
 	var exportedType, exportedTitle string

@@ -12,6 +12,7 @@ type Issue struct {
 	Priority    int        `json:"priority"`
 	IssueType   string     `json:"issue_type"`
 	Assignee    string     `json:"assignee,omitempty"`
+	Labels      []string   `json:"labels"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 	ClosedAt    *time.Time `json:"closed_at,omitempty"`
@@ -29,6 +30,13 @@ type Comment struct {
 	ID        string    `json:"id"`
 	IssueID   string    `json:"issue_id"`
 	Body      string    `json:"body"`
+	CreatedAt time.Time `json:"created_at"`
+	CreatedBy string    `json:"created_by"`
+}
+
+type Label struct {
+	IssueID   string    `json:"issue_id"`
+	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"created_at"`
 	CreatedBy string    `json:"created_by"`
 }
@@ -51,4 +59,5 @@ type Export struct {
 	Issues      []Issue    `json:"issues"`
 	Relations   []Relation `json:"relations"`
 	Comments    []Comment  `json:"comments"`
+	Labels      []Label    `json:"labels"`
 }

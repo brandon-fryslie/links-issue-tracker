@@ -92,6 +92,7 @@ func TestStoreListIssuesSupportsAdvancedFilters(t *testing.T) {
 		IssueType:   "task",
 		Priority:    1,
 		Assignee:    "bmf",
+		Labels:      []string{"renderer", "contract"},
 	})
 	if err != nil {
 		t.Fatalf("CreateIssue issueA error = %v", err)
@@ -121,6 +122,7 @@ func TestStoreListIssuesSupportsAdvancedFilters(t *testing.T) {
 		PriorityMax:   intPtr(2),
 		SearchTerms:   []string{"renderer", "draw prep"},
 		IDs:           []string{issueA.ID, issueB.ID},
+		LabelsAll:     []string{"renderer"},
 		HasComments:   &hasComments,
 		UpdatedAfter:  &before,
 		UpdatedBefore: &after,
@@ -130,6 +132,68 @@ func TestStoreListIssuesSupportsAdvancedFilters(t *testing.T) {
 	}
 	if len(issues) != 1 || issues[0].ID != issueA.ID {
 		t.Fatalf("issues = %#v", issues)
+	}
+}
+
+func TestStoreLabelsAreWritableFirstClassData(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "links.db"), "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer st.Close()
+
+	issue, err := st.CreateIssue(ctx, CreateIssueInput{
+		Title:     "Renderer cleanup",
+		IssueType: "task",
+		Priority:  1,
+		Labels:    []string{"Renderer", "gpu"},
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue() error = %v", err)
+	}
+	if len(issue.Labels) != 2 || issue.Labels[0] != "gpu" || issue.Labels[1] != "renderer" {
+		t.Fatalf("issue.Labels = %#v", issue.Labels)
+	}
+
+	labels, err := st.AddLabel(ctx, AddLabelInput{IssueID: issue.ID, Name: "contracts", CreatedBy: "tester"})
+	if err != nil {
+		t.Fatalf("AddLabel() error = %v", err)
+	}
+	if len(labels) != 3 {
+		t.Fatalf("labels after add = %#v", labels)
+	}
+
+	updated, err := st.UpdateIssue(ctx, issue.ID, UpdateIssueInput{Labels: &[]string{"critical", "renderer"}})
+	if err != nil {
+		t.Fatalf("UpdateIssue() error = %v", err)
+	}
+	if len(updated.Labels) != 2 || updated.Labels[0] != "critical" || updated.Labels[1] != "renderer" {
+		t.Fatalf("updated.Labels = %#v", updated.Labels)
+	}
+
+	labels, err = st.RemoveLabel(ctx, issue.ID, "critical")
+	if err != nil {
+		t.Fatalf("RemoveLabel() error = %v", err)
+	}
+	if len(labels) != 1 || labels[0] != "renderer" {
+		t.Fatalf("labels after remove = %#v", labels)
+	}
+
+	detail, err := st.GetIssueDetail(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssueDetail() error = %v", err)
+	}
+	if len(detail.Issue.Labels) != 1 || detail.Issue.Labels[0] != "renderer" {
+		t.Fatalf("detail.Issue.Labels = %#v", detail.Issue.Labels)
+	}
+
+	export, err := st.Export(ctx)
+	if err != nil {
+		t.Fatalf("Export() error = %v", err)
+	}
+	if len(export.Labels) != 1 || export.Labels[0].Name != "renderer" {
+		t.Fatalf("export.Labels = %#v", export.Labels)
 	}
 }
 

@@ -40,6 +40,7 @@ func Merge(base store.ListIssuesFilter, incoming store.ListIssuesFilter) (store.
 	}
 	filter.SearchTerms = append(filter.SearchTerms, incoming.SearchTerms...)
 	filter.IDs = append(filter.IDs, incoming.IDs...)
+	filter.LabelsAll = append(filter.LabelsAll, incoming.LabelsAll...)
 	if err := mergeIntPointer("priority-min", &filter.PriorityMin, incoming.PriorityMin); err != nil {
 		return store.ListIssuesFilter{}, err
 	}
@@ -71,6 +72,9 @@ func applyTerm(filter *store.ListIssuesFilter, term string) error {
 		return mergeStringField("assignee", &filter.Assignee, strings.TrimPrefix(term, "assignee:"))
 	case strings.HasPrefix(term, "id:"):
 		filter.IDs = append(filter.IDs, strings.TrimSpace(strings.TrimPrefix(term, "id:")))
+		return nil
+	case strings.HasPrefix(term, "label:"):
+		filter.LabelsAll = append(filter.LabelsAll, strings.TrimSpace(strings.TrimPrefix(term, "label:")))
 		return nil
 	case strings.HasPrefix(term, "has:"):
 		switch strings.TrimSpace(strings.TrimPrefix(term, "has:")) {

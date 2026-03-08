@@ -34,6 +34,7 @@ type ImportIssue struct {
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
 	ClosedAt    *time.Time
+	Labels      []string
 }
 
 type ImportComment struct {
@@ -52,12 +53,20 @@ type ImportRelation struct {
 	CreatedBy string
 }
 
+type ImportLabel struct {
+	IssueID   string
+	Name      string
+	CreatedAt time.Time
+	CreatedBy string
+}
+
 type CreateIssueInput struct {
 	Title       string
 	Description string
 	IssueType   string
 	Priority    int
 	Assignee    string
+	Labels      []string
 }
 
 type UpdateIssueInput struct {
@@ -67,6 +76,7 @@ type UpdateIssueInput struct {
 	Status      *string
 	Priority    *int
 	Assignee    *string
+	Labels      *[]string
 }
 
 type ListIssuesFilter struct {
@@ -78,6 +88,7 @@ type ListIssuesFilter struct {
 	SearchTerms   []string
 	IDs           []string
 	HasComments   *bool
+	LabelsAll     []string
 	UpdatedAfter  *time.Time
 	UpdatedBefore *time.Time
 	Limit         int
@@ -93,6 +104,12 @@ type AddRelationInput struct {
 	SrcID     string
 	DstID     string
 	Type      string
+	CreatedBy string
+}
+
+type AddLabelInput struct {
+	IssueID   string
+	Name      string
 	CreatedBy string
 }
 
@@ -161,10 +178,20 @@ func (s *Store) migrate(ctx context.Context) error {
 			created_by TEXT NOT NULL,
 			FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
 		);`,
+		`CREATE TABLE IF NOT EXISTS labels (
+			issue_id TEXT NOT NULL,
+			label TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			created_by TEXT NOT NULL,
+			PRIMARY KEY (issue_id, label),
+			FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
+		);`,
 		`CREATE INDEX IF NOT EXISTS idx_issues_status_priority ON issues(status, priority, updated_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_relations_src_type ON relations(src_id, type);`,
 		`CREATE INDEX IF NOT EXISTS idx_relations_dst_type ON relations(dst_id, type);`,
 		`CREATE INDEX IF NOT EXISTS idx_comments_issue_created ON comments(issue_id, created_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_labels_issue ON labels(issue_id, label);`,
+		`CREATE INDEX IF NOT EXISTS idx_labels_name ON labels(label, issue_id);`,
 	}
 	for _, stmt := range schema {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
@@ -197,6 +224,10 @@ func (s *Store) CreateIssue(ctx context.Context, in CreateIssueInput) (model.Iss
 		return model.Issue{}, err
 	}
 	now := time.Now().UTC()
+	labels, err := canonicalizeLabels(in.Labels)
+	if err != nil {
+		return model.Issue{}, err
+	}
 	issue := model.Issue{
 		ID:          newIssueID(s.workspaceID),
 		Title:       strings.TrimSpace(in.Title),
@@ -205,16 +236,28 @@ func (s *Store) CreateIssue(ctx context.Context, in CreateIssueInput) (model.Iss
 		Priority:    priority,
 		IssueType:   issueType,
 		Assignee:    strings.TrimSpace(in.Assignee),
+		Labels:      labels,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO issues(
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Issue{}, fmt.Errorf("begin create issue tx: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO issues(
 		id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
 		issue.ID, issue.Title, issue.Description, issue.Status, issue.Priority, issue.IssueType,
 		issue.Assignee, issue.CreatedAt.Format(time.RFC3339Nano), issue.UpdatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return model.Issue{}, fmt.Errorf("insert issue: %w", err)
+	}
+	if err := s.replaceLabelsTx(ctx, tx, issue.ID, issue.Labels, "links"); err != nil {
+		return model.Issue{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Issue{}, fmt.Errorf("commit create issue: %w", err)
 	}
 	return issue, nil
 }
@@ -254,6 +297,16 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 	if filter.HasComments != nil {
 		where = append(where, "EXISTS (SELECT 1 FROM comments WHERE comments.issue_id = issues.id) = ?")
 		args = append(args, boolToInt(*filter.HasComments))
+	}
+	if len(filter.LabelsAll) > 0 {
+		labels, err := canonicalizeLabels(filter.LabelsAll)
+		if err != nil {
+			return nil, err
+		}
+		for _, label := range labels {
+			where = append(where, "EXISTS (SELECT 1 FROM labels WHERE labels.issue_id = issues.id AND labels.label = ?)")
+			args = append(args, label)
+		}
 	}
 	if len(filter.IDs) > 0 {
 		placeholders := make([]string, 0, len(filter.IDs))
@@ -298,7 +351,10 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 		}
 		issues = append(issues, issue)
 	}
-	return issues, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return s.attachLabels(ctx, issues)
 }
 
 func boolToInt(value bool) int {
@@ -369,6 +425,33 @@ func (s *Store) GetIssueDetail(ctx context.Context, id string) (model.IssueDetai
 			}
 		}
 	}
+	labeled, err := s.attachLabels(ctx, detail.Children)
+	if err != nil {
+		return model.IssueDetail{}, err
+	}
+	detail.Children = labeled
+	labeled, err = s.attachLabels(ctx, detail.DependsOn)
+	if err != nil {
+		return model.IssueDetail{}, err
+	}
+	detail.DependsOn = labeled
+	labeled, err = s.attachLabels(ctx, detail.Related)
+	if err != nil {
+		return model.IssueDetail{}, err
+	}
+	detail.Related = labeled
+	labeled, err = s.attachLabels(ctx, detail.BlockedBy)
+	if err != nil {
+		return model.IssueDetail{}, err
+	}
+	detail.BlockedBy = labeled
+	if detail.Parent != nil {
+		parentIssues, err := s.attachLabels(ctx, []model.Issue{*detail.Parent})
+		if err != nil {
+			return model.IssueDetail{}, err
+		}
+		detail.Parent = &parentIssues[0]
+	}
 	return detail, nil
 }
 
@@ -381,7 +464,11 @@ func (s *Store) GetIssue(ctx context.Context, id string) (model.Issue, error) {
 		}
 		return model.Issue{}, err
 	}
-	return issue, nil
+	labeled, err := s.attachLabels(ctx, []model.Issue{issue})
+	if err != nil {
+		return model.Issue{}, err
+	}
+	return labeled[0], nil
 }
 
 func (s *Store) UpdateIssue(ctx context.Context, id string, in UpdateIssueInput) (model.Issue, error) {
@@ -427,16 +514,36 @@ func (s *Store) UpdateIssue(ctx context.Context, id string, in UpdateIssueInput)
 	if in.Assignee != nil {
 		issue.Assignee = strings.TrimSpace(*in.Assignee)
 	}
+	if in.Labels != nil {
+		labels, err := canonicalizeLabels(*in.Labels)
+		if err != nil {
+			return model.Issue{}, err
+		}
+		issue.Labels = labels
+	}
 	issue.UpdatedAt = time.Now().UTC()
 	var closedAt any
 	if issue.ClosedAt != nil {
 		closedAt = issue.ClosedAt.Format(time.RFC3339Nano)
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE issues SET
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Issue{}, fmt.Errorf("begin update issue tx: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `UPDATE issues SET
 		title = ?, description = ?, status = ?, priority = ?, issue_type = ?, assignee = ?, updated_at = ?, closed_at = ?
 		WHERE id = ?`, issue.Title, issue.Description, issue.Status, issue.Priority, issue.IssueType, issue.Assignee, issue.UpdatedAt.Format(time.RFC3339Nano), closedAt, issue.ID)
 	if err != nil {
 		return model.Issue{}, fmt.Errorf("update issue: %w", err)
+	}
+	if in.Labels != nil {
+		if err := s.replaceLabelsTx(ctx, tx, issue.ID, issue.Labels, "links"); err != nil {
+			return model.Issue{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Issue{}, fmt.Errorf("commit update issue: %w", err)
 	}
 	return issue, nil
 }
@@ -523,7 +630,11 @@ func (s *Store) Export(ctx context.Context) (model.Export, error) {
 	if err != nil {
 		return model.Export{}, err
 	}
-	return model.Export{Version: 1, WorkspaceID: s.workspaceID, ExportedAt: time.Now().UTC(), Issues: issues, Relations: rels, Comments: comments}, nil
+	labels, err := s.listAllLabels(ctx)
+	if err != nil {
+		return model.Export{}, err
+	}
+	return model.Export{Version: 1, WorkspaceID: s.workspaceID, ExportedAt: time.Now().UTC(), Issues: issues, Relations: rels, Comments: comments, Labels: labels}, nil
 }
 
 func (s *Store) ImportIssue(ctx context.Context, in ImportIssue) error {
@@ -574,6 +685,9 @@ func (s *Store) ImportIssue(ctx context.Context, in ImportIssue) error {
 	)
 	if err != nil {
 		return fmt.Errorf("import issue: %w", err)
+	}
+	if err := s.ReplaceLabels(ctx, in.ID, in.Labels, "import"); err != nil {
+		return err
 	}
 	return nil
 }
@@ -639,13 +753,115 @@ func (s *Store) ImportRelation(ctx context.Context, in ImportRelation) error {
 	return nil
 }
 
+func (s *Store) ImportLabel(ctx context.Context, in ImportLabel) error {
+	if _, err := s.GetIssue(ctx, in.IssueID); err != nil {
+		return err
+	}
+	label, err := normalizeLabel(in.Name)
+	if err != nil {
+		return err
+	}
+	createdBy := strings.TrimSpace(in.CreatedBy)
+	if createdBy == "" {
+		createdBy = "unknown"
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO labels(issue_id, label, created_at, created_by)
+	VALUES (?, ?, ?, ?)
+	ON CONFLICT(issue_id, label) DO UPDATE SET
+		created_at = excluded.created_at,
+		created_by = excluded.created_by`, in.IssueID, label, in.CreatedAt.Format(time.RFC3339Nano), createdBy)
+	if err != nil {
+		return fmt.Errorf("import label: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) AddLabel(ctx context.Context, in AddLabelInput) ([]string, error) {
+	if _, err := s.GetIssue(ctx, in.IssueID); err != nil {
+		return nil, err
+	}
+	label, err := normalizeLabel(in.Name)
+	if err != nil {
+		return nil, err
+	}
+	createdBy := strings.TrimSpace(in.CreatedBy)
+	if createdBy == "" {
+		createdBy = "unknown"
+	}
+	_, err = s.db.ExecContext(ctx, `INSERT INTO labels(issue_id, label, created_at, created_by)
+	VALUES (?, ?, ?, ?)
+	ON CONFLICT(issue_id, label) DO NOTHING`, in.IssueID, label, time.Now().UTC().Format(time.RFC3339Nano), createdBy)
+	if err != nil {
+		return nil, fmt.Errorf("insert label: %w", err)
+	}
+	return s.ListLabels(ctx, in.IssueID)
+}
+
+func (s *Store) RemoveLabel(ctx context.Context, issueID, labelName string) ([]string, error) {
+	if _, err := s.GetIssue(ctx, issueID); err != nil {
+		return nil, err
+	}
+	label, err := normalizeLabel(labelName)
+	if err != nil {
+		return nil, err
+	}
+	res, err := s.db.ExecContext(ctx, `DELETE FROM labels WHERE issue_id = ? AND label = ?`, issueID, label)
+	if err != nil {
+		return nil, fmt.Errorf("delete label: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return nil, fmt.Errorf("label %q not found on issue %q", label, issueID)
+	}
+	return s.ListLabels(ctx, issueID)
+}
+
+func (s *Store) ReplaceLabels(ctx context.Context, issueID string, labels []string, createdBy string) error {
+	if _, err := s.GetIssue(ctx, issueID); err != nil {
+		return err
+	}
+	normalized, err := canonicalizeLabels(labels)
+	if err != nil {
+		return err
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin replace labels tx: %w", err)
+	}
+	defer tx.Rollback()
+	if err := s.replaceLabelsTx(ctx, tx, issueID, normalized, createdBy); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit replace labels: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ListLabels(ctx context.Context, issueID string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT label FROM labels WHERE issue_id = ? ORDER BY label ASC`, issueID)
+	if err != nil {
+		return nil, fmt.Errorf("list labels: %w", err)
+	}
+	defer rows.Close()
+	var labels []string
+	for rows.Next() {
+		var label string
+		if err := rows.Scan(&label); err != nil {
+			return nil, err
+		}
+		labels = append(labels, label)
+	}
+	return labels, rows.Err()
+}
+
 func (s *Store) listRelations(ctx context.Context, issueID string) ([]model.Relation, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT src_id, dst_id, type, created_at, created_by FROM relations WHERE src_id = ? OR dst_id = ? ORDER BY created_at ASC`, issueID, issueID)
 	if err != nil {
 		return nil, fmt.Errorf("list relations: %w", err)
 	}
 	defer rows.Close()
-	var rels []model.Relation
+	rels := []model.Relation{}
 	for rows.Next() {
 		var rel model.Relation
 		var createdAt string
@@ -662,13 +878,36 @@ func (s *Store) listRelations(ctx context.Context, issueID string) ([]model.Rela
 	return rels, rows.Err()
 }
 
+func (s *Store) listAllLabels(ctx context.Context) ([]model.Label, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT issue_id, label, created_at, created_by FROM labels ORDER BY issue_id ASC, label ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list all labels: %w", err)
+	}
+	defer rows.Close()
+	out := []model.Label{}
+	for rows.Next() {
+		var label model.Label
+		var createdAt string
+		if err := rows.Scan(&label.IssueID, &label.Name, &createdAt, &label.CreatedBy); err != nil {
+			return nil, err
+		}
+		t, err := time.Parse(time.RFC3339Nano, createdAt)
+		if err != nil {
+			return nil, err
+		}
+		label.CreatedAt = t
+		out = append(out, label)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) listComments(ctx context.Context, issueID string) ([]model.Comment, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, issue_id, body, created_at, created_by FROM comments WHERE issue_id = ? ORDER BY created_at ASC`, issueID)
 	if err != nil {
 		return nil, fmt.Errorf("list comments: %w", err)
 	}
 	defer rows.Close()
-	var out []model.Comment
+	out := []model.Comment{}
 	for rows.Next() {
 		var c model.Comment
 		var createdAt string
@@ -691,7 +930,7 @@ func (s *Store) listAllRelations(ctx context.Context) ([]model.Relation, error) 
 		return nil, fmt.Errorf("list all relations: %w", err)
 	}
 	defer rows.Close()
-	var rels []model.Relation
+	rels := []model.Relation{}
 	for rows.Next() {
 		var rel model.Relation
 		var createdAt string
@@ -714,7 +953,7 @@ func (s *Store) listAllComments(ctx context.Context) ([]model.Comment, error) {
 		return nil, fmt.Errorf("list all comments: %w", err)
 	}
 	defer rows.Close()
-	var out []model.Comment
+	out := []model.Comment{}
 	for rows.Next() {
 		var c model.Comment
 		var createdAt string
@@ -756,7 +995,69 @@ func scanIssue(row issueScanner) (model.Issue, error) {
 		}
 		issue.ClosedAt = &t
 	}
+	issue.Labels = []string{}
 	return issue, nil
+}
+
+func (s *Store) attachLabels(ctx context.Context, issues []model.Issue) ([]model.Issue, error) {
+	if len(issues) == 0 {
+		return issues, nil
+	}
+	issueIDs := make([]string, 0, len(issues))
+	for _, issue := range issues {
+		issueIDs = append(issueIDs, issue.ID)
+	}
+	labelMap, err := s.loadLabelsByIssueIDs(ctx, issueIDs)
+	if err != nil {
+		return nil, err
+	}
+	for index := range issues {
+		issues[index].Labels = labelMap[issues[index].ID]
+		if issues[index].Labels == nil {
+			issues[index].Labels = []string{}
+		}
+	}
+	return issues, nil
+}
+
+func (s *Store) loadLabelsByIssueIDs(ctx context.Context, issueIDs []string) (map[string][]string, error) {
+	placeholders := make([]string, 0, len(issueIDs))
+	args := make([]any, 0, len(issueIDs))
+	for _, issueID := range issueIDs {
+		placeholders = append(placeholders, "?")
+		args = append(args, issueID)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT issue_id, label FROM labels WHERE issue_id IN (`+strings.Join(placeholders, ", ")+`) ORDER BY label ASC`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("load labels by issue ids: %w", err)
+	}
+	defer rows.Close()
+	out := map[string][]string{}
+	for rows.Next() {
+		var issueID, label string
+		if err := rows.Scan(&issueID, &label); err != nil {
+			return nil, err
+		}
+		out[issueID] = append(out[issueID], label)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) replaceLabelsTx(ctx context.Context, tx *sql.Tx, issueID string, labels []string, createdBy string) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM labels WHERE issue_id = ?`, issueID); err != nil {
+		return fmt.Errorf("clear labels: %w", err)
+	}
+	author := strings.TrimSpace(createdBy)
+	if author == "" {
+		author = "unknown"
+	}
+	timestamp := time.Now().UTC().Format(time.RFC3339Nano)
+	for _, label := range labels {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO labels(issue_id, label, created_at, created_by) VALUES (?, ?, ?, ?)`, issueID, label, timestamp, author); err != nil {
+			return fmt.Errorf("insert label %q: %w", label, err)
+		}
+	}
+	return nil
 }
 
 func validateIssueType(issueType string) (string, error) {
@@ -777,6 +1078,35 @@ func validatePriority(priority int) error {
 		return errors.New("priority must be between 0 and 4")
 	}
 	return nil
+}
+
+func canonicalizeLabels(labels []string) ([]string, error) {
+	out := make([]string, 0, len(labels))
+	seen := map[string]struct{}{}
+	for _, label := range labels {
+		normalized, err := normalizeLabel(label)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := seen[normalized]; exists {
+			continue
+		}
+		seen[normalized] = struct{}{}
+		out = append(out, normalized)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func normalizeLabel(label string) (string, error) {
+	normalized := strings.ToLower(strings.TrimSpace(label))
+	if normalized == "" {
+		return "", errors.New("label is required")
+	}
+	if strings.Contains(normalized, ",") {
+		return "", errors.New("label cannot contain commas")
+	}
+	return normalized, nil
 }
 
 func newIssueID(workspaceID string) string {

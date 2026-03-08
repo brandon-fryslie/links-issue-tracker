@@ -5,7 +5,7 @@ import (
 )
 
 func TestParseBuildsFilterFromQueryExpression(t *testing.T) {
-	result, err := Parse(`status:open type:task assignee:bmf priority<=2 has:comments updated>=2026-03-07T10:00:00Z "render contract" id:issue-123`)
+	result, err := Parse(`status:open type:task assignee:bmf priority<=2 has:comments updated>=2026-03-07T10:00:00Z "render contract" id:issue-123 label:renderer`)
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
@@ -32,6 +32,9 @@ func TestParseBuildsFilterFromQueryExpression(t *testing.T) {
 	}
 	if len(result.Filter.IDs) != 1 || result.Filter.IDs[0] != "issue-123" {
 		t.Fatalf("IDs = %#v", result.Filter.IDs)
+	}
+	if len(result.Filter.LabelsAll) != 1 || result.Filter.LabelsAll[0] != "renderer" {
+		t.Fatalf("LabelsAll = %#v", result.Filter.LabelsAll)
 	}
 }
 
