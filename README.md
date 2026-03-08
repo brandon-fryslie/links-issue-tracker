@@ -2,6 +2,20 @@
 
 `links` is a small, worktree-native issue tracker with a flat CLI: `lk`.
 
+## Install
+
+```sh
+go install github.com/bmf/links-issue-tracker/cmd/lk@latest
+```
+
+Shell completion:
+
+```sh
+lk completion bash > ~/.local/share/bash-completion/completions/lk
+lk completion zsh > ~/.zfunc/_lk
+lk completion fish > ~/.config/fish/completions/lk.fish
+```
+
 ## Design
 
 - `// [LAW:one-source-of-truth]` One canonical SQLite database per git clone, stored under the shared git common dir.

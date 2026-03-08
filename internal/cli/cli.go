@@ -28,6 +28,13 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 		printUsage(stderr)
 		return nil
 	}
+	switch args[0] {
+	case "help", "-h", "--help":
+		printUsage(stdout)
+		return nil
+	case "completion":
+		return runCompletion(stdout, args[1:])
+	}
 	ap, err := app.OpenFromWD(ctx)
 	if err != nil {
 		if errors.Is(err, workspace.ErrNotGitRepo) {
@@ -68,9 +75,6 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 		return runWorkspace(stdout, ap, args[1:])
 	case "sync":
 		return runSync(ctx, stdout, ap, args[1:])
-	case "help", "-h", "--help":
-		printUsage(stdout)
-		return nil
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
@@ -645,6 +649,25 @@ func runSync(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	}
 }
 
+func runCompletion(stdout io.Writer, args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: lk completion <bash|zsh|fish>")
+	}
+	switch args[0] {
+	case "bash":
+		_, err := io.WriteString(stdout, bashCompletionScript)
+		return err
+	case "zsh":
+		_, err := io.WriteString(stdout, zshCompletionScript)
+		return err
+	case "fish":
+		_, err := io.WriteString(stdout, fishCompletionScript)
+		return err
+	default:
+		return errors.New("usage: lk completion <bash|zsh|fish>")
+	}
+}
+
 func writeJSON(w io.Writer, v any) error {
 	enc := json.NewEncoder(w)
 	enc.SetIndent("", "  ")
@@ -833,6 +856,7 @@ Usage:
   lk sync export [--path <path>] [--force] [--json]
   lk sync import [--path <path>] [--force] [--json]
   lk sync status [--path <path>] [--json]
+  lk completion <bash|zsh|fish>
   lk beads import --db <path> [--json]
   lk beads export --db <path> [--json]
   lk workspace [--json]
