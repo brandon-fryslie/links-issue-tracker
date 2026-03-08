@@ -47,9 +47,13 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 	case "edit":
 		return runEdit(ctx, stdout, ap, args[1:])
 	case "close":
-		return runStatus(ctx, stdout, ap, args[1:], "closed")
+		return runTransition(ctx, stdout, ap, args[1:], "close")
 	case "open":
-		return runStatus(ctx, stdout, ap, args[1:], "open")
+		return runTransition(ctx, stdout, ap, args[1:], "reopen")
+	case "archive":
+		return runTransition(ctx, stdout, ap, args[1:], "archive")
+	case "delete":
+		return runTransition(ctx, stdout, ap, args[1:], "delete")
 	case "comment":
 		return runComment(ctx, stdout, ap, args[1:])
 	case "label":
@@ -106,6 +110,8 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	ids := fs.String("ids", "", "Comma-separated issue IDs")
 	labels := fs.String("labels", "", "Comma-separated labels all of which must match")
 	hasComments := fs.Bool("has-comments", false, "Only include issues with comments")
+	includeArchived := fs.Bool("include-archived", false, "Include archived issues")
+	includeDeleted := fs.Bool("include-deleted", false, "Include deleted issues")
 	updatedAfter := fs.String("updated-after", "", "Only include issues updated at or after RFC3339 timestamp")
 	updatedBefore := fs.String("updated-before", "", "Only include issues updated at or before RFC3339 timestamp")
 	queryExpr := fs.String("query", "", "Query language: status:open type:task priority<=2 has:comments text")
@@ -117,10 +123,12 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	visited := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { visited[f.Name] = true })
 	filter := store.ListIssuesFilter{
-		Status:    strings.TrimSpace(*status),
-		IssueType: strings.TrimSpace(*issueType),
-		Assignee:  strings.TrimSpace(*assignee),
-		Limit:     *limit,
+		Status:          strings.TrimSpace(*status),
+		IssueType:       strings.TrimSpace(*issueType),
+		Assignee:        strings.TrimSpace(*assignee),
+		IncludeArchived: *includeArchived,
+		IncludeDeleted:  *includeDeleted,
+		Limit:           *limit,
 	}
 	if visited["priority-min"] {
 		value := *priorityMin
@@ -211,7 +219,6 @@ func runEdit(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	title := fs.String("title", "", "New title")
 	description := fs.String("description", "", "New description")
 	issueType := fs.String("type", "", "New issue type")
-	status := fs.String("status", "", "New status")
 	priority := fs.Int("priority", -1, "New priority")
 	assignee := fs.String("assignee", "", "New assignee")
 	labels := fs.String("labels", "", "Replace labels with a comma-separated set")
@@ -236,9 +243,6 @@ func runEdit(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	if visited["type"] {
 		in.IssueType = issueType
 	}
-	if visited["status"] {
-		in.Status = status
-	}
 	if visited["priority"] {
 		in.Priority = priority
 	}
@@ -262,21 +266,28 @@ func runEdit(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	return printValue(stdout, issue, *jsonOut, printIssueSummary)
 }
 
-func runStatus(ctx context.Context, stdout io.Writer, ap *app.App, args []string, status string) error {
+func runTransition(ctx context.Context, stdout io.Writer, ap *app.App, args []string, action string) error {
 	positional, flagArgs := splitArgs(args, 1)
 	if len(positional) != 1 {
-		return fmt.Errorf("usage: lk %s <id>", status)
+		return fmt.Errorf("usage: lk %s <id> --reason <text>", transitionCommandName(action))
 	}
-	fs := flag.NewFlagSet(status, flag.ContinueOnError)
+	fs := flag.NewFlagSet(action, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
+	reason := fs.String("reason", "", "Lifecycle transition reason")
+	by := fs.String("by", os.Getenv("USER"), "Lifecycle actor")
 	jsonOut := fs.Bool("json", false, "Output JSON")
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: lk %s <id>", status)
+		return fmt.Errorf("usage: lk %s <id> --reason <text>", transitionCommandName(action))
 	}
-	issue, err := ap.Store.UpdateIssue(ctx, positional[0], store.UpdateIssueInput{Status: &status})
+	issue, err := ap.Store.TransitionIssue(ctx, store.TransitionIssueInput{
+		IssueID:   positional[0],
+		Action:    action,
+		Reason:    *reason,
+		CreatedBy: *by,
+	})
 	if err != nil {
 		return err
 	}
@@ -649,7 +660,7 @@ func printValue(w io.Writer, v any, jsonOut bool, textFn func(io.Writer, any) er
 
 func printIssueSummary(w io.Writer, v any) error {
 	issue := v.(model.Issue)
-	_, err := fmt.Fprintf(w, "%s [%s/%s/P%d] %s%s\n", issue.ID, issue.Status, issue.IssueType, issue.Priority, issue.Title, formatLabels(issue.Labels))
+	_, err := fmt.Fprintf(w, "%s [%s/%s/P%d] %s%s\n", issue.ID, formatIssueState(issue), issue.IssueType, issue.Priority, issue.Title, formatLabels(issue.Labels))
 	return err
 }
 
@@ -663,7 +674,7 @@ func printIssueTable(w io.Writer, issues []model.Issue) error {
 		if assignee == "" {
 			assignee = "-"
 		}
-		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n", issue.ID, issue.Status, issue.IssueType, issue.Priority, assignee, strings.Join(issue.Labels, ","), issue.Title); err != nil {
+		if _, err := fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n", issue.ID, formatIssueState(issue), issue.IssueType, issue.Priority, assignee, strings.Join(issue.Labels, ","), issue.Title); err != nil {
 			return err
 		}
 	}
@@ -672,7 +683,7 @@ func printIssueTable(w io.Writer, issues []model.Issue) error {
 
 func printIssueDetail(w io.Writer, detail model.IssueDetail) error {
 	issue := detail.Issue
-	if _, err := fmt.Fprintf(w, "%s\n%s\n\nstatus: %s\ntype: %s\npriority: %d\nassignee: %s\nlabels: %s\n", issue.ID, issue.Title, issue.Status, issue.IssueType, issue.Priority, emptyDash(issue.Assignee), emptyDash(strings.Join(issue.Labels, ", "))); err != nil {
+	if _, err := fmt.Fprintf(w, "%s\n%s\n\nstatus: %s\ntype: %s\npriority: %d\nassignee: %s\nlabels: %s\narchived: %s\ndeleted: %s\n", issue.ID, issue.Title, issue.Status, issue.IssueType, issue.Priority, emptyDash(issue.Assignee), emptyDash(strings.Join(issue.Labels, ", ")), formatOptionalTime(issue.ArchivedAt), formatOptionalTime(issue.DeletedAt)); err != nil {
 		return err
 	}
 	if issue.Description != "" {
@@ -703,6 +714,16 @@ func printIssueDetail(w io.Writer, detail model.IssueDetail) error {
 		}
 		for _, c := range detail.Comments {
 			if _, err := fmt.Fprintf(w, "- [%s] %s\n", c.CreatedBy, strings.ReplaceAll(c.Body, "\n", "\\n")); err != nil {
+				return err
+			}
+		}
+	}
+	if len(detail.History) > 0 {
+		if _, err := fmt.Fprintln(w, "\nhistory:"); err != nil {
+			return err
+		}
+		for _, event := range detail.History {
+			if _, err := fmt.Fprintf(w, "- [%s] %s %s (%s -> %s)\n", event.CreatedBy, event.Action, strings.ReplaceAll(event.Reason, "\n", "\\n"), emptyDash(event.FromStatus), emptyDash(event.ToStatus)); err != nil {
 				return err
 			}
 		}
@@ -745,6 +766,33 @@ func formatLabels(labels []string) string {
 	return " [" + strings.Join(labels, ",") + "]"
 }
 
+func formatOptionalTime(value *time.Time) string {
+	if value == nil {
+		return "-"
+	}
+	return value.Format(time.RFC3339)
+}
+
+func transitionCommandName(action string) string {
+	switch action {
+	case "reopen":
+		return "open"
+	default:
+		return action
+	}
+}
+
+func formatIssueState(issue model.Issue) string {
+	parts := []string{issue.Status}
+	if issue.ArchivedAt != nil {
+		parts = append(parts, "archived")
+	}
+	if issue.DeletedAt != nil {
+		parts = append(parts, "deleted")
+	}
+	return strings.Join(parts, "+")
+}
+
 func splitCSV(input string) []string {
 	if strings.TrimSpace(input) == "" {
 		return nil
@@ -769,11 +817,13 @@ func printUsage(w io.Writer) {
 
 Usage:
   lk new --title <title> [--description <text>] [--type task|feature|bug|chore|epic] [--priority 0-4] [--assignee <user>] [--labels a,b] [--json]
-  lk ls [--status open|closed] [--type <type>] [--assignee <user>] [--priority-min N] [--priority-max N] [--search <text>] [--ids a,b] [--labels a,b] [--has-comments] [--updated-after RFC3339] [--updated-before RFC3339] [--query <expr>] [--limit N] [--json]
+  lk ls [--status open|closed] [--type <type>] [--assignee <user>] [--priority-min N] [--priority-max N] [--search <text>] [--ids a,b] [--labels a,b] [--has-comments] [--include-archived] [--include-deleted] [--updated-after RFC3339] [--updated-before RFC3339] [--query <expr>] [--limit N] [--json]
   lk show <id> [--json]
-  lk edit <id> [--title ...] [--description ...] [--type ...] [--status ...] [--priority ...] [--assignee ...|--clear-assignee] [--labels a,b|--clear-labels] [--json]
-  lk close <id> [--json]
-  lk open <id> [--json]
+  lk edit <id> [--title ...] [--description ...] [--type ...] [--priority ...] [--assignee ...|--clear-assignee] [--labels a,b|--clear-labels] [--json]
+  lk close <id> --reason <text> [--by <user>] [--json]
+  lk open <id> --reason <text> [--by <user>] [--json]
+  lk archive <id> --reason <text> [--by <user>] [--json]
+  lk delete <id> --reason <text> [--by <user>] [--json]
   lk comment add <id> --body <text> [--by <user>] [--json]
   lk label add <issue-id> <label> [--by <user>] [--json]
   lk label rm <issue-id> <label> [--json]

@@ -252,6 +252,16 @@ func TestWorkspaceRevisionAndReplaceFromExport(t *testing.T) {
 			CreatedAt: time.Now().UTC(),
 			CreatedBy: "sync",
 		}},
+		History: []model.IssueHistory{{
+			ID:         "hist-1",
+			IssueID:    "issue-replaced",
+			Action:     "created",
+			Reason:     "imported from sync",
+			FromStatus: "",
+			ToStatus:   "open",
+			CreatedAt:  time.Now().UTC(),
+			CreatedBy:  "sync",
+		}},
 	}
 	if err := st.ReplaceFromExport(ctx, export); err != nil {
 		t.Fatalf("ReplaceFromExport() error = %v", err)
@@ -290,5 +300,73 @@ func TestWorkspaceRevisionAndReplaceFromExport(t *testing.T) {
 
 	if _, err := st.GetIssue(ctx, issue.ID); err == nil {
 		t.Fatalf("expected original issue %s to be replaced", issue.ID)
+	}
+}
+
+func TestIssueLifecycleTracksReasonHistory(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "links.db"), "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer st.Close()
+
+	issue, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Renderer cleanup", IssueType: "task", Priority: 1})
+	if err != nil {
+		t.Fatalf("CreateIssue() error = %v", err)
+	}
+	closed, err := st.TransitionIssue(ctx, TransitionIssueInput{IssueID: issue.ID, Action: "close", Reason: "done", CreatedBy: "tester"})
+	if err != nil {
+		t.Fatalf("TransitionIssue(close) error = %v", err)
+	}
+	if closed.Status != "closed" || closed.ClosedAt == nil {
+		t.Fatalf("closed = %#v", closed)
+	}
+	reopened, err := st.TransitionIssue(ctx, TransitionIssueInput{IssueID: issue.ID, Action: "reopen", Reason: "follow-up work", CreatedBy: "tester"})
+	if err != nil {
+		t.Fatalf("TransitionIssue(reopen) error = %v", err)
+	}
+	if reopened.Status != "open" || reopened.ClosedAt != nil {
+		t.Fatalf("reopened = %#v", reopened)
+	}
+	archived, err := st.TransitionIssue(ctx, TransitionIssueInput{IssueID: issue.ID, Action: "archive", Reason: "inactive", CreatedBy: "tester"})
+	if err != nil {
+		t.Fatalf("TransitionIssue(archive) error = %v", err)
+	}
+	if archived.ArchivedAt == nil {
+		t.Fatalf("archived = %#v", archived)
+	}
+
+	activeIssues, err := st.ListIssues(ctx, ListIssuesFilter{})
+	if err != nil {
+		t.Fatalf("ListIssues() error = %v", err)
+	}
+	if len(activeIssues) != 0 {
+		t.Fatalf("activeIssues = %#v", activeIssues)
+	}
+
+	allIssues, err := st.ListIssues(ctx, ListIssuesFilter{IncludeArchived: true})
+	if err != nil {
+		t.Fatalf("ListIssues(include archived) error = %v", err)
+	}
+	if len(allIssues) != 1 || allIssues[0].ID != issue.ID {
+		t.Fatalf("allIssues = %#v", allIssues)
+	}
+
+	detail, err := st.GetIssueDetail(ctx, issue.ID)
+	if err != nil {
+		t.Fatalf("GetIssueDetail() error = %v", err)
+	}
+	if len(detail.History) != 4 {
+		t.Fatalf("history = %#v", detail.History)
+	}
+	if detail.History[1].Action != "close" || detail.History[1].Reason != "done" {
+		t.Fatalf("history[1] = %#v", detail.History[1])
+	}
+	if detail.History[2].Action != "reopen" || detail.History[2].Reason != "follow-up work" {
+		t.Fatalf("history[2] = %#v", detail.History[2])
+	}
+	if detail.History[3].Action != "archive" || detail.History[3].Reason != "inactive" {
+		t.Fatalf("history[3] = %#v", detail.History[3])
 	}
 }

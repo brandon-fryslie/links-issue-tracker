@@ -16,6 +16,8 @@ type Issue struct {
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 	ClosedAt    *time.Time `json:"closed_at,omitempty"`
+	ArchivedAt  *time.Time `json:"archived_at,omitempty"`
+	DeletedAt   *time.Time `json:"deleted_at,omitempty"`
 }
 
 type Relation struct {
@@ -41,24 +43,37 @@ type Label struct {
 	CreatedBy string    `json:"created_by"`
 }
 
+type IssueHistory struct {
+	ID         string    `json:"id"`
+	IssueID    string    `json:"issue_id"`
+	Action     string    `json:"action"`
+	Reason     string    `json:"reason"`
+	FromStatus string    `json:"from_status"`
+	ToStatus   string    `json:"to_status"`
+	CreatedAt  time.Time `json:"created_at"`
+	CreatedBy  string    `json:"created_by"`
+}
+
 type IssueDetail struct {
-	Issue     Issue      `json:"issue"`
-	Relations []Relation `json:"relations"`
-	Comments  []Comment  `json:"comments"`
-	Children  []Issue    `json:"children"`
-	DependsOn []Issue    `json:"depends_on"`
-	Related   []Issue    `json:"related"`
-	BlockedBy []Issue    `json:"blocked_by"`
-	Parent    *Issue     `json:"parent,omitempty"`
+	Issue     Issue          `json:"issue"`
+	Relations []Relation     `json:"relations"`
+	Comments  []Comment      `json:"comments"`
+	Children  []Issue        `json:"children"`
+	DependsOn []Issue        `json:"depends_on"`
+	Related   []Issue        `json:"related"`
+	BlockedBy []Issue        `json:"blocked_by"`
+	Parent    *Issue         `json:"parent,omitempty"`
+	History   []IssueHistory `json:"history"`
 }
 
 type Export struct {
-	Version           int        `json:"version"`
-	WorkspaceID       string     `json:"workspace_id"`
-	WorkspaceRevision int64      `json:"workspace_revision"`
-	ExportedAt        time.Time  `json:"exported_at"`
-	Issues            []Issue    `json:"issues"`
-	Relations         []Relation `json:"relations"`
-	Comments          []Comment  `json:"comments"`
-	Labels            []Label    `json:"labels"`
+	Version           int            `json:"version"`
+	WorkspaceID       string         `json:"workspace_id"`
+	WorkspaceRevision int64          `json:"workspace_revision"`
+	ExportedAt        time.Time      `json:"exported_at"`
+	Issues            []Issue        `json:"issues"`
+	Relations         []Relation     `json:"relations"`
+	Comments          []Comment      `json:"comments"`
+	Labels            []Label        `json:"labels"`
+	History           []IssueHistory `json:"history"`
 }

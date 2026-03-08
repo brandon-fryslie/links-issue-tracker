@@ -20,11 +20,13 @@ All worktrees in the same clone therefore share one stable, current view of work
 
 ```txt
 lk new --title <title> [--description <text>] [--type task|feature|bug|chore|epic] [--priority 0-4] [--assignee <user>] [--labels a,b] [--json]
-lk ls [--status open|closed] [--type <type>] [--assignee <user>] [--priority-min N] [--priority-max N] [--search <text>] [--ids a,b] [--labels a,b] [--has-comments] [--updated-after RFC3339] [--updated-before RFC3339] [--query <expr>] [--limit N] [--json]
+lk ls [--status open|closed] [--type <type>] [--assignee <user>] [--priority-min N] [--priority-max N] [--search <text>] [--ids a,b] [--labels a,b] [--has-comments] [--include-archived] [--include-deleted] [--updated-after RFC3339] [--updated-before RFC3339] [--query <expr>] [--limit N] [--json]
 lk show <id> [--json]
-lk edit <id> [--title ...] [--description ...] [--type ...] [--status ...] [--priority ...] [--assignee ...|--clear-assignee] [--labels a,b|--clear-labels] [--json]
-lk close <id> [--json]
-lk open <id> [--json]
+lk edit <id> [--title ...] [--description ...] [--type ...] [--priority ...] [--assignee ...|--clear-assignee] [--labels a,b|--clear-labels] [--json]
+lk close <id> --reason <text> [--by <user>] [--json]
+lk open <id> --reason <text> [--by <user>] [--json]
+lk archive <id> --reason <text> [--by <user>] [--json]
+lk delete <id> --reason <text> [--by <user>] [--json]
 lk comment add <id> --body <text> [--by <user>] [--json]
 lk label add <issue-id> <label> [--by <user>] [--json]
 lk label rm <issue-id> <label> [--json]
@@ -73,6 +75,13 @@ lk workspace [--json]
 - `lk sync export` refuses to overwrite a sync file that changed outside `links` unless `--force` is used.
 - `lk sync import` refuses to replace local state if the workspace has unsynced local changes since the last recorded sync unless `--force` is used.
 - The export snapshot includes `workspace_revision`, so sync state can be correlated deterministically.
+
+## Lifecycle history
+
+- `// [LAW:one-source-of-truth]` Current issue state lives on the issue row; lifecycle reasons live in the `issue_history` table.
+- `lk close`, `lk open`, `lk archive`, and `lk delete` all require `--reason`.
+- `lk show` renders lifecycle history so reopen/archive/delete reasons are visible in one place.
+- Active listings exclude archived and deleted issues by default; use `--include-archived` and `--include-deleted` when needed.
 
 ## Beads compatibility
 

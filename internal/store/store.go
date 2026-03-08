@@ -87,18 +87,20 @@ type UpdateIssueInput struct {
 }
 
 type ListIssuesFilter struct {
-	Status        string
-	IssueType     string
-	Assignee      string
-	PriorityMin   *int
-	PriorityMax   *int
-	SearchTerms   []string
-	IDs           []string
-	HasComments   *bool
-	LabelsAll     []string
-	UpdatedAfter  *time.Time
-	UpdatedBefore *time.Time
-	Limit         int
+	Status          string
+	IssueType       string
+	Assignee        string
+	PriorityMin     *int
+	PriorityMax     *int
+	SearchTerms     []string
+	IDs             []string
+	HasComments     *bool
+	LabelsAll       []string
+	UpdatedAfter    *time.Time
+	UpdatedBefore   *time.Time
+	IncludeArchived bool
+	IncludeDeleted  bool
+	Limit           int
 }
 
 type AddCommentInput struct {
@@ -117,6 +119,13 @@ type AddRelationInput struct {
 type AddLabelInput struct {
 	IssueID   string
 	Name      string
+	CreatedBy string
+}
+
+type TransitionIssueInput struct {
+	IssueID   string
+	Action    string
+	Reason    string
 	CreatedBy string
 }
 
@@ -199,6 +208,18 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_comments_issue_created ON comments(issue_id, created_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_labels_issue ON labels(issue_id, label);`,
 		`CREATE INDEX IF NOT EXISTS idx_labels_name ON labels(label, issue_id);`,
+		`CREATE TABLE IF NOT EXISTS issue_history (
+			id TEXT PRIMARY KEY,
+			issue_id TEXT NOT NULL,
+			action TEXT NOT NULL,
+			reason TEXT NOT NULL,
+			from_status TEXT NOT NULL,
+			to_status TEXT NOT NULL,
+			created_at TEXT NOT NULL,
+			created_by TEXT NOT NULL,
+			FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_issue_history_issue_created ON issue_history(issue_id, created_at);`,
 	}
 	for _, stmt := range schema {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
@@ -219,6 +240,14 @@ func (s *Store) migrate(ctx context.Context) error {
 		`INSERT INTO meta(key, value) VALUES ('workspace_revision', '0')
 		 ON CONFLICT(key) DO NOTHING`); err != nil {
 		return fmt.Errorf("store workspace_revision: %w", err)
+	}
+	for _, stmt := range []string{
+		`ALTER TABLE issues ADD COLUMN archived_at TEXT`,
+		`ALTER TABLE issues ADD COLUMN deleted_at TEXT`,
+	} {
+		if err := execIgnoreDuplicateColumn(ctx, s.db, stmt); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -307,14 +336,17 @@ func (s *Store) CreateIssue(ctx context.Context, in CreateIssueInput) (model.Iss
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `INSERT INTO issues(
-		id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+		id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at, archived_at, deleted_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
 		issue.ID, issue.Title, issue.Description, issue.Status, issue.Priority, issue.IssueType,
 		issue.Assignee, issue.CreatedAt.Format(time.RFC3339Nano), issue.UpdatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return model.Issue{}, fmt.Errorf("insert issue: %w", err)
 	}
 	if err := s.replaceLabelsTx(ctx, tx, issue.ID, issue.Labels, "links"); err != nil {
+		return model.Issue{}, err
+	}
+	if err := s.insertHistoryTx(ctx, tx, issue.ID, "created", "issue created", "", "open", "links"); err != nil {
 		return model.Issue{}, err
 	}
 	if _, err := s.bumpWorkspaceRevisionTx(ctx, tx); err != nil {
@@ -327,9 +359,15 @@ func (s *Store) CreateIssue(ctx context.Context, in CreateIssueInput) (model.Iss
 }
 
 func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]model.Issue, error) {
-	query := `SELECT id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at FROM issues`
+	query := `SELECT id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at, archived_at, deleted_at FROM issues`
 	var where []string
 	var args []any
+	if !filter.IncludeArchived {
+		where = append(where, "archived_at IS NULL")
+	}
+	if !filter.IncludeDeleted {
+		where = append(where, "deleted_at IS NULL")
+	}
 	if filter.Status != "" {
 		where = append(where, "status = ?")
 		args = append(args, filter.Status)
@@ -407,7 +445,7 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 		return nil, fmt.Errorf("list issues: %w", err)
 	}
 	defer rows.Close()
-	var issues []model.Issue
+	issues := []model.Issue{}
 	for rows.Next() {
 		issue, err := scanIssue(rows)
 		if err != nil {
@@ -441,10 +479,15 @@ func (s *Store) GetIssueDetail(ctx context.Context, id string) (model.IssueDetai
 	if err != nil {
 		return model.IssueDetail{}, err
 	}
+	history, err := s.listHistory(ctx, id)
+	if err != nil {
+		return model.IssueDetail{}, err
+	}
 	detail := model.IssueDetail{
 		Issue:     issue,
 		Relations: relations,
 		Comments:  comments,
+		History:   history,
 		Children:  []model.Issue{},
 		DependsOn: []model.Issue{},
 		Related:   []model.Issue{},
@@ -520,7 +563,7 @@ func (s *Store) GetIssueDetail(ctx context.Context, id string) (model.IssueDetai
 }
 
 func (s *Store) GetIssue(ctx context.Context, id string) (model.Issue, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at FROM issues WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at, archived_at, deleted_at FROM issues WHERE id = ?`, id)
 	issue, err := scanIssue(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -557,17 +600,7 @@ func (s *Store) UpdateIssue(ctx context.Context, id string, in UpdateIssueInput)
 		issue.IssueType = issueType
 	}
 	if in.Status != nil {
-		status := strings.TrimSpace(*in.Status)
-		if status != "open" && status != "closed" {
-			return model.Issue{}, errors.New("status must be open or closed")
-		}
-		issue.Status = status
-		if status == "closed" {
-			now := time.Now().UTC()
-			issue.ClosedAt = &now
-		} else {
-			issue.ClosedAt = nil
-		}
+		return model.Issue{}, errors.New("status transitions require dedicated lifecycle commands")
 	}
 	if in.Priority != nil {
 		if err := validatePriority(*in.Priority); err != nil {
@@ -596,8 +629,8 @@ func (s *Store) UpdateIssue(ctx context.Context, id string, in UpdateIssueInput)
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `UPDATE issues SET
-		title = ?, description = ?, status = ?, priority = ?, issue_type = ?, assignee = ?, updated_at = ?, closed_at = ?
-		WHERE id = ?`, issue.Title, issue.Description, issue.Status, issue.Priority, issue.IssueType, issue.Assignee, issue.UpdatedAt.Format(time.RFC3339Nano), closedAt, issue.ID)
+		title = ?, description = ?, status = ?, priority = ?, issue_type = ?, assignee = ?, updated_at = ?, closed_at = ?, archived_at = ?, deleted_at = ?
+		WHERE id = ?`, issue.Title, issue.Description, issue.Status, issue.Priority, issue.IssueType, issue.Assignee, issue.UpdatedAt.Format(time.RFC3339Nano), closedAt, nullableTime(issue.ArchivedAt), nullableTime(issue.DeletedAt), issue.ID)
 	if err != nil {
 		return model.Issue{}, fmt.Errorf("update issue: %w", err)
 	}
@@ -716,7 +749,7 @@ func (s *Store) RemoveRelation(ctx context.Context, srcID, dstID, relType string
 }
 
 func (s *Store) Export(ctx context.Context) (model.Export, error) {
-	issues, err := s.ListIssues(ctx, ListIssuesFilter{Limit: 0})
+	issues, err := s.ListIssues(ctx, ListIssuesFilter{Limit: 0, IncludeArchived: true, IncludeDeleted: true})
 	if err != nil {
 		return model.Export{}, err
 	}
@@ -732,11 +765,15 @@ func (s *Store) Export(ctx context.Context) (model.Export, error) {
 	if err != nil {
 		return model.Export{}, err
 	}
+	history, err := s.listAllHistory(ctx)
+	if err != nil {
+		return model.Export{}, err
+	}
 	workspaceRevision, err := s.GetWorkspaceRevision(ctx)
 	if err != nil {
 		return model.Export{}, err
 	}
-	return model.Export{Version: 1, WorkspaceID: s.workspaceID, WorkspaceRevision: workspaceRevision, ExportedAt: time.Now().UTC(), Issues: issues, Relations: rels, Comments: comments, Labels: labels}, nil
+	return model.Export{Version: 1, WorkspaceID: s.workspaceID, WorkspaceRevision: workspaceRevision, ExportedAt: time.Now().UTC(), Issues: issues, Relations: rels, Comments: comments, Labels: labels, History: history}, nil
 }
 
 func (s *Store) ImportIssue(ctx context.Context, in ImportIssue) error {
@@ -767,8 +804,8 @@ func (s *Store) ImportIssue(ctx context.Context, in ImportIssue) error {
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `INSERT INTO issues(
-		id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at, archived_at, deleted_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
 	ON CONFLICT(id) DO UPDATE SET
 		title = excluded.title,
 		description = excluded.description,
@@ -1013,6 +1050,82 @@ func (s *Store) ReplaceLabels(ctx context.Context, issueID string, labels []stri
 	return nil
 }
 
+func (s *Store) TransitionIssue(ctx context.Context, in TransitionIssueInput) (model.Issue, error) {
+	issue, err := s.GetIssue(ctx, in.IssueID)
+	if err != nil {
+		return model.Issue{}, err
+	}
+	action := strings.TrimSpace(in.Action)
+	reason := strings.TrimSpace(in.Reason)
+	if reason == "" {
+		return model.Issue{}, errors.New("reason is required")
+	}
+	actor := strings.TrimSpace(in.CreatedBy)
+	if actor == "" {
+		actor = "unknown"
+	}
+	now := time.Now().UTC()
+	fromStatus := issue.Status
+	toStatus := issue.Status
+	switch action {
+	case "close":
+		if issue.DeletedAt != nil || issue.ArchivedAt != nil {
+			return model.Issue{}, errors.New("cannot close archived or deleted issue")
+		}
+		if issue.Status == "closed" {
+			return model.Issue{}, errors.New("issue is already closed")
+		}
+		issue.Status = "closed"
+		issue.ClosedAt = &now
+		toStatus = "closed"
+	case "reopen":
+		if issue.DeletedAt != nil || issue.ArchivedAt != nil {
+			return model.Issue{}, errors.New("cannot reopen archived or deleted issue")
+		}
+		if issue.Status == "open" {
+			return model.Issue{}, errors.New("issue is already open")
+		}
+		issue.Status = "open"
+		issue.ClosedAt = nil
+		toStatus = "open"
+	case "archive":
+		if issue.DeletedAt != nil {
+			return model.Issue{}, errors.New("cannot archive deleted issue")
+		}
+		if issue.ArchivedAt != nil {
+			return model.Issue{}, errors.New("issue is already archived")
+		}
+		issue.ArchivedAt = &now
+	case "delete":
+		if issue.DeletedAt != nil {
+			return model.Issue{}, errors.New("issue is already deleted")
+		}
+		issue.DeletedAt = &now
+	default:
+		return model.Issue{}, fmt.Errorf("unsupported lifecycle action %q", action)
+	}
+	issue.UpdatedAt = now
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return model.Issue{}, fmt.Errorf("begin transition issue tx: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `UPDATE issues SET status = ?, updated_at = ?, closed_at = ?, archived_at = ?, deleted_at = ? WHERE id = ?`,
+		issue.Status, issue.UpdatedAt.Format(time.RFC3339Nano), nullableTime(issue.ClosedAt), nullableTime(issue.ArchivedAt), nullableTime(issue.DeletedAt), issue.ID); err != nil {
+		return model.Issue{}, fmt.Errorf("update issue lifecycle: %w", err)
+	}
+	if err := s.insertHistoryTx(ctx, tx, issue.ID, action, reason, fromStatus, toStatus, actor); err != nil {
+		return model.Issue{}, err
+	}
+	if _, err := s.bumpWorkspaceRevisionTx(ctx, tx); err != nil {
+		return model.Issue{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return model.Issue{}, fmt.Errorf("commit transition issue: %w", err)
+	}
+	return issue, nil
+}
+
 func (s *Store) ListLabels(ctx context.Context, issueID string) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT label FROM labels WHERE issue_id = ? ORDER BY label ASC`, issueID)
 	if err != nil {
@@ -1046,9 +1159,9 @@ func (s *Store) ReplaceFromExport(ctx context.Context, export model.Export) erro
 		if issue.ClosedAt != nil {
 			closedAt = issue.ClosedAt.Format(time.RFC3339Nano)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO issues(id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			issue.ID, issue.Title, issue.Description, issue.Status, issue.Priority, issue.IssueType, issue.Assignee, issue.CreatedAt.Format(time.RFC3339Nano), issue.UpdatedAt.Format(time.RFC3339Nano), closedAt); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issues(id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at, archived_at, deleted_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			issue.ID, issue.Title, issue.Description, issue.Status, issue.Priority, issue.IssueType, issue.Assignee, issue.CreatedAt.Format(time.RFC3339Nano), issue.UpdatedAt.Format(time.RFC3339Nano), closedAt, nullableTime(issue.ArchivedAt), nullableTime(issue.DeletedAt)); err != nil {
 			return fmt.Errorf("restore issue %s: %w", issue.ID, err)
 		}
 	}
@@ -1068,6 +1181,12 @@ func (s *Store) ReplaceFromExport(ctx context.Context, export model.Export) erro
 		if _, err := tx.ExecContext(ctx, `INSERT INTO labels(issue_id, label, created_at, created_by) VALUES (?, ?, ?, ?)`,
 			label.IssueID, label.Name, label.CreatedAt.Format(time.RFC3339Nano), label.CreatedBy); err != nil {
 			return fmt.Errorf("restore label %s:%s: %w", label.IssueID, label.Name, err)
+		}
+	}
+	for _, event := range export.History {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issue_history(id, issue_id, action, reason, from_status, to_status, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			event.ID, event.IssueID, event.Action, event.Reason, event.FromStatus, event.ToStatus, event.CreatedAt.Format(time.RFC3339Nano), event.CreatedBy); err != nil {
+			return fmt.Errorf("restore issue history %s: %w", event.ID, err)
 		}
 	}
 	workspaceRevision := export.WorkspaceRevision
@@ -1189,6 +1308,27 @@ func (s *Store) listAllLabels(ctx context.Context) ([]model.Label, error) {
 	return out, rows.Err()
 }
 
+func (s *Store) insertHistoryTx(ctx context.Context, tx *sql.Tx, issueID, action, reason, fromStatus, toStatus, createdBy string) error {
+	event := model.IssueHistory{
+		ID:         "hist-" + uuid.NewString(),
+		IssueID:    issueID,
+		Action:     action,
+		Reason:     strings.TrimSpace(reason),
+		FromStatus: strings.TrimSpace(fromStatus),
+		ToStatus:   strings.TrimSpace(toStatus),
+		CreatedAt:  time.Now().UTC(),
+		CreatedBy:  strings.TrimSpace(createdBy),
+	}
+	if event.CreatedBy == "" {
+		event.CreatedBy = "unknown"
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO issue_history(id, issue_id, action, reason, from_status, to_status, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		event.ID, event.IssueID, event.Action, event.Reason, event.FromStatus, event.ToStatus, event.CreatedAt.Format(time.RFC3339Nano), event.CreatedBy); err != nil {
+		return fmt.Errorf("insert issue history: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) listComments(ctx context.Context, issueID string) ([]model.Comment, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, issue_id, body, created_at, created_by FROM comments WHERE issue_id = ? ORDER BY created_at ASC`, issueID)
 	if err != nil {
@@ -1208,6 +1348,29 @@ func (s *Store) listComments(ctx context.Context, issueID string) ([]model.Comme
 		}
 		c.CreatedAt = t
 		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) listHistory(ctx context.Context, issueID string) ([]model.IssueHistory, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, issue_id, action, reason, from_status, to_status, created_at, created_by FROM issue_history WHERE issue_id = ? ORDER BY created_at ASC`, issueID)
+	if err != nil {
+		return nil, fmt.Errorf("list issue history: %w", err)
+	}
+	defer rows.Close()
+	out := []model.IssueHistory{}
+	for rows.Next() {
+		var event model.IssueHistory
+		var createdAt string
+		if err := rows.Scan(&event.ID, &event.IssueID, &event.Action, &event.Reason, &event.FromStatus, &event.ToStatus, &createdAt, &event.CreatedBy); err != nil {
+			return nil, err
+		}
+		t, err := time.Parse(time.RFC3339Nano, createdAt)
+		if err != nil {
+			return nil, err
+		}
+		event.CreatedAt = t
+		out = append(out, event)
 	}
 	return out, rows.Err()
 }
@@ -1258,13 +1421,36 @@ func (s *Store) listAllComments(ctx context.Context) ([]model.Comment, error) {
 	return out, rows.Err()
 }
 
+func (s *Store) listAllHistory(ctx context.Context) ([]model.IssueHistory, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id, issue_id, action, reason, from_status, to_status, created_at, created_by FROM issue_history ORDER BY created_at ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("list all issue history: %w", err)
+	}
+	defer rows.Close()
+	out := []model.IssueHistory{}
+	for rows.Next() {
+		var event model.IssueHistory
+		var createdAt string
+		if err := rows.Scan(&event.ID, &event.IssueID, &event.Action, &event.Reason, &event.FromStatus, &event.ToStatus, &createdAt, &event.CreatedBy); err != nil {
+			return nil, err
+		}
+		t, err := time.Parse(time.RFC3339Nano, createdAt)
+		if err != nil {
+			return nil, err
+		}
+		event.CreatedAt = t
+		out = append(out, event)
+	}
+	return out, rows.Err()
+}
+
 type issueScanner interface{ Scan(dest ...any) error }
 
 func scanIssue(row issueScanner) (model.Issue, error) {
 	var issue model.Issue
 	var createdAt, updatedAt string
-	var closedAt sql.NullString
-	if err := row.Scan(&issue.ID, &issue.Title, &issue.Description, &issue.Status, &issue.Priority, &issue.IssueType, &issue.Assignee, &createdAt, &updatedAt, &closedAt); err != nil {
+	var closedAt, archivedAt, deletedAt sql.NullString
+	if err := row.Scan(&issue.ID, &issue.Title, &issue.Description, &issue.Status, &issue.Priority, &issue.IssueType, &issue.Assignee, &createdAt, &updatedAt, &closedAt, &archivedAt, &deletedAt); err != nil {
 		return model.Issue{}, err
 	}
 	var err error
@@ -1282,6 +1468,20 @@ func scanIssue(row issueScanner) (model.Issue, error) {
 			return model.Issue{}, err
 		}
 		issue.ClosedAt = &t
+	}
+	if archivedAt.Valid {
+		t, err := time.Parse(time.RFC3339Nano, archivedAt.String)
+		if err != nil {
+			return model.Issue{}, err
+		}
+		issue.ArchivedAt = &t
+	}
+	if deletedAt.Valid {
+		t, err := time.Parse(time.RFC3339Nano, deletedAt.String)
+		if err != nil {
+			return model.Issue{}, err
+		}
+		issue.DeletedAt = &t
 	}
 	issue.Labels = []string{}
 	return issue, nil
@@ -1395,6 +1595,23 @@ func normalizeLabel(label string) (string, error) {
 		return "", errors.New("label cannot contain commas")
 	}
 	return normalized, nil
+}
+
+func nullableTime(value *time.Time) any {
+	if value == nil {
+		return nil
+	}
+	return value.Format(time.RFC3339Nano)
+}
+
+func execIgnoreDuplicateColumn(ctx context.Context, db *sql.DB, stmt string) error {
+	if _, err := db.ExecContext(ctx, stmt); err != nil {
+		if strings.Contains(err.Error(), "duplicate column name") {
+			return nil
+		}
+		return fmt.Errorf("migrate alter table: %w", err)
+	}
+	return nil
 }
 
 func newIssueID(workspaceID string) string {
