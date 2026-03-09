@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -46,14 +48,13 @@ func TestRetryTransientManifestReadOnlyRetriesTransientError(t *testing.T) {
 }
 
 func TestRetryTransientManifestReadOnlyReturnsLastErrorAfterExhaustion(t *testing.T) {
-	lastErr := transientManifestReadOnlyError{err: errors.New("transient 3")}
-	op := &fakeRetryOperation{
-		results: []error{
-			transientManifestReadOnlyError{err: errors.New("transient 1")},
-			transientManifestReadOnlyError{err: errors.New("transient 2")},
-			lastErr,
-		},
+	results := make([]error, 0, transientManifestRetryMaxAttempts)
+	for attempt := 1; attempt < transientManifestRetryMaxAttempts; attempt++ {
+		results = append(results, transientManifestReadOnlyError{err: errors.New("transient")})
 	}
+	lastErr := transientManifestReadOnlyError{err: errors.New("transient final")}
+	results = append(results, lastErr)
+	op := &fakeRetryOperation{results: results}
 
 	err := retryTransientManifestReadOnly(
 		context.Background(),
@@ -150,5 +151,56 @@ func TestWrapCommitWorkingSetErrorLeavesNonTransientUnmarked(t *testing.T) {
 	}
 	if got, want := err.Error(), "dolt commit working set: permission denied"; got != want {
 		t.Fatalf("error = %q, want %q", got, want)
+	}
+}
+
+func TestWithCommitLockSerializesConcurrentOperations(t *testing.T) {
+	s := &Store{commitLockPath: filepath.Join(t.TempDir(), ".links-commit.lock")}
+	firstEntered := make(chan struct{}, 1)
+	releaseFirst := make(chan struct{})
+	secondEntered := make(chan struct{})
+	errs := make(chan error, 2)
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errs <- s.withCommitLock(context.Background(), func(context.Context) error {
+			firstEntered <- struct{}{}
+			<-releaseFirst
+			return nil
+		})
+	}()
+	<-firstEntered
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		errs <- s.withCommitLock(context.Background(), func(context.Context) error {
+			close(secondEntered)
+			return nil
+		})
+	}()
+
+	select {
+	case <-secondEntered:
+		t.Fatal("second operation entered critical section before first released lock")
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(releaseFirst)
+	wg.Wait()
+	close(errs)
+
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("withCommitLock() error = %v", err)
+		}
+	}
+
+	select {
+	case <-secondEntered:
+	default:
+		t.Fatal("second operation never entered critical section")
 	}
 }
