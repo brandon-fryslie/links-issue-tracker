@@ -154,6 +154,21 @@ func TestWrapCommitWorkingSetErrorLeavesNonTransientUnmarked(t *testing.T) {
 	}
 }
 
+func TestClassifyTransientManifestErrorWrapsGenericManifestFailures(t *testing.T) {
+	err := classifyTransientManifestError(errors.New("commit add comment: Error 1105: cannot update manifest: database is read only"))
+	if !errors.Is(err, ErrTransientManifestReadOnly) {
+		t.Fatalf("errors.Is(err, ErrTransientManifestReadOnly) = false, err=%v", err)
+	}
+}
+
+func TestClassifyTransientManifestErrorLeavesGenericFailures(t *testing.T) {
+	source := errors.New("permission denied")
+	err := classifyTransientManifestError(source)
+	if err != source {
+		t.Fatalf("classifyTransientManifestError() = %v, want original %v", err, source)
+	}
+}
+
 func TestWithCommitLockSerializesConcurrentOperations(t *testing.T) {
 	s := &Store{commitLockPath: filepath.Join(t.TempDir(), ".links-commit.lock")}
 	firstEntered := make(chan struct{}, 1)
