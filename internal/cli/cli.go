@@ -315,7 +315,7 @@ func runReady(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 		return err
 	}
 	if fs.NArg() != 0 {
-		return errors.New("usage: lit ready [--assignee <user>] [--limit N] [--format lines|table] [--columns ...] [--json]")
+		return errors.New("usage: lit ready [--assignee <user>] [--limit N] [--format lines|table] [--columns id,state,title,...] [--json]")
 	}
 	issues, err := ap.Store.ListIssues(ctx, store.ListIssuesFilter{
 		Status:          "open",
