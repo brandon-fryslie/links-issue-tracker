@@ -138,6 +138,10 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 		return runShow(ctx, stdout, ap, args[1:])
 	case "close":
 		return runTransition(ctx, stdout, ap, args[1:], "close")
+	case "start":
+		return runTransition(ctx, stdout, ap, args[1:], "start")
+	case "done":
+		return runTransition(ctx, stdout, ap, args[1:], "done")
 	case "open":
 		return runTransition(ctx, stdout, ap, args[1:], "reopen")
 	case "archive":
@@ -205,6 +209,7 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	status := fs.String("status", "", "Filter by status")
+	workStatus := fs.String("work-status", "", "Filter by work status: todo|in-progress|done")
 	issueType := fs.String("type", "", "Filter by issue type")
 	assignee := fs.String("assignee", "", "Filter by assignee")
 	priorityMin := fs.Int("priority-min", -1, "Minimum priority 0..4")
@@ -217,7 +222,7 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	includeDeleted := fs.Bool("include-deleted", false, "Include deleted issues")
 	updatedAfter := fs.String("updated-after", "", "Only include issues updated at or after RFC3339 timestamp")
 	updatedBefore := fs.String("updated-before", "", "Only include issues updated at or before RFC3339 timestamp")
-	queryExpr := fs.String("query", "", "Query language: status:open type:task priority<=2 has:comments text")
+	queryExpr := fs.String("query", "", "Query language: status:open work:todo type:task priority<=2 has:comments text")
 	sortExpr := fs.String("sort", "", "Sort fields, e.g. priority:asc,updated_at:desc")
 	columnsExpr := fs.String("columns", "", "Comma-separated output columns")
 	format := fs.String("format", "lines", "Output format: lines|table")
@@ -230,6 +235,7 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	fs.Visit(func(f *flag.Flag) { visited[f.Name] = true })
 	filter := store.ListIssuesFilter{
 		Status:          strings.TrimSpace(*status),
+		WorkStatus:      strings.TrimSpace(*workStatus),
 		IssueType:       strings.TrimSpace(*issueType),
 		Assignee:        strings.TrimSpace(*assignee),
 		IncludeArchived: *includeArchived,
@@ -310,6 +316,7 @@ func runReady(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 	fs := flag.NewFlagSet("ready", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	assignee := fs.String("assignee", "", "Filter by assignee")
+	workStatus := fs.String("work-status", "todo", "Filter by work status: todo|in-progress|done")
 	limit := fs.Int("limit", 0, "Limit results")
 	columnsExpr := fs.String("columns", "", "Comma-separated output columns")
 	format := fs.String("format", "lines", "Output format: lines|table")
@@ -318,10 +325,11 @@ func runReady(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 		return err
 	}
 	if fs.NArg() != 0 {
-		return errors.New("usage: lit ready [--assignee <user>] [--limit N] [--format lines|table] [--columns ...] [--json]")
+		return errors.New("usage: lit ready [--assignee <user>] [--work-status todo|in-progress|done] [--limit N] [--format lines|table] [--columns ...] [--json]")
 	}
 	issues, err := ap.Store.ListIssues(ctx, store.ListIssuesFilter{
 		Status:          "open",
+		WorkStatus:      strings.TrimSpace(*workStatus),
 		Assignee:        strings.TrimSpace(*assignee),
 		IncludeArchived: false,
 		IncludeDeleted:  false,
@@ -1488,7 +1496,7 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"Discover workspace identity with `lit workspace --json`.",
 			"Migrate legacy Beads wiring explicitly with `lit migrate beads --apply --json` when needed.",
 			"Install git hook automation once with `lit hooks install`.",
-			"List ready work with `lit ready --json` (or `lit ls --format lines --json` for full views).",
+			"List ready work with `lit ready --json` (or `lit ls --query \"status:open work:todo\" --json`).",
 			"Create issues with `lit new ...`; use `--type epic` for epics.",
 			"Connect issues using `lit parent set` and `lit dep add --type related-to|blocks`.",
 			"Configure remotes with `git remote`; `lit sync` mirrors those remotes into Dolt automatically.",
@@ -1501,7 +1509,9 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"lit hooks install --json",
 			"lit workspace --json",
 			"lit ready --json",
-			"lit ls --query \"status:open type:task\" --sort priority:asc,updated_at:desc --json",
+			"lit start <issue-id> --reason \"claim\" --json",
+			"lit done <issue-id> --reason \"completed\" --json",
+			"lit ls --query \"status:open work:todo type:task\" --sort priority:asc,updated_at:desc --json",
 			"lit new --title \"Fix renderer race\" --type bug --priority 1 --labels renderer,urgent --json",
 			"lit parent set <issue-id> <parent-issue-id> --json",
 			"lit dep add <issue-id> <dependency-issue-id> --type related-to --json",
@@ -1533,8 +1543,9 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"",
 			"2) Find work",
 			"   `lit ready --json`",
+			"   `lit start <issue-id> --reason \"claim\" --json`",
 			"   `lit ls --format lines --json`",
-			"   `lit ls --query \"status:open type:task\" --sort priority:asc,updated_at:desc --json`",
+			"   `lit ls --query \"status:open work:todo type:task\" --sort priority:asc,updated_at:desc --json`",
 			"",
 			"3) Create and relate issues/epics",
 			"   `lit new --title \"...\" --type task|bug|feature|chore|epic --json`",
@@ -1585,7 +1596,7 @@ func printValue(w io.Writer, v any, jsonOut bool, textFn func(io.Writer, any) er
 
 func printIssueSummary(w io.Writer, v any) error {
 	issue := v.(model.Issue)
-	_, err := fmt.Fprintf(w, "%s [%s/%s/P%d] %s%s\n", issue.ID, formatIssueState(issue), issue.IssueType, issue.Priority, issue.Title, formatLabels(issue.Labels))
+	_, err := fmt.Fprintf(w, "%s [%s/%s/%s/P%d] %s%s\n", issue.ID, formatIssueState(issue), issue.WorkStatus, issue.IssueType, issue.Priority, issue.Title, formatLabels(issue.Labels))
 	return err
 }
 
@@ -1615,7 +1626,7 @@ func printIssueLines(w io.Writer, issues []model.Issue, columns []string) error 
 
 func printIssueDetail(w io.Writer, detail model.IssueDetail) error {
 	issue := detail.Issue
-	if _, err := fmt.Fprintf(w, "%s\n%s\n\nstatus: %s\ntype: %s\npriority: %d\nassignee: %s\nlabels: %s\narchived: %s\ndeleted: %s\n", issue.ID, issue.Title, issue.Status, issue.IssueType, issue.Priority, emptyDash(issue.Assignee), emptyDash(strings.Join(issue.Labels, ", ")), formatOptionalTime(issue.ArchivedAt), formatOptionalTime(issue.DeletedAt)); err != nil {
+	if _, err := fmt.Fprintf(w, "%s\n%s\n\nstatus: %s\nwork_status: %s\ntype: %s\npriority: %d\nassignee: %s\nlabels: %s\narchived: %s\ndeleted: %s\n", issue.ID, issue.Title, issue.Status, issue.WorkStatus, issue.IssueType, issue.Priority, emptyDash(issue.Assignee), emptyDash(strings.Join(issue.Labels, ", ")), formatOptionalTime(issue.ArchivedAt), formatOptionalTime(issue.DeletedAt)); err != nil {
 		return err
 	}
 	if issue.Description != "" {
@@ -1688,6 +1699,8 @@ func formatIssueColumns(issue model.Issue, columns []string, delimiter string) s
 			values = append(values, formatIssueState(issue))
 		case "type":
 			values = append(values, issue.IssueType)
+		case "work_status":
+			values = append(values, issue.WorkStatus)
 		case "priority":
 			values = append(values, strconv.Itoa(issue.Priority))
 		case "title":
@@ -1711,7 +1724,7 @@ func resolveColumns(columns []string) []string {
 		return []string{"id", "state", "title"}
 	}
 	valid := map[string]struct{}{
-		"id": {}, "state": {}, "type": {}, "priority": {}, "title": {}, "assignee": {}, "labels": {}, "updated_at": {}, "created_at": {},
+		"id": {}, "state": {}, "type": {}, "work_status": {}, "priority": {}, "title": {}, "assignee": {}, "labels": {}, "updated_at": {}, "created_at": {},
 	}
 	out := make([]string, 0, len(columns))
 	for _, column := range columns {
@@ -1914,10 +1927,12 @@ Usage:
 
 Issue Workflow:
   init           Initialize links in the current repository (auto-migrates Beads residue)
-  ready          List open work ordered by priority and recency
+  ready          List open todo work ordered by priority and recency
   new            Create an issue
   ls             List issues with filters/query/sort
   show           Show issue details
+  start          Claim work (todo -> in-progress)
+  done           Mark work complete (in-progress -> done)
   close          Close issue(s)
   open           Reopen issue(s)
   archive        Archive issue(s)
@@ -1954,7 +1969,9 @@ Guidance & Tooling:
 
 Command Syntax:
   lit init [--json] [--skip-hooks] [--skip-agents]
-  lit ready [--assignee <user>] [--limit N] [--format lines|table] [--columns ...] [--json]
+  lit ready [--assignee <user>] [--work-status todo|in-progress|done] [--limit N] [--format lines|table] [--columns ...] [--json]
+  lit start <id> --reason <text> [--by <user>] [--json]
+  lit done <id> --reason <text> [--by <user>] [--json]
   lit hooks install [--json]
   lit migrate beads [--apply] [--json]
   lit quickstart [--json]
@@ -1967,8 +1984,10 @@ Command Syntax:
 Examples:
   lit init --json
   lit ready --json
+  lit start <issue-id> --reason "claim" --json
+  lit done <issue-id> --reason "completed" --json
   lit new --title "Fix renderer race" --type bug --priority 1 --json
-  lit ls --query "status:open type:task" --sort priority:asc,updated_at:desc --json
+  lit ls --query "status:open work:todo type:task" --sort priority:asc,updated_at:desc --json
 
 Use "lit [command] --help" for more information about a command.
 `)

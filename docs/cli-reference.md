@@ -13,6 +13,7 @@ lit help
 ```sh
 lit new --title "..." --type task --priority 2 --json
 lit ready --json
+lit ls --query "status:open work:todo" --json
 lit ls --json
 lit show <issue-id> --json
 ```
@@ -20,6 +21,8 @@ lit show <issue-id> --json
 ### Lifecycle
 
 ```sh
+lit start <issue-id> --reason "claim" --json
+lit done <issue-id> --reason "implemented" --json
 lit close <issue-id> --reason "..." --json
 lit open <issue-id> --reason "..." --json
 lit archive <issue-id> --reason "..." --json

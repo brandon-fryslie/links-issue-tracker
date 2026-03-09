@@ -347,3 +347,71 @@ func TestIssueLifecycleTracksReasonHistory(t *testing.T) {
 		t.Fatalf("history[3] = %#v", detail.History[3])
 	}
 }
+
+func TestIssueWorkStatusClaimAndDoneAreDeterministic(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer st.Close()
+
+	issue, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Claim me", IssueType: "task", Priority: 2})
+	if err != nil {
+		t.Fatalf("CreateIssue() error = %v", err)
+	}
+	if issue.WorkStatus != "todo" {
+		t.Fatalf("issue.WorkStatus = %q, want todo", issue.WorkStatus)
+	}
+
+	started, err := st.TransitionIssue(ctx, TransitionIssueInput{
+		IssueID:   issue.ID,
+		Action:    "start",
+		Reason:    "claim",
+		CreatedBy: "agent-a",
+	})
+	if err != nil {
+		t.Fatalf("TransitionIssue(start) error = %v", err)
+	}
+	if started.WorkStatus != "in-progress" {
+		t.Fatalf("started.WorkStatus = %q, want in-progress", started.WorkStatus)
+	}
+
+	if _, err := st.TransitionIssue(ctx, TransitionIssueInput{
+		IssueID:   issue.ID,
+		Action:    "start",
+		Reason:    "competing claim",
+		CreatedBy: "agent-b",
+	}); err == nil {
+		t.Fatal("expected claim conflict when claiming an already in-progress issue")
+	}
+
+	done, err := st.TransitionIssue(ctx, TransitionIssueInput{
+		IssueID:   issue.ID,
+		Action:    "done",
+		Reason:    "implemented",
+		CreatedBy: "agent-a",
+	})
+	if err != nil {
+		t.Fatalf("TransitionIssue(done) error = %v", err)
+	}
+	if done.WorkStatus != "done" {
+		t.Fatalf("done.WorkStatus = %q, want done", done.WorkStatus)
+	}
+
+	todoIssues, err := st.ListIssues(ctx, ListIssuesFilter{Status: "open", WorkStatus: "todo"})
+	if err != nil {
+		t.Fatalf("ListIssues(todo) error = %v", err)
+	}
+	if len(todoIssues) != 0 {
+		t.Fatalf("todoIssues = %#v, want empty", todoIssues)
+	}
+
+	doneIssues, err := st.ListIssues(ctx, ListIssuesFilter{Status: "open", WorkStatus: "done"})
+	if err != nil {
+		t.Fatalf("ListIssues(done) error = %v", err)
+	}
+	if len(doneIssues) != 1 || doneIssues[0].ID != issue.ID {
+		t.Fatalf("doneIssues = %#v", doneIssues)
+	}
+}

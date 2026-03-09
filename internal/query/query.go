@@ -32,6 +32,9 @@ func Merge(base store.ListIssuesFilter, incoming store.ListIssuesFilter) (store.
 	if err := mergeStringField("status", &filter.Status, incoming.Status); err != nil {
 		return store.ListIssuesFilter{}, err
 	}
+	if err := mergeStringField("work-status", &filter.WorkStatus, incoming.WorkStatus); err != nil {
+		return store.ListIssuesFilter{}, err
+	}
 	if err := mergeStringField("type", &filter.IssueType, incoming.IssueType); err != nil {
 		return store.ListIssuesFilter{}, err
 	}
@@ -66,6 +69,10 @@ func applyTerm(filter *store.ListIssuesFilter, term string) error {
 	switch {
 	case strings.HasPrefix(term, "status:"):
 		return mergeStringField("status", &filter.Status, strings.TrimPrefix(term, "status:"))
+	case strings.HasPrefix(term, "work-status:"):
+		return mergeStringField("work-status", &filter.WorkStatus, strings.TrimPrefix(term, "work-status:"))
+	case strings.HasPrefix(term, "work:"):
+		return mergeStringField("work-status", &filter.WorkStatus, strings.TrimPrefix(term, "work:"))
 	case strings.HasPrefix(term, "type:"):
 		return mergeStringField("type", &filter.IssueType, strings.TrimPrefix(term, "type:"))
 	case strings.HasPrefix(term, "assignee:"):
