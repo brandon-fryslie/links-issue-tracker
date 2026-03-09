@@ -95,10 +95,32 @@ func installHooks(ws workspace.Info) (hookInstallResult, error) {
 	}
 
 	existingStr := string(existing)
+
+	// Treat a hook as bash-compatible only if its shebang explicitly references bash.
+	isBashCompatible := func(script string) bool {
+		firstLineEnd := strings.IndexByte(script, '\n')
+		var firstLine string
+		if firstLineEnd == -1 {
+			firstLine = strings.TrimSpace(script)
+		} else {
+			firstLine = strings.TrimSpace(script[:firstLineEnd])
+		}
+		if !strings.HasPrefix(firstLine, "#!") {
+			// No explicit interpreter; assume not bash-compatible to avoid breaking the hook.
+			return false
+		}
+		// Only treat hooks that explicitly mention bash as compatible with the managed bash section.
+		return strings.Contains(firstLine, "bash")
+	}
+
 	// [LAW:single-enforcer] hook install owns all managed-hook rewrites, including legacy conversion.
 	if strings.Contains(existingStr, linksPrePushHookMarker) && !strings.Contains(existingStr, linksHookBeginMarker) {
 		updated = renderLinksPrePushHookFile(section)
 	} else {
+		if !isBashCompatible(existingStr) {
+			// Do not insert a bash-specific managed section into a non-bash hook; that could break git pushes.
+			return hookInstallResult{HookPath: hookPath, LegacyPath: detectLegacyHookPath(legacyPath), Changed: false}, nil
+		}
 		var changed bool
 		updated, changed = upsertManagedSection(existingStr, section, linksHookBeginMarker, linksHookEndMarker)
 		if !changed {
