@@ -6,6 +6,16 @@ For full syntax, run:
 lit help
 ```
 
+## Global output mode
+
+`lit` resolves output mode in one place with deterministic precedence:
+
+1. global flags before the command (`--output auto|text|json` and `--json`, last flag wins)
+2. `LIT_OUTPUT` environment default
+3. automatic fallback (`text` on TTY, `json` otherwise)
+
+Command-local `--json` remains supported for existing scripts.
+
 ## Common commands
 
 ### Output mode
@@ -14,8 +24,8 @@ lit help
 - `auto` renders text in terminals and JSON in non-interactive contexts.
 - `--json` remains supported as shorthand for JSON mode.
 - `--output auto|json|text` overrides everything else.
-- Precedence is deterministic: `--output` > `--json` > `LK_OUTPUT` > auto.
-- Migration expectation: existing scripts should keep using `--json` (or set `LK_OUTPUT=json`) for explicit machine-readable output.
+- Precedence is deterministic: `--output` > `--json` > `LIT_OUTPUT` > auto.
+- Migration expectation: existing scripts should keep using `--json` (or set `LIT_OUTPUT=json`) for explicit machine-readable output.
 
 ### Create/list/show
 

@@ -2,148 +2,158 @@ package cli
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 )
 
-func TestNormalizeOutputModeArgs(t *testing.T) {
-	nonTTY := &bytes.Buffer{}
-
+func TestParseGlobalOutputMode(t *testing.T) {
 	tests := []struct {
 		name      string
-		args      []string
 		envOutput string
-		want      []string
+		args      []string
+		wantArgs  []string
+		wantMode  outputMode
 	}{
 		{
-			name: "auto defaults to json for non tty",
-			args: []string{"ls"},
-			want: []string{"ls", "--json"},
-		},
-		{
-			name: "auto defaults to json for init command",
-			args: []string{"init"},
-			want: []string{"init", "--json"},
-		},
-		{
-			name: "auto defaults to json for migrate command",
-			args: []string{"migrate", "beads"},
-			want: []string{"migrate", "beads", "--json"},
-		},
-		{
-			name: "auto defaults to json for ready command",
-			args: []string{"ready"},
-			want: []string{"ready", "--json"},
-		},
-		{
-			name:      "env text disables json in non tty",
-			args:      []string{"ls"},
-			envOutput: "text",
-			want:      []string{"ls"},
-		},
-		{
-			name:      "env json enables json in non tty",
-			args:      []string{"ls"},
+			name:      "output overrides json and env",
 			envOutput: "json",
-			want:      []string{"ls", "--json"},
+			args:      []string{"--json", "--output", "text", "quickstart"},
+			wantArgs:  []string{"quickstart"},
+			wantMode:  outputModeText,
 		},
 		{
-			name:      "json shorthand beats env text",
-			args:      []string{"ls", "--json"},
-			envOutput: "text",
-			want:      []string{"ls", "--json"},
-		},
-		{
-			name:      "json false beats env json",
-			args:      []string{"ls", "--json=false"},
+			name:      "json false sets text mode",
 			envOutput: "json",
-			want:      []string{"ls"},
+			args:      []string{"--json=false", "quickstart"},
+			wantArgs:  []string{"quickstart"},
+			wantMode:  outputModeText,
 		},
 		{
-			name:      "output text beats json shorthand and env",
-			args:      []string{"ls", "--output", "text", "--json"},
-			envOutput: "json",
-			want:      []string{"ls"},
-		},
-		{
-			name:      "output json beats env text",
-			args:      []string{"ls", "--output=json"},
+			name:      "json true sets json mode",
 			envOutput: "text",
-			want:      []string{"ls", "--json"},
+			args:      []string{"--json=true", "quickstart"},
+			wantArgs:  []string{"quickstart"},
+			wantMode:  outputModeJSON,
 		},
 		{
-			name:      "output auto beats env text",
-			args:      []string{"ls", "--output", "auto"},
+			name:      "double dash ends global parsing",
 			envOutput: "text",
-			want:      []string{"ls", "--json"},
+			args:      []string{"--output", "json", "--", "quickstart"},
+			wantArgs:  []string{"quickstart"},
+			wantMode:  outputModeJSON,
 		},
 		{
-			name:      "completion command is not normalized",
-			args:      []string{"completion", "zsh"},
-			envOutput: "json",
-			want:      []string{"completion", "zsh"},
-		},
-		{
-			name: "title value that looks like output flag is preserved",
-			args: []string{"new", "--title", "--output"},
-			want: []string{"new", "--title", "--output", "--json"},
-		},
-		{
-			name:      "double dash sentinel stops output parsing",
-			args:      []string{"ls", "--", "--output", "text"},
+			name:      "command args that look like output flags are preserved",
 			envOutput: "text",
-			want:      []string{"ls", "--", "--output", "text"},
+			args:      []string{"new", "--title", "--output"},
+			wantArgs:  []string{"new", "--title", "--output"},
+			wantMode:  outputModeText,
 		},
 	}
 
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
-			if tc.envOutput == "" {
-				t.Setenv(lkOutputEnv, "")
-			} else {
-				t.Setenv(lkOutputEnv, tc.envOutput)
-			}
-			got, err := normalizeOutputModeArgs(tc.args, nonTTY)
+			t.Setenv(outputModeEnvVar, tc.envOutput)
+			gotArgs, gotMode, err := parseGlobalOutputMode(tc.args, &bytes.Buffer{})
 			if err != nil {
-				t.Fatalf("normalizeOutputModeArgs() error = %v", err)
+				t.Fatalf("parseGlobalOutputMode() error = %v", err)
 			}
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("normalizeOutputModeArgs() = %v, want %v", got, tc.want)
+			if gotMode != tc.wantMode {
+				t.Fatalf("mode = %q, want %q", gotMode, tc.wantMode)
+			}
+			if !reflect.DeepEqual(gotArgs, tc.wantArgs) {
+				t.Fatalf("args = %#v, want %#v", gotArgs, tc.wantArgs)
 			}
 		})
 	}
 }
 
-func TestNormalizeOutputModeArgsErrors(t *testing.T) {
+func TestParseGlobalOutputModeFallsBackToEnv(t *testing.T) {
+	t.Setenv(outputModeEnvVar, "text")
+
+	_, mode, err := parseGlobalOutputMode([]string{"quickstart"}, &bytes.Buffer{})
+	if err != nil {
+		t.Fatalf("parseGlobalOutputMode() error = %v", err)
+	}
+	if mode != outputModeText {
+		t.Fatalf("mode = %q, want %q", mode, outputModeText)
+	}
+}
+
+func TestParseGlobalOutputModeErrors(t *testing.T) {
 	nonTTY := &bytes.Buffer{}
 
-	t.Run("invalid cli output value", func(t *testing.T) {
-		_, err := normalizeOutputModeArgs([]string{"ls", "--output", "nope"}, nonTTY)
+	t.Run("invalid env output mode", func(t *testing.T) {
+		t.Setenv(outputModeEnvVar, "yaml")
+		_, _, err := parseGlobalOutputMode([]string{"quickstart"}, nonTTY)
+		if err == nil {
+			t.Fatalf("expected error for invalid env mode")
+		}
+		if !strings.Contains(err.Error(), "expected auto|text|json") {
+			t.Fatalf("unexpected error: %v", err)
+		}
+	})
+
+	t.Run("invalid output mode", func(t *testing.T) {
+		t.Setenv(outputModeEnvVar, "")
+		_, _, err := parseGlobalOutputMode([]string{"--output", "yaml", "quickstart"}, nonTTY)
 		if err == nil {
 			t.Fatalf("expected error for invalid --output")
 		}
 	})
 
-	t.Run("invalid cli json value", func(t *testing.T) {
-		_, err := normalizeOutputModeArgs([]string{"ls", "--json=nope"}, nonTTY)
-		if err == nil {
-			t.Fatalf("expected error for invalid --json")
-		}
-	})
-
-	t.Run("missing cli output value", func(t *testing.T) {
-		_, err := normalizeOutputModeArgs([]string{"ls", "--output"}, nonTTY)
+	t.Run("missing output value", func(t *testing.T) {
+		t.Setenv(outputModeEnvVar, "")
+		_, _, err := parseGlobalOutputMode([]string{"--output"}, nonTTY)
 		if err == nil {
 			t.Fatalf("expected error for missing --output value")
 		}
 	})
 
-	t.Run("invalid env output value", func(t *testing.T) {
-		t.Setenv(lkOutputEnv, "wrong")
-		_, err := normalizeOutputModeArgs([]string{"ls"}, nonTTY)
+	t.Run("invalid json bool value", func(t *testing.T) {
+		t.Setenv(outputModeEnvVar, "")
+		_, _, err := parseGlobalOutputMode([]string{"--json=nope", "quickstart"}, nonTTY)
 		if err == nil {
-			t.Fatalf("expected error for invalid env output value")
+			t.Fatalf("expected error for invalid --json value")
 		}
 	})
+}
+
+func TestRunQuickstartDefaultsToJSONOnNonTTY(t *testing.T) {
+	t.Setenv(outputModeEnvVar, "")
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), &stdout, &stdout, []string{"quickstart"}); err != nil {
+		t.Fatalf("Run(quickstart) error = %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("quickstart default output should be json: %v", err)
+	}
+}
+
+func TestRunQuickstartOutputFlagOverridesDefault(t *testing.T) {
+	t.Setenv(outputModeEnvVar, "")
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), &stdout, &stdout, []string{"--output", "text", "quickstart"}); err != nil {
+		t.Fatalf("Run(--output text quickstart) error = %v", err)
+	}
+	if !strings.Contains(stdout.String(), "Agent quickstart for links issue tracking") {
+		t.Fatalf("expected text quickstart output, got %q", stdout.String())
+	}
+}
+
+func TestRunQuickstartJSONFlagOverridesEnv(t *testing.T) {
+	t.Setenv(outputModeEnvVar, "text")
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), &stdout, &stdout, []string{"--json", "quickstart"}); err != nil {
+		t.Fatalf("Run(--json quickstart) error = %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
+		t.Fatalf("expected json output when --json is set: %v", err)
+	}
 }
