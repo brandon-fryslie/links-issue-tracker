@@ -34,21 +34,21 @@
     <rect id="greenLinkShape" x="420" y="122" width="250" height="116" rx="58" transform="rotate(-38 545 180)"/>
 
     <clipPath id="crossGreenTopClip">
-      <ellipse cx="468" cy="156" rx="50" ry="34" transform="rotate(-38 468 156)"/>
+      <ellipse cx="468" cy="156" rx="44" ry="28" transform="rotate(-38 468 156)"/>
     </clipPath>
 
     <clipPath id="crossBlueTopClip">
-      <ellipse cx="496" cy="204" rx="50" ry="34" transform="rotate(-38 496 204)"/>
+      <ellipse cx="496" cy="204" rx="44" ry="28" transform="rotate(-38 496 204)"/>
     </clipPath>
 
-    <mask id="blueVisibleMask">
+    <mask id="blueCutMask">
       <rect width="960" height="360" fill="white"/>
-      <ellipse cx="468" cy="156" rx="52" ry="36" transform="rotate(-38 468 156)" fill="black"/>
+      <ellipse cx="468" cy="156" rx="66" ry="44" transform="rotate(-38 468 156)" fill="black"/>
     </mask>
 
-    <mask id="greenVisibleMask">
+    <mask id="greenCutMask">
       <rect width="960" height="360" fill="white"/>
-      <ellipse cx="496" cy="204" rx="52" ry="36" transform="rotate(-38 496 204)" fill="black"/>
+      <ellipse cx="496" cy="204" rx="66" ry="44" transform="rotate(-38 496 204)" fill="black"/>
     </mask>
   </defs>
 
@@ -61,11 +61,11 @@
       <animateTransform attributeName="transform" type="translate" values="0 0;0 -2;0 0" dur="3.8s" repeatCount="indefinite"/>
 
       <!-- [LAW:dataflow-not-control-flow] Render order is fixed; masks/clips carry crossing variability in data. -->
-      <g mask="url(#blueVisibleMask)">
+      <g mask="url(#blueCutMask)">
         <use href="#blueLinkShape" fill="none" stroke="url(#blueLink)" stroke-width="36"/>
       </g>
 
-      <g mask="url(#greenVisibleMask)">
+      <g mask="url(#greenCutMask)">
         <use href="#greenLinkShape" fill="none" stroke="url(#greenLink)" stroke-width="36"/>
       </g>
 
@@ -77,12 +77,20 @@
         <use href="#blueLinkShape" fill="none" stroke="url(#blueLink)" stroke-width="36"/>
       </g>
 
-      <g mask="url(#blueVisibleMask)">
+      <g mask="url(#blueCutMask)">
         <use href="#blueLinkShape" fill="none" stroke="#FFFFFF" stroke-opacity="0.24" stroke-width="9"/>
       </g>
 
-      <g mask="url(#greenVisibleMask)">
+      <g mask="url(#greenCutMask)">
         <use href="#greenLinkShape" fill="none" stroke="#FFFFFF" stroke-opacity="0.20" stroke-width="9"/>
+      </g>
+
+      <g clip-path="url(#crossGreenTopClip)">
+        <use href="#greenLinkShape" fill="none" stroke="#FFFFFF" stroke-opacity="0.20" stroke-width="9"/>
+      </g>
+
+      <g clip-path="url(#crossBlueTopClip)">
+        <use href="#blueLinkShape" fill="none" stroke="#FFFFFF" stroke-opacity="0.24" stroke-width="9"/>
       </g>
     </g>
   </g>
