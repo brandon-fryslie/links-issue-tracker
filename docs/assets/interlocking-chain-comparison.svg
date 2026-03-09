@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 200" width="100%" height="200">
+  <title>Interlocking Animated Chain</title>
+  <desc>Three interlocking chain links with a continuous rotating motion.</desc>
+  
+  <defs>
+    <path id="track" d="M -50 -25 L 50 -25 A 25 25 0 0 1 50 25 L -50 25 A 25 25 0 0 1 -50 -25 Z"
+          fill="none" stroke-width="16" />
+
+    <path id="moving-links" d="M -50 -25 L 50 -25 A 25 25 0 0 1 50 25 L -50 25 A 25 25 0 0 1 -50 -25 Z"
+          fill="none" stroke-width="10" stroke-dasharray="18 17.708">
+      <animate attributeName="stroke-dashoffset" from="0" to="-357.08" dur="2.5s" repeatCount="indefinite" />
+    </path>
+
+    <clipPath id="clip-l1-over-l2">
+      <rect x="170" y="20" width="60" height="55" />
+    </clipPath>
+
+    <clipPath id="clip-l2-over-l3">
+      <rect x="270" y="125" width="60" height="60" />
+    </clipPath>
+  </defs>
+
+  <g id="l1" transform="translate(150, 100) rotate(-30)">
+    <use href="#track" stroke="#102a5c" />
+    <use href="#moving-links" stroke="#58a6ff" />
+  </g>
+
+  <g id="l2" transform="translate(250, 100) rotate(30)">
+    <use href="#track" stroke="#0f4523" />
+    <use href="#moving-links" stroke="#3fb950" />
+  </g>
+
+  <g clip-path="url(#clip-l1-over-l2)">
+    <use href="#l1" />
+  </g>
+
+  <g id="l3" transform="translate(350, 100) rotate(-30)">
+    <use href="#track" stroke="#311c5e" />
+    <use href="#moving-links" stroke="#d2a8ff" />
+  </g>
+
+  <g clip-path="url(#clip-l2-over-l3)">
+    <use href="#l2" />
+  </g>
+</svg>
