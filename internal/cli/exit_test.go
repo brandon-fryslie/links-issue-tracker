@@ -16,7 +16,6 @@ func TestExitCodeMappings(t *testing.T) {
 		want int
 	}{
 		{name: "nil", err: nil, want: ExitOK},
-		{name: "stale", err: store.StaleRevisionError{Expected: 10, Actual: 11}, want: ExitStaleRevision},
 		{name: "not found", err: store.NotFoundError{Entity: "issue", ID: "lit-1"}, want: ExitNotFound},
 		{name: "merge conflict typed", err: MergeConflictError{Message: "sync conflict"}, want: ExitConflict},
 		{name: "corruption typed", err: CorruptionError{Message: "integrity_check failed"}, want: ExitCorruption},

@@ -12,14 +12,14 @@ lit help
 
 ```sh
 lit new --title "..." --type task --priority 2 --json
+lit ready --json
 lit ls --json
 lit show <issue-id> --json
 ```
 
-### Edit and lifecycle
+### Lifecycle
 
 ```sh
-lit edit <issue-id> --title "..." --json
 lit close <issue-id> --reason "..." --json
 lit open <issue-id> --reason "..." --json
 lit archive <issue-id> --reason "..." --json
