@@ -58,46 +58,10 @@ type outputModeProvider interface {
 	linksOutputMode() outputMode
 }
 
-type commandHelpEntry struct {
-	Command  string
-	Summary  string
-	Usage    string
-	HumanCmd bool
-}
-
-// [LAW:one-source-of-truth] Command help metadata is centralized here for both top-level and subcommand help rendering.
-var commandHelpCatalog = []commandHelpEntry{
-	{Command: "init", Summary: "Initialize links in the current repository (auto-migrates Beads residue)", Usage: "lit init [--json] [--skip-hooks] [--skip-agents]", HumanCmd: true},
-	{Command: "ready", Summary: "List open work ordered by priority and recency", Usage: "lit ready [--assignee <user>] [--limit N] [--format lines|table] [--columns ...] [--json]"},
-	{Command: "new", Summary: "Create an issue", Usage: "lit new --title <text> [--description <text>] [--type task|feature|bug|chore|epic] [--priority 0..4] [--assignee <user>] [--labels <csv>] [--json]"},
-	{Command: "ls", Summary: "List issues with filters/query/sort", Usage: "lit ls [--status <status>] [--type <type>] [--query <expr>] [--sort <expr>] [--json]"},
-	{Command: "show", Summary: "Show issue details", Usage: "lit show <id> [--json]"},
-	{Command: "close", Summary: "Close issue(s)", Usage: "lit close <id> --reason <text> [--by <user>] [--json]"},
-	{Command: "open", Summary: "Reopen issue(s)", Usage: "lit open <id> --reason <text> [--by <user>] [--json]"},
-	{Command: "archive", Summary: "Archive issue(s)", Usage: "lit archive <id> --reason <text> [--by <user>] [--json]"},
-	{Command: "delete", Summary: "Soft-delete issue(s)", Usage: "lit delete <id> --reason <text> [--by <user>] [--json]"},
-	{Command: "unarchive", Summary: "Unarchive issue(s)", Usage: "lit unarchive <id> --reason <text> [--by <user>] [--json]"},
-	{Command: "restore", Summary: "Restore deleted issue(s)", Usage: "lit restore <id> --reason <text> [--by <user>] [--json]"},
-	{Command: "comment", Summary: "Add issue comments", Usage: "lit comment add <id> --body <text> [--by <user>] [--json]"},
-	{Command: "label", Summary: "Add/remove issue labels", Usage: "lit label <add|rm> <issue-id> <label> [--by <user>] [--json]"},
-	{Command: "bulk", Summary: "Bulk issue operations (label, close, archive, import)", Usage: "lit bulk <label|close|archive|import> ..."},
-	{Command: "parent", Summary: "Manage parent/child links", Usage: "lit parent <set|clear> ..."},
-	{Command: "children", Summary: "List child issues", Usage: "lit children <parent-id> [--json]"},
-	{Command: "dep", Summary: "Manage dependency edges", Usage: "lit dep <add|rm|ls> ..."},
-	{Command: "export", Summary: "Export workspace snapshot JSON", Usage: "lit export [--json]"},
-	{Command: "sync", Summary: "Mirror Dolt data through git remotes", Usage: "lit sync <status|remote|fetch|pull|push> ..."},
-	{Command: "backup", Summary: "Create/list/restore backup snapshots", Usage: "lit backup <create|list|restore> ..."},
-	{Command: "recover", Summary: "Recover from sync file or backup", Usage: "lit recover --from-sync <path> | --from-backup <path> | --latest-backup [--force] [--json]"},
-	{Command: "beads", Summary: "Import/export from Beads Dolt databases", Usage: "lit beads <import|export> --db <path> [--json]"},
-	{Command: "workspace", Summary: "Show workspace metadata", Usage: "lit workspace [--json]"},
-	{Command: "hooks", Summary: "Install git hook automation", Usage: "lit hooks install [--json]"},
-	{Command: "migrate", Summary: "Migrate from Beads to links", Usage: "lit migrate beads [--apply] [--json]"},
-	{Command: "doctor", Summary: "Health check", Usage: "lit doctor [--json]"},
-	{Command: "fsck", Summary: "Integrity check and optional repair", Usage: "lit fsck [--repair] [--json]"},
-	{Command: "quickstart", Summary: "Agent quickstart workflow", Usage: "lit quickstart [--json]"},
-	{Command: "completion", Summary: "Generate shell completion script", Usage: "lit completion <bash|zsh|fish>"},
-	{Command: "help", Summary: "Show help output", Usage: "lit help [command]"},
-}
+const (
+	humanBootstrapHelp = "Human bootstrap command. Run once per repository/worktree setup before autonomous agent operations."
+	agentCommandHelp   = "Agent-facing operational command. Prefer deterministic machine-readable output (`--json` or `--output json`) in automation."
+)
 
 func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string) error {
 	normalizedArgs, resolvedOutputMode, err := parseGlobalOutputMode(args, stdout)
@@ -118,184 +82,201 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 	root := &cobra.Command{
 		Use:   "lit",
 		Short: "Worktree-native issue tracker",
-		Args:  cobra.ArbitraryArgs,
-		RunE: func(_ *cobra.Command, args []string) error {
+		Long: strings.Join([]string{
+			"Worktree-native issue tracker with Dolt-backed sync.",
+			"",
+			"Global output mode:",
+			"  default auto (TTY -> text, non-TTY -> json)",
+			"  --json shorthand for JSON compatibility",
+			"  --output auto|text|json to force mode",
+			"  LIT_OUTPUT environment default",
+		}, "\n"),
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
 				return fmt.Errorf("unknown command %q", args[0])
 			}
-			printUsage(stderr)
-			return nil
+			return cmd.Help()
 		},
 	}
 	root.CompletionOptions.DisableDefaultCmd = true
-	root.SetHelpFunc(func(_ *cobra.Command, args []string) {
-		_ = runHelp(stdout, args)
-	})
-	root.SetHelpCommand(&cobra.Command{
-		Use:                "help [command]",
-		Short:              "Show help output",
-		Args:               cobra.MaximumNArgs(1),
-		DisableFlagParsing: true,
-		RunE: func(_ *cobra.Command, args []string) error {
-			return runHelp(stdout, args)
-		},
-	})
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.AddGroup(
+		&cobra.Group{ID: "bootstrap", Title: "Human Bootstrap"},
+		&cobra.Group{ID: "operations", Title: "Agent Operations"},
+		&cobra.Group{ID: "structure", Title: "Dependencies & Structure"},
+		&cobra.Group{ID: "data", Title: "Sync & Data"},
+		&cobra.Group{ID: "maintenance", Title: "Setup & Maintenance"},
+		&cobra.Group{ID: "guidance", Title: "Guidance & Tooling"},
+	)
 
-	root.AddCommand(newPassthroughCommand("init", "Initialize links", stdout, func(args []string) error {
+	addGroupedPassthrough(root, "bootstrap", "init", "Initialize links", func(args []string) error {
 		return runWithWorkspace(ctx, append([]string{"init"}, args...), false, func(ws workspace.Info) error {
 			return runInit(ctx, stdout, ws, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("quickstart", "Agent quickstart workflow", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "guidance", "quickstart", "Agent quickstart workflow", func(args []string) error {
 		return runWithPreflight(append([]string{"quickstart"}, args...), func() error {
 			return runQuickstart(stdout, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("completion", "Generate shell completion script", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "guidance", "completion", "Generate shell completion script", func(args []string) error {
 		return runCompletion(stdout, args)
-	}))
-	root.AddCommand(newPassthroughCommand("hooks", "Install git hook automation", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "maintenance", "hooks", "Install git hook automation", func(args []string) error {
 		return runWithWorkspace(ctx, append([]string{"hooks"}, args...), false, func(ws workspace.Info) error {
 			return runHooks(stdout, ws, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("migrate", "Migrate from Beads to links", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "maintenance", "migrate", "Migrate from Beads to links", func(args []string) error {
 		return runWithWorkspace(ctx, append([]string{"migrate"}, args...), false, func(ws workspace.Info) error {
 			return runMigrate(stdout, ws, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("sync", "Mirror Dolt data through git remotes", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "data", "sync", "Mirror Dolt data through git remotes", func(args []string) error {
 		return runWithWorkspace(ctx, append([]string{"sync"}, args...), true, func(ws workspace.Info) error {
 			return runSync(ctx, stdout, ws, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("new", "Create an issue", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "operations", "new", "Create an issue", func(args []string) error {
 		return runWithApp(ctx, append([]string{"new"}, args...), func(ap *app.App) error {
 			return runNew(ctx, stdout, ap, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("ready", "List open work", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "operations", "ready", "List open work", func(args []string) error {
 		return runWithApp(ctx, append([]string{"ready"}, args...), func(ap *app.App) error {
 			return runReady(ctx, stdout, ap, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("ls", "List issues", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "operations", "ls", "List issues", func(args []string) error {
 		return runWithApp(ctx, append([]string{"ls"}, args...), func(ap *app.App) error {
 			return runList(ctx, stdout, ap, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("show", "Show issue details", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "operations", "show", "Show issue details", func(args []string) error {
 		return runWithApp(ctx, append([]string{"show"}, args...), func(ap *app.App) error {
 			return runShow(ctx, stdout, ap, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("close", "Close issue(s)", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "operations", "close", "Close issue(s)", func(args []string) error {
 		return runWithApp(ctx, append([]string{"close"}, args...), func(ap *app.App) error {
 			return runTransition(ctx, stdout, ap, args, "close")
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("open", "Reopen issue(s)", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "operations", "open", "Reopen issue(s)", func(args []string) error {
 		return runWithApp(ctx, append([]string{"open"}, args...), func(ap *app.App) error {
 			return runTransition(ctx, stdout, ap, args, "reopen")
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("archive", "Archive issue(s)", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "operations", "archive", "Archive issue(s)", func(args []string) error {
 		return runWithApp(ctx, append([]string{"archive"}, args...), func(ap *app.App) error {
 			return runTransition(ctx, stdout, ap, args, "archive")
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("delete", "Delete issue(s)", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "operations", "delete", "Delete issue(s)", func(args []string) error {
 		return runWithApp(ctx, append([]string{"delete"}, args...), func(ap *app.App) error {
 			return runTransition(ctx, stdout, ap, args, "delete")
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("unarchive", "Unarchive issue(s)", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "operations", "unarchive", "Unarchive issue(s)", func(args []string) error {
 		return runWithApp(ctx, append([]string{"unarchive"}, args...), func(ap *app.App) error {
 			return runTransition(ctx, stdout, ap, args, "unarchive")
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("restore", "Restore deleted issue(s)", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "operations", "restore", "Restore deleted issue(s)", func(args []string) error {
 		return runWithApp(ctx, append([]string{"restore"}, args...), func(ap *app.App) error {
 			return runTransition(ctx, stdout, ap, args, "restore")
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("comment", "Add issue comments", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "operations", "comment", "Add issue comments", func(args []string) error {
 		return runWithApp(ctx, append([]string{"comment"}, args...), func(ap *app.App) error {
 			return runComment(ctx, stdout, ap, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("label", "Manage labels", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "operations", "label", "Manage labels", func(args []string) error {
 		return runWithApp(ctx, append([]string{"label"}, args...), func(ap *app.App) error {
 			return runLabel(ctx, stdout, ap, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("parent", "Manage parent relationships", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "structure", "parent", "Manage parent relationships", func(args []string) error {
 		return runWithApp(ctx, append([]string{"parent"}, args...), func(ap *app.App) error {
 			return runParent(ctx, stdout, ap, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("children", "List child issues", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "structure", "children", "List child issues", func(args []string) error {
 		return runWithApp(ctx, append([]string{"children"}, args...), func(ap *app.App) error {
 			return runChildren(ctx, stdout, ap, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("dep", "Manage dependency edges", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "structure", "dep", "Manage dependency edges", func(args []string) error {
 		return runWithApp(ctx, append([]string{"dep"}, args...), func(ap *app.App) error {
 			return runDep(ctx, stdout, ap, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("export", "Export workspace snapshot", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "data", "export", "Export workspace snapshot", func(args []string) error {
 		return runWithApp(ctx, append([]string{"export"}, args...), func(ap *app.App) error {
 			return runExport(ctx, stdout, ap, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("beads", "Import/export Beads databases", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "data", "beads", "Import/export Beads databases", func(args []string) error {
 		return runWithApp(ctx, append([]string{"beads"}, args...), func(ap *app.App) error {
 			return runBeads(ctx, stdout, ap, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("workspace", "Show workspace metadata", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "maintenance", "workspace", "Show workspace metadata", func(args []string) error {
 		return runWithApp(ctx, append([]string{"workspace"}, args...), func(ap *app.App) error {
 			return runWorkspace(stdout, ap, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("doctor", "Health check", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "maintenance", "doctor", "Health check", func(args []string) error {
 		return runWithApp(ctx, append([]string{"doctor"}, args...), func(ap *app.App) error {
 			return runDoctor(ctx, stdout, ap, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("fsck", "Integrity check and optional repair", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "maintenance", "fsck", "Integrity check and optional repair", func(args []string) error {
 		return runWithApp(ctx, append([]string{"fsck"}, args...), func(ap *app.App) error {
 			return runFsck(ctx, stdout, ap, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("backup", "Backup snapshot operations", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "data", "backup", "Backup snapshot operations", func(args []string) error {
 		return runWithApp(ctx, append([]string{"backup"}, args...), func(ap *app.App) error {
 			return runBackup(ctx, stdout, ap, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("recover", "Recover from backup or sync", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "data", "recover", "Recover from backup or sync", func(args []string) error {
 		return runWithApp(ctx, append([]string{"recover"}, args...), func(ap *app.App) error {
 			return runRecover(ctx, stdout, ap, args)
 		})
-	}))
-	root.AddCommand(newPassthroughCommand("bulk", "Bulk issue operations", stdout, func(args []string) error {
+	})
+	addGroupedPassthrough(root, "operations", "bulk", "Bulk issue operations", func(args []string) error {
 		return runWithApp(ctx, append([]string{"bulk"}, args...), func(ap *app.App) error {
 			return runBulk(ctx, stdout, ap, args)
 		})
-	}))
+	})
 	return root
 }
 
-func newPassthroughCommand(name string, summary string, stdout io.Writer, run func(args []string) error) *cobra.Command {
+func addGroupedPassthrough(root *cobra.Command, groupID string, name string, summary string, run func(args []string) error) {
+	cmd := newPassthroughCommand(name, summary, run)
+	cmd.GroupID = groupID
+	root.AddCommand(cmd)
+}
+
+func newPassthroughCommand(name string, summary string, run func(args []string) error) *cobra.Command {
+	description := agentCommandHelp
+	if name == "init" {
+		description = humanBootstrapHelp
+	}
 	return &cobra.Command{
 		Use:                name,
 		Short:              summary,
+		Long:               description,
 		DisableFlagParsing: true,
 		Args:               cobra.ArbitraryArgs,
-		RunE: func(_ *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			if argsContainHelp(args) {
-				return runHelp(stdout, []string{name})
+				return cmd.Help()
 			}
 			return run(args)
 		},
@@ -1751,45 +1732,6 @@ func runCompletion(stdout io.Writer, args []string) error {
 	}
 }
 
-func runHelp(stdout io.Writer, args []string) error {
-	if len(args) == 0 {
-		printUsage(stdout)
-		return nil
-	}
-	if len(args) != 1 {
-		return errors.New("usage: lit help [command]")
-	}
-	command := strings.TrimSpace(args[0])
-	entry, ok := commandHelpEntryByName(command)
-	if !ok {
-		return fmt.Errorf("unknown command %q", command)
-	}
-	boundary := "Agent-facing operational command. Prefer deterministic machine-readable output (`--json` or `--output json`) in automation."
-	if entry.HumanCmd {
-		boundary = "Human bootstrap command. Run once per repository/worktree setup before autonomous agent operations."
-	}
-	lines := []string{
-		fmt.Sprintf("lit %s", entry.Command),
-		"",
-		entry.Summary,
-		boundary,
-		"",
-		"Usage:",
-		fmt.Sprintf("  %s", entry.Usage),
-	}
-	_, err := fmt.Fprintln(stdout, strings.Join(lines, "\n"))
-	return err
-}
-
-func commandHelpEntryByName(command string) (commandHelpEntry, bool) {
-	for _, entry := range commandHelpCatalog {
-		if entry.Command == command {
-			return entry, true
-		}
-	}
-	return commandHelpEntry{}, false
-}
-
 func runQuickstart(stdout io.Writer, args []string) error {
 	fs := flag.NewFlagSet("quickstart", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -2238,86 +2180,6 @@ type CorruptionError struct {
 }
 
 func (e CorruptionError) Error() string { return e.Message }
-
-func printUsage(w io.Writer) {
-	fmt.Fprint(w, `links / lit
-
-Worktree-native issue tracker with Dolt-backed sync.
-
-Usage:
-  lit [--output auto|text|json] [--json] [command]
-  lit [--output auto|text|json] [--json] [command] [flags]
-
-Global Output Mode:
-  default        auto (TTY -> text, non-TTY -> json)
-  --json         Explicit shorthand for JSON output compatibility
-  --output MODE  Force output mode (auto|text|json)
-  LIT_OUTPUT     Environment default when flags are not provided
-
-Human Bootstrap Boundary:
-  init           Human-run bootstrap (run once per repo/worktree)
-
-Agent Operations (JSON-first, deterministic):
-  ready          List open work ordered by priority and recency
-  new            Create an issue
-  ls             List issues with filters/query/sort
-  show           Show issue details
-  close          Close issue(s)
-  open           Reopen issue(s)
-  archive        Archive issue(s)
-  delete         Soft-delete issue(s)
-  unarchive      Unarchive issue(s)
-  restore        Restore deleted issue(s)
-  comment        Add issue comments
-  label          Add/remove issue labels
-  bulk           Bulk issue operations (label, close, archive, import)
-
-Dependencies & Structure:
-  parent         Manage parent/child links
-  children       List child issues
-  dep            Manage dependency edges
-
-Sync & Data:
-  export         Export workspace snapshot JSON
-  sync           Mirror Dolt data through git remotes
-  backup         Create/list/restore backup snapshots
-  recover        Recover from sync file or backup
-  beads          Import/export from Beads Dolt databases
-
-Setup & Maintenance:
-  workspace      Show workspace metadata
-  hooks          Install git hook automation
-  migrate        Migrate from Beads to links
-  doctor         Health check
-  fsck           Integrity check and optional repair
-
-Guidance & Tooling:
-  quickstart     Agent quickstart workflow
-  completion     Generate shell completion script
-  help           Show this help output (supports: lit help <command>)
-
-Command Syntax:
-  lit init [--json] [--skip-hooks] [--skip-agents]
-  lit ready [--assignee <user>] [--limit N] [--format lines|table] [--columns ...] [--json]
-  lit hooks install [--json]
-  lit migrate beads [--apply] [--json]
-  lit quickstart [--json]
-  lit completion <bash|zsh|fish>
-  lit workspace [--json]
-  lit sync remote ls [--json]
-  lit sync pull --remote <name> --branch <name> [--json]
-  lit sync push --remote <name> --branch <name> [--set-upstream] [--force] [--json]
-  lit help <command>
-
-Examples:
-  lit init --json
-  lit ready --json
-  lit new --title "Fix renderer race" --type bug --priority 1 --json
-  lit ls --query "status:open type:task" --sort priority:asc,updated_at:desc --json
-
-Use "lit help <command>" or "lit [command] --help" for command-specific help.
-`)
-}
 
 func splitArgs(args []string, positionalCount int) ([]string, []string) {
 	positionals := make([]string, 0, positionalCount)
