@@ -147,3 +147,21 @@ func TestMigrateBeadsApplyRewritesAgentsAndInstallsLitHook(t *testing.T) {
 		t.Fatalf(".claude/settings.json should be removed when only beads residue remains, stat error: %v", err)
 	}
 }
+
+func TestBuildConfigCleanupPlanPreservesJSONWithoutBeadsMutations(t *testing.T) {
+	t.Parallel()
+
+	plan, err := buildConfigCleanupPlan("/tmp/settings.json", []byte(`{"hooks":{"SessionStart":[{"hooks":[{"command":"sync push"}]}]}}`))
+	if err != nil {
+		t.Fatalf("buildConfigCleanupPlan() error = %v", err)
+	}
+	if plan.Changed {
+		t.Fatalf("plan.Changed = true, want false")
+	}
+	if plan.RemoveFile {
+		t.Fatalf("plan.RemoveFile = true, want false")
+	}
+	if len(plan.NewContent) != 0 {
+		t.Fatalf("plan.NewContent = %q, want empty", string(plan.NewContent))
+	}
+}

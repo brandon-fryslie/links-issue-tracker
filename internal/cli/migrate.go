@@ -474,6 +474,7 @@ func buildConfigCleanupPlan(path string, content []byte) (configCleanupPlan, err
 				plan.Changed = true
 				return plan, nil
 			}
+			return plan, nil
 		}
 	}
 	// [LAW:no-silent-fallbacks] aggressive migration removes detected beads config artifacts if structured cleanup is not possible.
