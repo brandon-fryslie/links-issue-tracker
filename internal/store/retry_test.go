@@ -127,9 +127,8 @@ func TestTransientManifestRetryDelayIsBounded(t *testing.T) {
 		if delay < transientManifestRetryBaseDelay {
 			t.Fatalf("delay(%d) = %v, want >= %v", attempt, delay, transientManifestRetryBaseDelay)
 		}
-		max := transientManifestRetryMaxDelay + transientManifestRetryJitter
-		if delay > max {
-			t.Fatalf("delay(%d) = %v, want <= %v", attempt, delay, max)
+		if delay > transientManifestRetryMaxDelay {
+			t.Fatalf("delay(%d) = %v, want <= %v", attempt, delay, transientManifestRetryMaxDelay)
 		}
 	}
 }

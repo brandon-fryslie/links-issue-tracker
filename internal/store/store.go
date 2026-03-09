@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -33,7 +32,6 @@ const (
 	transientManifestRetryMaxAttempts = 12
 	transientManifestRetryBaseDelay   = 50 * time.Millisecond
 	transientManifestRetryMaxDelay    = 1 * time.Second
-	transientManifestRetryJitter      = 100 * time.Millisecond
 	commitLockStaleAfter              = 10 * time.Minute
 )
 
@@ -1399,9 +1397,7 @@ func transientManifestRetryDelay(attempt int) time.Duration {
 	if delay > transientManifestRetryMaxDelay {
 		delay = transientManifestRetryMaxDelay
 	}
-	// [LAW:dataflow-not-control-flow] Retry cadence changes by delay value while the retry pipeline remains fixed.
-	jitter := time.Duration(rand.Int64N(int64(transientManifestRetryJitter) + 1))
-	return delay + jitter
+	return delay
 }
 
 func waitWithContext(ctx context.Context, duration time.Duration) error {
