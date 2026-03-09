@@ -28,10 +28,10 @@ const (
 var ErrTransientManifestReadOnly = errors.New("transient manifest read-only")
 
 const (
-	transitionIssueRetryMaxAttempts = 3
-	transitionIssueRetryBaseDelay   = 50 * time.Millisecond
-	transitionIssueRetryMaxDelay    = 200 * time.Millisecond
-	transitionIssueRetryJitter      = 25 * time.Millisecond
+	transientManifestRetryMaxAttempts = 3
+	transientManifestRetryBaseDelay   = 50 * time.Millisecond
+	transientManifestRetryMaxDelay    = 200 * time.Millisecond
+	transientManifestRetryJitter      = 25 * time.Millisecond
 )
 
 type Store struct {
@@ -39,7 +39,7 @@ type Store struct {
 	workspaceID string
 }
 
-type transitionIssueCall func(context.Context, TransitionIssueInput) (model.Issue, error)
+type retryOperation func(context.Context) error
 type retryDelayFunc func(attempt int) time.Duration
 type retrySleepFunc func(context.Context, time.Duration) error
 
@@ -1152,8 +1152,7 @@ func (s *Store) ReplaceLabels(ctx context.Context, issueID string, labels []stri
 }
 
 func (s *Store) TransitionIssue(ctx context.Context, in TransitionIssueInput) (model.Issue, error) {
-	// [LAW:single-enforcer] Transition retry policy is enforced once at the store boundary.
-	return transitionIssueWithRetry(ctx, in, s.transitionIssueOnce, transitionIssueRetryDelay, waitWithContext)
+	return s.transitionIssueOnce(ctx, in)
 }
 
 func (s *Store) transitionIssueOnce(ctx context.Context, in TransitionIssueInput) (model.Issue, error) {
@@ -1245,34 +1244,34 @@ func (s *Store) transitionIssueOnce(ctx context.Context, in TransitionIssueInput
 	return issue, nil
 }
 
-func transitionIssueWithRetry(ctx context.Context, in TransitionIssueInput, call transitionIssueCall, delayForAttempt retryDelayFunc, sleep retrySleepFunc) (model.Issue, error) {
+func retryTransientManifestReadOnly(ctx context.Context, operation retryOperation, delayForAttempt retryDelayFunc, sleep retrySleepFunc) error {
 	var lastErr error
-	for attempt := 1; attempt <= transitionIssueRetryMaxAttempts; attempt++ {
-		issue, err := call(ctx, in)
+	for attempt := 1; attempt <= transientManifestRetryMaxAttempts; attempt++ {
+		err := operation(ctx)
 		if err == nil {
-			return issue, nil
+			return nil
 		}
 		lastErr = err
-		if !errors.Is(err, ErrTransientManifestReadOnly) || attempt == transitionIssueRetryMaxAttempts {
+		if !errors.Is(err, ErrTransientManifestReadOnly) || attempt == transientManifestRetryMaxAttempts {
 			break
 		}
 		if waitErr := sleep(ctx, delayForAttempt(attempt)); waitErr != nil {
-			return model.Issue{}, waitErr
+			return waitErr
 		}
 	}
-	return model.Issue{}, lastErr
+	return lastErr
 }
 
-func transitionIssueRetryDelay(attempt int) time.Duration {
+func transientManifestRetryDelay(attempt int) time.Duration {
 	if attempt < 1 {
 		attempt = 1
 	}
-	delay := transitionIssueRetryBaseDelay << (attempt - 1)
-	if delay > transitionIssueRetryMaxDelay {
-		delay = transitionIssueRetryMaxDelay
+	delay := transientManifestRetryBaseDelay << (attempt - 1)
+	if delay > transientManifestRetryMaxDelay {
+		delay = transientManifestRetryMaxDelay
 	}
 	// [LAW:dataflow-not-control-flow] Retry cadence changes by delay value while the retry pipeline remains fixed.
-	jitter := time.Duration(rand.Int64N(int64(transitionIssueRetryJitter) + 1))
+	jitter := time.Duration(rand.Int64N(int64(transientManifestRetryJitter) + 1))
 	return delay + jitter
 }
 
@@ -1934,8 +1933,15 @@ func (s *Store) commitWorkingSet(ctx context.Context, message string) error {
 	if trimmed == "" {
 		trimmed = "links mutation"
 	}
+	// [LAW:single-enforcer] commitWorkingSet is the single mutation boundary that owns transient commit retry behavior.
+	return retryTransientManifestReadOnly(ctx, func(ctx context.Context) error {
+		return s.commitWorkingSetOnce(ctx, trimmed)
+	}, transientManifestRetryDelay, waitWithContext)
+}
+
+func (s *Store) commitWorkingSetOnce(ctx context.Context, message string) error {
 	var commitHash string
-	err := s.db.QueryRowContext(ctx, `CALL DOLT_COMMIT('-Am', ?)`, trimmed).Scan(&commitHash)
+	err := s.db.QueryRowContext(ctx, `CALL DOLT_COMMIT('-Am', ?)`, message).Scan(&commitHash)
 	if err == nil {
 		return nil
 	}
