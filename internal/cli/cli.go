@@ -33,6 +33,11 @@ import (
 var missingRemoteBranchPattern = regexp.MustCompile(`branch "([^"]+)" not found on remote`)
 
 func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string) error {
+	normalizedArgs, err := normalizeOutputModeArgs(args, stdout)
+	if err != nil {
+		return err
+	}
+	args = normalizedArgs
 	if len(args) == 0 {
 		printUsage(stderr)
 		return nil
@@ -1907,6 +1912,12 @@ func printUsage(w io.Writer) {
 	fmt.Fprint(w, `links / lit
 
 Worktree-native issue tracker with Dolt-backed sync.
+
+Output:
+  --output auto|json|text     Output mode for commands that support structured output.
+  --json                      Shorthand for --output json.
+  Precedence: --output > --json > LK_OUTPUT > auto
+  Auto behavior: TTY -> text, non-TTY -> json
 
 Usage:
   lit [command]

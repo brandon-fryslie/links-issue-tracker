@@ -8,6 +8,15 @@ lit help
 
 ## Common commands
 
+## Output mode
+
+- Default mode is `auto`.
+- `auto` renders text in terminals and JSON in non-interactive contexts.
+- `--json` remains supported as shorthand for JSON mode.
+- `--output auto|json|text` overrides everything else.
+- Precedence is deterministic: `--output` > `--json` > `LK_OUTPUT` > auto.
+- Migration expectation: existing scripts should keep using `--json` (or set `LK_OUTPUT=json`) for explicit machine-readable output.
+
 ### Create/list/show
 
 ```sh
