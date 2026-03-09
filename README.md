@@ -2,6 +2,10 @@
 
 `links` is a worktree-native issue tracker with a flat CLI: `lk`.
 
+<p align="center">
+  <img src="docs/assets/interlocking-links.svg" alt="Two interlocking links" width="420" />
+</p>
+
 ## Quickstart
 
 Requirements:
