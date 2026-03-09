@@ -8,7 +8,7 @@ lit help
 
 ## Common commands
 
-## Output mode
+### Output mode
 
 - Default mode is `auto`.
 - `auto` renders text in terminals and JSON in non-interactive contexts.

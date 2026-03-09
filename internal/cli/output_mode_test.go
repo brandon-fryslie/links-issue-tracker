@@ -21,6 +21,21 @@ func TestNormalizeOutputModeArgs(t *testing.T) {
 			want: []string{"ls", "--json"},
 		},
 		{
+			name: "auto defaults to json for init command",
+			args: []string{"init"},
+			want: []string{"init", "--json"},
+		},
+		{
+			name: "auto defaults to json for migrate command",
+			args: []string{"migrate", "beads"},
+			want: []string{"migrate", "beads", "--json"},
+		},
+		{
+			name: "auto defaults to json for ready command",
+			args: []string{"ready"},
+			want: []string{"ready", "--json"},
+		},
+		{
 			name:      "env text disables json in non tty",
 			args:      []string{"ls"},
 			envOutput: "text",
@@ -37,6 +52,12 @@ func TestNormalizeOutputModeArgs(t *testing.T) {
 			args:      []string{"ls", "--json"},
 			envOutput: "text",
 			want:      []string{"ls", "--json"},
+		},
+		{
+			name:      "json false beats env json",
+			args:      []string{"ls", "--json=false"},
+			envOutput: "json",
+			want:      []string{"ls"},
 		},
 		{
 			name:      "output text beats json shorthand and env",
@@ -61,6 +82,17 @@ func TestNormalizeOutputModeArgs(t *testing.T) {
 			args:      []string{"completion", "zsh"},
 			envOutput: "json",
 			want:      []string{"completion", "zsh"},
+		},
+		{
+			name: "title value that looks like output flag is preserved",
+			args: []string{"new", "--title", "--output"},
+			want: []string{"new", "--title", "--output", "--json"},
+		},
+		{
+			name:      "double dash sentinel stops output parsing",
+			args:      []string{"ls", "--", "--output", "text"},
+			envOutput: "text",
+			want:      []string{"ls", "--", "--output", "text"},
 		},
 	}
 
@@ -90,6 +122,13 @@ func TestNormalizeOutputModeArgsErrors(t *testing.T) {
 		_, err := normalizeOutputModeArgs([]string{"ls", "--output", "nope"}, nonTTY)
 		if err == nil {
 			t.Fatalf("expected error for invalid --output")
+		}
+	})
+
+	t.Run("invalid cli json value", func(t *testing.T) {
+		_, err := normalizeOutputModeArgs([]string{"ls", "--json=nope"}, nonTTY)
+		if err == nil {
+			t.Fatalf("expected error for invalid --json")
 		}
 	})
 
