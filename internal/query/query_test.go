@@ -5,15 +5,12 @@ import (
 )
 
 func TestParseBuildsFilterFromQueryExpression(t *testing.T) {
-	result, err := Parse(`status:open work:in-progress type:task assignee:bmf priority<=2 has:comments updated>=2026-03-07T10:00:00Z "render contract" id:issue-123 label:renderer`)
+	result, err := Parse(`status:in_progress type:task assignee:bmf priority<=2 has:comments updated>=2026-03-07T10:00:00Z "render contract" id:issue-123 label:renderer`)
 	if err != nil {
 		t.Fatalf("Parse() error = %v", err)
 	}
-	if result.Filter.Status != "open" {
+	if result.Filter.Status != "in_progress" {
 		t.Fatalf("Status = %q", result.Filter.Status)
-	}
-	if result.Filter.WorkStatus != "in-progress" {
-		t.Fatalf("WorkStatus = %q", result.Filter.WorkStatus)
 	}
 	if result.Filter.IssueType != "task" {
 		t.Fatalf("IssueType = %q", result.Filter.IssueType)
@@ -55,16 +52,12 @@ func TestMergeRejectsConflictingScalarFilters(t *testing.T) {
 	}
 }
 
-func TestMergeRejectsConflictingWorkStatusFilters(t *testing.T) {
-	base, err := Parse(`work-status:todo`)
+func TestStatusAliasInProgressNormalizesToBeadsValue(t *testing.T) {
+	result, err := Parse(`status:in-progress`)
 	if err != nil {
-		t.Fatalf("Parse(base) error = %v", err)
+		t.Fatalf("Parse() error = %v", err)
 	}
-	incoming, err := Parse(`work:done`)
-	if err != nil {
-		t.Fatalf("Parse(incoming) error = %v", err)
-	}
-	if _, err := Merge(base.Filter, incoming.Filter); err == nil {
-		t.Fatal("expected work-status conflict error")
+	if result.Filter.Status != "in_progress" {
+		t.Fatalf("Status = %q, want in_progress", result.Filter.Status)
 	}
 }

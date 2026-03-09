@@ -29,10 +29,16 @@ func Parse(input string) (ParseResult, error) {
 
 func Merge(base store.ListIssuesFilter, incoming store.ListIssuesFilter) (store.ListIssuesFilter, error) {
 	filter := base
-	if err := mergeStringField("status", &filter.Status, incoming.Status); err != nil {
+	baseStatus, err := normalizeQueryStatus(filter.Status)
+	if err != nil {
 		return store.ListIssuesFilter{}, err
 	}
-	if err := mergeStringField("work-status", &filter.WorkStatus, incoming.WorkStatus); err != nil {
+	incomingStatus, err := normalizeQueryStatus(incoming.Status)
+	if err != nil {
+		return store.ListIssuesFilter{}, err
+	}
+	filter.Status = baseStatus
+	if err := mergeStringField("status", &filter.Status, incomingStatus); err != nil {
 		return store.ListIssuesFilter{}, err
 	}
 	if err := mergeStringField("type", &filter.IssueType, incoming.IssueType); err != nil {
@@ -68,11 +74,11 @@ func Merge(base store.ListIssuesFilter, incoming store.ListIssuesFilter) (store.
 func applyTerm(filter *store.ListIssuesFilter, term string) error {
 	switch {
 	case strings.HasPrefix(term, "status:"):
-		return mergeStringField("status", &filter.Status, strings.TrimPrefix(term, "status:"))
-	case strings.HasPrefix(term, "work-status:"):
-		return mergeStringField("work-status", &filter.WorkStatus, strings.TrimPrefix(term, "work-status:"))
-	case strings.HasPrefix(term, "work:"):
-		return mergeStringField("work-status", &filter.WorkStatus, strings.TrimPrefix(term, "work:"))
+		status, err := normalizeQueryStatus(strings.TrimPrefix(term, "status:"))
+		if err != nil {
+			return err
+		}
+		return mergeStringField("status", &filter.Status, status)
 	case strings.HasPrefix(term, "type:"):
 		return mergeStringField("type", &filter.IssueType, strings.TrimPrefix(term, "type:"))
 	case strings.HasPrefix(term, "assignee:"):
@@ -196,6 +202,22 @@ func tokenize(input string) ([]string, error) {
 		out = append(out, current.String())
 	}
 	return out, nil
+}
+
+func normalizeQueryStatus(input string) (string, error) {
+	normalized := strings.TrimSpace(strings.ToLower(input))
+	if normalized == "" {
+		return "", nil
+	}
+	if normalized == "in-progress" {
+		normalized = "in_progress"
+	}
+	switch normalized {
+	case "open", "in_progress", "closed":
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("status must be open, in_progress, or closed")
+	}
 }
 
 func validateFilter(filter store.ListIssuesFilter) error {

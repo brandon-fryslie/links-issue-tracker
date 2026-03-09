@@ -6,7 +6,7 @@
    - `lit workspace --json`
 2. Find work:
    - `lit ready --json`
-   - `lit ls --query "status:open work:todo" --json`
+   - `lit ls --query "status:open" --json`
 3. Update issue state as work starts:
    - `lit start <issue-id> --reason "claim" --json`
    - `lit comment add <issue-id> --body "Starting: <plan>" --json`
@@ -15,7 +15,6 @@
 5. Close out:
    - `lit done <issue-id> --reason "<completion summary>" --json`
    - `lit comment add <issue-id> --body "Done: <summary>" --json`
-   - `lit close <issue-id> --reason "<completion reason>" --json`
    - `git add -A && git commit -m "<summary>"`
 
 ## Required assumptions for reliable automation

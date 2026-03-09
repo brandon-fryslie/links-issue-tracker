@@ -13,7 +13,7 @@ lit help
 ```sh
 lit new --title "..." --type task --priority 2 --json
 lit ready --json
-lit ls --query "status:open work:todo" --json
+lit ls --query "status:open" --json
 lit ls --json
 lit show <issue-id> --json
 ```

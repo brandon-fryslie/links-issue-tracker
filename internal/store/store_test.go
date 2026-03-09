@@ -348,7 +348,7 @@ func TestIssueLifecycleTracksReasonHistory(t *testing.T) {
 	}
 }
 
-func TestIssueWorkStatusClaimAndDoneAreDeterministic(t *testing.T) {
+func TestIssueStatusClaimAndDoneAreDeterministic(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
 	if err != nil {
@@ -360,8 +360,8 @@ func TestIssueWorkStatusClaimAndDoneAreDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateIssue() error = %v", err)
 	}
-	if issue.WorkStatus != "todo" {
-		t.Fatalf("issue.WorkStatus = %q, want todo", issue.WorkStatus)
+	if issue.Status != "open" {
+		t.Fatalf("issue.Status = %q, want open", issue.Status)
 	}
 
 	started, err := st.TransitionIssue(ctx, TransitionIssueInput{
@@ -373,8 +373,8 @@ func TestIssueWorkStatusClaimAndDoneAreDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TransitionIssue(start) error = %v", err)
 	}
-	if started.WorkStatus != "in-progress" {
-		t.Fatalf("started.WorkStatus = %q, want in-progress", started.WorkStatus)
+	if started.Status != "in_progress" {
+		t.Fatalf("started.Status = %q, want in_progress", started.Status)
 	}
 
 	if _, err := st.TransitionIssue(ctx, TransitionIssueInput{
@@ -383,7 +383,7 @@ func TestIssueWorkStatusClaimAndDoneAreDeterministic(t *testing.T) {
 		Reason:    "competing claim",
 		CreatedBy: "agent-b",
 	}); err == nil {
-		t.Fatal("expected claim conflict when claiming an already in-progress issue")
+		t.Fatal("expected claim conflict when claiming an already in_progress issue")
 	}
 
 	done, err := st.TransitionIssue(ctx, TransitionIssueInput{
@@ -395,23 +395,23 @@ func TestIssueWorkStatusClaimAndDoneAreDeterministic(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TransitionIssue(done) error = %v", err)
 	}
-	if done.WorkStatus != "done" {
-		t.Fatalf("done.WorkStatus = %q, want done", done.WorkStatus)
+	if done.Status != "closed" || done.ClosedAt == nil {
+		t.Fatalf("done = %#v, want closed with ClosedAt", done)
 	}
 
-	todoIssues, err := st.ListIssues(ctx, ListIssuesFilter{Status: "open", WorkStatus: "todo"})
+	openIssues, err := st.ListIssues(ctx, ListIssuesFilter{Status: "open"})
 	if err != nil {
-		t.Fatalf("ListIssues(todo) error = %v", err)
+		t.Fatalf("ListIssues(open) error = %v", err)
 	}
-	if len(todoIssues) != 0 {
-		t.Fatalf("todoIssues = %#v, want empty", todoIssues)
+	if len(openIssues) != 0 {
+		t.Fatalf("openIssues = %#v, want empty", openIssues)
 	}
 
-	doneIssues, err := st.ListIssues(ctx, ListIssuesFilter{Status: "open", WorkStatus: "done"})
+	closedIssues, err := st.ListIssues(ctx, ListIssuesFilter{Status: "closed"})
 	if err != nil {
-		t.Fatalf("ListIssues(done) error = %v", err)
+		t.Fatalf("ListIssues(closed) error = %v", err)
 	}
-	if len(doneIssues) != 1 || doneIssues[0].ID != issue.ID {
-		t.Fatalf("doneIssues = %#v", doneIssues)
+	if len(closedIssues) != 1 || closedIssues[0].ID != issue.ID {
+		t.Fatalf("closedIssues = %#v", closedIssues)
 	}
 }
