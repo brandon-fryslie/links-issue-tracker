@@ -494,7 +494,7 @@ func runTransition(ctx context.Context, stdout io.Writer, ap *app.App, args []st
 	if fs.NArg() != 0 {
 		return fmt.Errorf("usage: lit %s <id> --reason <text>", transitionCommandName(action))
 	}
-	issue, err := transitionIssueWithRetry(ctx, ap.Store, store.TransitionIssueInput{
+	issue, err := ap.Store.TransitionIssue(ctx, store.TransitionIssueInput{
 		IssueID:   positional[0],
 		Action:    action,
 		Reason:    *reason,
@@ -1510,7 +1510,7 @@ func runBulk(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 		}
 		results := map[string]string{}
 		for _, issueID := range issueIDs {
-			_, err := transitionIssueWithRetry(ctx, ap.Store, store.TransitionIssueInput{
+			_, err := ap.Store.TransitionIssue(ctx, store.TransitionIssueInput{
 				IssueID:   issueID,
 				Action:    args[0],
 				Reason:    *reason,
@@ -1696,56 +1696,6 @@ func outputModeFromWriter(w io.Writer) outputMode {
 		return outputModeText
 	}
 	return provider.linksOutputMode()
-}
-
-type transitionIssueService interface {
-	TransitionIssue(ctx context.Context, in store.TransitionIssueInput) (model.Issue, error)
-}
-
-func transitionIssueWithRetry(ctx context.Context, transitions transitionIssueService, in store.TransitionIssueInput) (model.Issue, error) {
-	const maxAttempts = 3
-	var lastErr error
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		issue, err := transitions.TransitionIssue(ctx, in)
-		if err == nil {
-			return issue, nil
-		}
-		lastErr = err
-		if !isTransientManifestReadOnlyError(err) || attempt == maxAttempts {
-			break
-		}
-		// [LAW:dataflow-not-control-flow] Retry behavior is fixed; only the error value determines whether the next attempt runs.
-		if waitErr := waitWithContext(ctx, 50*time.Millisecond); waitErr != nil {
-			return model.Issue{}, waitErr
-		}
-	}
-	return model.Issue{}, lastErr
-}
-
-func waitWithContext(ctx context.Context, duration time.Duration) error {
-	timer := time.NewTimer(duration)
-	defer func() {
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-	}()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
-}
-
-func isTransientManifestReadOnlyError(err error) bool {
-	if err == nil {
-		return false
-	}
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "cannot update manifest") && strings.Contains(message, "read only")
 }
 
 func printValue(w io.Writer, v any, jsonOut bool, textFn func(io.Writer, any) error) error {

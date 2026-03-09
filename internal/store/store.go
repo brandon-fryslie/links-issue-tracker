@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -24,10 +25,23 @@ const (
 	doltDatabaseName = "links"
 )
 
+var ErrTransientManifestReadOnly = errors.New("transient manifest read-only")
+
+const (
+	transitionIssueRetryMaxAttempts = 3
+	transitionIssueRetryBaseDelay   = 50 * time.Millisecond
+	transitionIssueRetryMaxDelay    = 200 * time.Millisecond
+	transitionIssueRetryJitter      = 25 * time.Millisecond
+)
+
 type Store struct {
 	db          *sql.DB
 	workspaceID string
 }
+
+type transitionIssueCall func(context.Context, TransitionIssueInput) (model.Issue, error)
+type retryDelayFunc func(attempt int) time.Duration
+type retrySleepFunc func(context.Context, time.Duration) error
 
 type NotFoundError struct {
 	Entity string
@@ -1138,6 +1152,11 @@ func (s *Store) ReplaceLabels(ctx context.Context, issueID string, labels []stri
 }
 
 func (s *Store) TransitionIssue(ctx context.Context, in TransitionIssueInput) (model.Issue, error) {
+	// [LAW:single-enforcer] Transition retry policy is enforced once at the store boundary.
+	return transitionIssueWithRetry(ctx, in, s.transitionIssueOnce, transitionIssueRetryDelay, waitWithContext)
+}
+
+func (s *Store) transitionIssueOnce(ctx context.Context, in TransitionIssueInput) (model.Issue, error) {
 	issue, err := s.GetIssue(ctx, in.IssueID)
 	if err != nil {
 		return model.Issue{}, err
@@ -1224,6 +1243,55 @@ func (s *Store) TransitionIssue(ctx context.Context, in TransitionIssueInput) (m
 		return model.Issue{}, err
 	}
 	return issue, nil
+}
+
+func transitionIssueWithRetry(ctx context.Context, in TransitionIssueInput, call transitionIssueCall, delayForAttempt retryDelayFunc, sleep retrySleepFunc) (model.Issue, error) {
+	var lastErr error
+	for attempt := 1; attempt <= transitionIssueRetryMaxAttempts; attempt++ {
+		issue, err := call(ctx, in)
+		if err == nil {
+			return issue, nil
+		}
+		lastErr = err
+		if !errors.Is(err, ErrTransientManifestReadOnly) || attempt == transitionIssueRetryMaxAttempts {
+			break
+		}
+		if waitErr := sleep(ctx, delayForAttempt(attempt)); waitErr != nil {
+			return model.Issue{}, waitErr
+		}
+	}
+	return model.Issue{}, lastErr
+}
+
+func transitionIssueRetryDelay(attempt int) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	delay := transitionIssueRetryBaseDelay << (attempt - 1)
+	if delay > transitionIssueRetryMaxDelay {
+		delay = transitionIssueRetryMaxDelay
+	}
+	// [LAW:dataflow-not-control-flow] Retry cadence changes by delay value while the retry pipeline remains fixed.
+	jitter := time.Duration(rand.Int64N(int64(transitionIssueRetryJitter) + 1))
+	return delay + jitter
+}
+
+func waitWithContext(ctx context.Context, duration time.Duration) error {
+	timer := time.NewTimer(duration)
+	defer func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
 }
 
 func (s *Store) ListRelationsForIssue(ctx context.Context, issueID string, relType string) ([]model.Relation, error) {
@@ -1875,7 +1943,40 @@ func (s *Store) commitWorkingSet(ctx context.Context, message string) error {
 	if strings.Contains(normalized, "nothing to commit") {
 		return nil
 	}
-	return fmt.Errorf("dolt commit working set: %w", err)
+	return wrapCommitWorkingSetError(err)
+}
+
+type transientManifestReadOnlyError struct {
+	err error
+}
+
+func (e transientManifestReadOnlyError) Error() string {
+	return e.err.Error()
+}
+
+func (e transientManifestReadOnlyError) Unwrap() error {
+	return e.err
+}
+
+func (e transientManifestReadOnlyError) Is(target error) bool {
+	return target == ErrTransientManifestReadOnly
+}
+
+func wrapCommitWorkingSetError(err error) error {
+	wrapped := fmt.Errorf("dolt commit working set: %w", err)
+	if !isManifestReadOnlyCommitError(err) {
+		return wrapped
+	}
+	// [LAW:one-source-of-truth] Store commit wrapping is the canonical transient classifier for manifest read-only failures.
+	return transientManifestReadOnlyError{err: wrapped}
+}
+
+func isManifestReadOnlyCommitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	normalized := strings.ToLower(err.Error())
+	return strings.Contains(normalized, "cannot update manifest") && strings.Contains(normalized, "read only")
 }
 
 func newIssueID(workspaceID string) string {
