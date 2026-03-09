@@ -47,7 +47,8 @@ Execution:
 Closeout:
 1. Add completion summary: `+"`lit comment add <issue-id> --body \"Done: <summary>\" --json`"+`.
 2. Close completed issue: `+"`lit close <issue-id> --reason \"<completion reason>\" --json`"+`.
-3. Create a git commit for the completed work: `+"`git add -A && git commit -m \"<summary>\"`"+`.
+3. You MUST create a git commit for the completed work: `+"`git add -A && git commit -m \"<summary>\"`"+`.
+4. Work is NOT complete until the commit exists. Do NOT start the next issue before committing.
 
 Traceability:
 - `+"`git push`"+` triggers hook-driven `+"`lit sync push`"+` attempts (warn-only on failure).
