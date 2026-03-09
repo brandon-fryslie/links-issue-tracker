@@ -1,6 +1,6 @@
 <svg width="960" height="360" viewBox="0 0 960 360" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
   <title id="title">Animated interlocking links badge</title>
-  <desc id="desc">Two interlocking chain links in cyan and green on a rounded square badge with subtle motion.</desc>
+  <desc id="desc">Two physically interlocked chain links in cyan and green with subtle motion.</desc>
   <!-- [LAW:one-source-of-truth] README artwork is centralized in this single SVG file. -->
   <defs>
     <linearGradient id="cardFill" x1="330" y1="30" x2="630" y2="330" gradientUnits="userSpaceOnUse">
@@ -30,13 +30,26 @@
       <feDropShadow dx="0" dy="6" stdDeviation="6" flood-color="#0F172A" flood-opacity="0.22"/>
     </filter>
 
-    <clipPath id="leftOnTopClip">
-      <rect x="438" y="130" width="86" height="66" rx="28" transform="rotate(-38 481 163)"/>
+    <rect id="blueLinkShape" x="292" y="122" width="250" height="116" rx="58" transform="rotate(-38 417 180)"/>
+    <rect id="greenLinkShape" x="420" y="122" width="250" height="116" rx="58" transform="rotate(-38 545 180)"/>
+
+    <clipPath id="crossGreenTopClip">
+      <ellipse cx="468" cy="156" rx="50" ry="34" transform="rotate(-38 468 156)"/>
     </clipPath>
 
-    <clipPath id="rightOnTopClip">
-      <rect x="468" y="170" width="86" height="66" rx="28" transform="rotate(-38 511 203)"/>
+    <clipPath id="crossBlueTopClip">
+      <ellipse cx="496" cy="204" rx="50" ry="34" transform="rotate(-38 496 204)"/>
     </clipPath>
+
+    <mask id="blueVisibleMask">
+      <rect width="960" height="360" fill="white"/>
+      <ellipse cx="468" cy="156" rx="52" ry="36" transform="rotate(-38 468 156)" fill="black"/>
+    </mask>
+
+    <mask id="greenVisibleMask">
+      <rect width="960" height="360" fill="white"/>
+      <ellipse cx="496" cy="204" rx="52" ry="36" transform="rotate(-38 496 204)" fill="black"/>
+    </mask>
   </defs>
 
   <g filter="url(#badgeShadow)">
@@ -47,19 +60,30 @@
     <g>
       <animateTransform attributeName="transform" type="translate" values="0 0;0 -2;0 0" dur="3.8s" repeatCount="indefinite"/>
 
-      <rect x="292" y="122" width="250" height="116" rx="58" transform="rotate(-38 417 180)" stroke="url(#blueLink)" stroke-width="36"/>
-      <rect x="420" y="122" width="250" height="116" rx="58" transform="rotate(-38 545 180)" stroke="url(#greenLink)" stroke-width="36"/>
-
-      <g clip-path="url(#leftOnTopClip)">
-        <rect x="292" y="122" width="250" height="116" rx="58" transform="rotate(-38 417 180)" stroke="url(#blueLink)" stroke-width="36"/>
+      <!-- [LAW:dataflow-not-control-flow] Render order is fixed; masks/clips carry crossing variability in data. -->
+      <g mask="url(#blueVisibleMask)">
+        <use href="#blueLinkShape" fill="none" stroke="url(#blueLink)" stroke-width="36"/>
       </g>
 
-      <g clip-path="url(#rightOnTopClip)">
-        <rect x="420" y="122" width="250" height="116" rx="58" transform="rotate(-38 545 180)" stroke="url(#greenLink)" stroke-width="36"/>
+      <g mask="url(#greenVisibleMask)">
+        <use href="#greenLinkShape" fill="none" stroke="url(#greenLink)" stroke-width="36"/>
       </g>
 
-      <rect x="292" y="122" width="250" height="116" rx="58" transform="rotate(-38 417 180)" stroke="#FFFFFF" stroke-opacity="0.24" stroke-width="9"/>
-      <rect x="420" y="122" width="250" height="116" rx="58" transform="rotate(-38 545 180)" stroke="#FFFFFF" stroke-opacity="0.20" stroke-width="9"/>
+      <g clip-path="url(#crossGreenTopClip)">
+        <use href="#greenLinkShape" fill="none" stroke="url(#greenLink)" stroke-width="36"/>
+      </g>
+
+      <g clip-path="url(#crossBlueTopClip)">
+        <use href="#blueLinkShape" fill="none" stroke="url(#blueLink)" stroke-width="36"/>
+      </g>
+
+      <g mask="url(#blueVisibleMask)">
+        <use href="#blueLinkShape" fill="none" stroke="#FFFFFF" stroke-opacity="0.24" stroke-width="9"/>
+      </g>
+
+      <g mask="url(#greenVisibleMask)">
+        <use href="#greenLinkShape" fill="none" stroke="#FFFFFF" stroke-opacity="0.20" stroke-width="9"/>
+      </g>
     </g>
   </g>
 </svg>
