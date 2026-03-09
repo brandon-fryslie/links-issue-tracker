@@ -302,6 +302,9 @@ func (s *Store) ensureWorkStatusSchema(ctx context.Context) error {
 		return err
 	}
 	// [LAW:one-source-of-truth] Normalize persisted work_status values in one migration seam.
+	if _, err := s.db.ExecContext(ctx, `UPDATE issues SET work_status = 'done' WHERE status = 'closed' AND work_status <> 'done'`); err != nil {
+		return fmt.Errorf("backfill closed issue work_status: %w", err)
+	}
 	if _, err := s.db.ExecContext(ctx, `UPDATE issues SET work_status = CASE WHEN status = 'closed' THEN 'done' ELSE 'todo' END WHERE work_status IS NULL OR TRIM(work_status) = ''`); err != nil {
 		return fmt.Errorf("normalize empty work_status: %w", err)
 	}
@@ -394,7 +397,7 @@ func (s *Store) CreateIssue(ctx context.Context, in CreateIssueInput) (model.Iss
 	if err := s.replaceLabelsTx(ctx, tx, issue.ID, issue.Labels, "links"); err != nil {
 		return model.Issue{}, err
 	}
-	if err := s.insertHistoryTx(ctx, tx, issue.ID, "created", "issue created", "", issue.WorkStatus, "links"); err != nil {
+	if err := s.insertHistoryTx(ctx, tx, issue.ID, "created", "issue created", "", "open", "links"); err != nil {
 		return model.Issue{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -1907,7 +1910,7 @@ func normalizeWorkStatus(workStatus string) (string, error) {
 	case "todo", "in-progress", "done":
 		return normalized, nil
 	default:
-		return "", errors.New("work_status must be todo, in-progress, or done")
+		return "", errors.New("work status must be todo, in-progress, or done")
 	}
 }
 

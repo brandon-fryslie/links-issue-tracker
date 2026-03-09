@@ -387,8 +387,8 @@ func runTransition(ctx context.Context, stdout io.Writer, ap *app.App, args []st
 	}
 	fs := flag.NewFlagSet(action, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
-	reason := fs.String("reason", "", "Lifecycle transition reason")
-	by := fs.String("by", os.Getenv("USER"), "Lifecycle actor")
+	reason := fs.String("reason", "", "Transition reason")
+	by := fs.String("by", os.Getenv("USER"), "Transition actor")
 	jsonOut := fs.Bool("json", false, "Output JSON")
 	if err := fs.Parse(flagArgs); err != nil {
 		return err
