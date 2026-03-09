@@ -28,6 +28,8 @@ import (
 	"github.com/bmf/links-issue-tracker/internal/store"
 	"github.com/bmf/links-issue-tracker/internal/syncfile"
 	"github.com/bmf/links-issue-tracker/internal/workspace"
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
 	"golang.org/x/term"
 )
 
@@ -56,98 +58,279 @@ type outputModeProvider interface {
 	linksOutputMode() outputMode
 }
 
+type commandHelpEntry struct {
+	Command  string
+	Summary  string
+	Usage    string
+	HumanCmd bool
+}
+
+// [LAW:one-source-of-truth] Command help metadata is centralized here for both top-level and subcommand help rendering.
+var commandHelpCatalog = []commandHelpEntry{
+	{Command: "init", Summary: "Initialize links in the current repository (auto-migrates Beads residue)", Usage: "lit init [--json] [--skip-hooks] [--skip-agents]", HumanCmd: true},
+	{Command: "ready", Summary: "List open work ordered by priority and recency", Usage: "lit ready [--assignee <user>] [--limit N] [--format lines|table] [--columns ...] [--json]"},
+	{Command: "new", Summary: "Create an issue", Usage: "lit new --title <text> [--description <text>] [--type task|feature|bug|chore|epic] [--priority 0..4] [--assignee <user>] [--labels <csv>] [--json]"},
+	{Command: "ls", Summary: "List issues with filters/query/sort", Usage: "lit ls [--status <status>] [--type <type>] [--query <expr>] [--sort <expr>] [--json]"},
+	{Command: "show", Summary: "Show issue details", Usage: "lit show <id> [--json]"},
+	{Command: "close", Summary: "Close issue(s)", Usage: "lit close <id> --reason <text> [--by <user>] [--json]"},
+	{Command: "open", Summary: "Reopen issue(s)", Usage: "lit open <id> --reason <text> [--by <user>] [--json]"},
+	{Command: "archive", Summary: "Archive issue(s)", Usage: "lit archive <id> --reason <text> [--by <user>] [--json]"},
+	{Command: "delete", Summary: "Soft-delete issue(s)", Usage: "lit delete <id> --reason <text> [--by <user>] [--json]"},
+	{Command: "unarchive", Summary: "Unarchive issue(s)", Usage: "lit unarchive <id> --reason <text> [--by <user>] [--json]"},
+	{Command: "restore", Summary: "Restore deleted issue(s)", Usage: "lit restore <id> --reason <text> [--by <user>] [--json]"},
+	{Command: "comment", Summary: "Add issue comments", Usage: "lit comment add <id> --body <text> [--by <user>] [--json]"},
+	{Command: "label", Summary: "Add/remove issue labels", Usage: "lit label <add|rm> <issue-id> <label> [--by <user>] [--json]"},
+	{Command: "bulk", Summary: "Bulk issue operations (label, close, archive, import)", Usage: "lit bulk <label|close|archive|import> ..."},
+	{Command: "parent", Summary: "Manage parent/child links", Usage: "lit parent <set|clear> ..."},
+	{Command: "children", Summary: "List child issues", Usage: "lit children <parent-id> [--json]"},
+	{Command: "dep", Summary: "Manage dependency edges", Usage: "lit dep <add|rm|ls> ..."},
+	{Command: "export", Summary: "Export workspace snapshot JSON", Usage: "lit export [--json]"},
+	{Command: "sync", Summary: "Mirror Dolt data through git remotes", Usage: "lit sync <status|remote|fetch|pull|push> ..."},
+	{Command: "backup", Summary: "Create/list/restore backup snapshots", Usage: "lit backup <create|list|restore> ..."},
+	{Command: "recover", Summary: "Recover from sync file or backup", Usage: "lit recover --from-sync <path> | --from-backup <path> | --latest-backup [--force] [--json]"},
+	{Command: "beads", Summary: "Import/export from Beads Dolt databases", Usage: "lit beads <import|export> --db <path> [--json]"},
+	{Command: "workspace", Summary: "Show workspace metadata", Usage: "lit workspace [--json]"},
+	{Command: "hooks", Summary: "Install git hook automation", Usage: "lit hooks install [--json]"},
+	{Command: "migrate", Summary: "Migrate from Beads to links", Usage: "lit migrate beads [--apply] [--json]"},
+	{Command: "doctor", Summary: "Health check", Usage: "lit doctor [--json]"},
+	{Command: "fsck", Summary: "Integrity check and optional repair", Usage: "lit fsck [--repair] [--json]"},
+	{Command: "quickstart", Summary: "Agent quickstart workflow", Usage: "lit quickstart [--json]"},
+	{Command: "completion", Summary: "Generate shell completion script", Usage: "lit completion <bash|zsh|fish>"},
+	{Command: "help", Summary: "Show help output", Usage: "lit help [command]"},
+}
+
 func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string) error {
 	normalizedArgs, resolvedOutputMode, err := parseGlobalOutputMode(args, stdout)
 	if err != nil {
 		return err
 	}
-	args = normalizedArgs
 	stdout = outputModeWriter{Writer: stdout, mode: resolvedOutputMode}
+	root := newRootCommand(ctx, stdout, stderr)
+	root.SetArgs(normalizedArgs)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.SilenceErrors = true
+	root.SilenceUsage = true
+	return root.ExecuteContext(ctx)
+}
 
-	if len(args) == 0 {
-		printUsage(stderr)
-		return nil
+func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *cobra.Command {
+	root := &cobra.Command{
+		Use:   "lit",
+		Short: "Worktree-native issue tracker",
+		Args:  cobra.ArbitraryArgs,
+		RunE: func(_ *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				return fmt.Errorf("unknown command %q", args[0])
+			}
+			printUsage(stderr)
+			return nil
+		},
 	}
-	if !shouldBypassBeadsPreflight(args) {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("get cwd: %w", err)
-		}
-		ws, resolveErr := workspace.Resolve(cwd)
-		if resolveErr == nil {
-			if preflightErr := requireBeadsMigrationPreflight(ws); preflightErr != nil {
-				return preflightErr
+	root.CompletionOptions.DisableDefaultCmd = true
+	root.SetHelpFunc(func(_ *cobra.Command, args []string) {
+		_ = runHelp(stdout, args)
+	})
+	root.SetHelpCommand(&cobra.Command{
+		Use:                "help [command]",
+		Short:              "Show help output",
+		Args:               cobra.MaximumNArgs(1),
+		DisableFlagParsing: true,
+		RunE: func(_ *cobra.Command, args []string) error {
+			return runHelp(stdout, args)
+		},
+	})
+
+	root.AddCommand(newPassthroughCommand("init", "Initialize links", stdout, func(args []string) error {
+		return runWithWorkspace(ctx, append([]string{"init"}, args...), false, func(ws workspace.Info) error {
+			return runInit(ctx, stdout, ws, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("quickstart", "Agent quickstart workflow", stdout, func(args []string) error {
+		return runWithPreflight(append([]string{"quickstart"}, args...), func() error {
+			return runQuickstart(stdout, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("completion", "Generate shell completion script", stdout, func(args []string) error {
+		return runCompletion(stdout, args)
+	}))
+	root.AddCommand(newPassthroughCommand("hooks", "Install git hook automation", stdout, func(args []string) error {
+		return runWithWorkspace(ctx, append([]string{"hooks"}, args...), false, func(ws workspace.Info) error {
+			return runHooks(stdout, ws, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("migrate", "Migrate from Beads to links", stdout, func(args []string) error {
+		return runWithWorkspace(ctx, append([]string{"migrate"}, args...), false, func(ws workspace.Info) error {
+			return runMigrate(stdout, ws, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("sync", "Mirror Dolt data through git remotes", stdout, func(args []string) error {
+		return runWithWorkspace(ctx, append([]string{"sync"}, args...), true, func(ws workspace.Info) error {
+			return runSync(ctx, stdout, ws, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("new", "Create an issue", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"new"}, args...), func(ap *app.App) error {
+			return runNew(ctx, stdout, ap, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("ready", "List open work", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"ready"}, args...), func(ap *app.App) error {
+			return runReady(ctx, stdout, ap, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("ls", "List issues", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"ls"}, args...), func(ap *app.App) error {
+			return runList(ctx, stdout, ap, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("show", "Show issue details", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"show"}, args...), func(ap *app.App) error {
+			return runShow(ctx, stdout, ap, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("close", "Close issue(s)", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"close"}, args...), func(ap *app.App) error {
+			return runTransition(ctx, stdout, ap, args, "close")
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("open", "Reopen issue(s)", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"open"}, args...), func(ap *app.App) error {
+			return runTransition(ctx, stdout, ap, args, "reopen")
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("archive", "Archive issue(s)", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"archive"}, args...), func(ap *app.App) error {
+			return runTransition(ctx, stdout, ap, args, "archive")
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("delete", "Delete issue(s)", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"delete"}, args...), func(ap *app.App) error {
+			return runTransition(ctx, stdout, ap, args, "delete")
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("unarchive", "Unarchive issue(s)", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"unarchive"}, args...), func(ap *app.App) error {
+			return runTransition(ctx, stdout, ap, args, "unarchive")
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("restore", "Restore deleted issue(s)", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"restore"}, args...), func(ap *app.App) error {
+			return runTransition(ctx, stdout, ap, args, "restore")
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("comment", "Add issue comments", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"comment"}, args...), func(ap *app.App) error {
+			return runComment(ctx, stdout, ap, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("label", "Manage labels", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"label"}, args...), func(ap *app.App) error {
+			return runLabel(ctx, stdout, ap, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("parent", "Manage parent relationships", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"parent"}, args...), func(ap *app.App) error {
+			return runParent(ctx, stdout, ap, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("children", "List child issues", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"children"}, args...), func(ap *app.App) error {
+			return runChildren(ctx, stdout, ap, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("dep", "Manage dependency edges", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"dep"}, args...), func(ap *app.App) error {
+			return runDep(ctx, stdout, ap, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("export", "Export workspace snapshot", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"export"}, args...), func(ap *app.App) error {
+			return runExport(ctx, stdout, ap, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("beads", "Import/export Beads databases", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"beads"}, args...), func(ap *app.App) error {
+			return runBeads(ctx, stdout, ap, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("workspace", "Show workspace metadata", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"workspace"}, args...), func(ap *app.App) error {
+			return runWorkspace(stdout, ap, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("doctor", "Health check", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"doctor"}, args...), func(ap *app.App) error {
+			return runDoctor(ctx, stdout, ap, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("fsck", "Integrity check and optional repair", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"fsck"}, args...), func(ap *app.App) error {
+			return runFsck(ctx, stdout, ap, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("backup", "Backup snapshot operations", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"backup"}, args...), func(ap *app.App) error {
+			return runBackup(ctx, stdout, ap, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("recover", "Recover from backup or sync", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"recover"}, args...), func(ap *app.App) error {
+			return runRecover(ctx, stdout, ap, args)
+		})
+	}))
+	root.AddCommand(newPassthroughCommand("bulk", "Bulk issue operations", stdout, func(args []string) error {
+		return runWithApp(ctx, append([]string{"bulk"}, args...), func(ap *app.App) error {
+			return runBulk(ctx, stdout, ap, args)
+		})
+	}))
+	return root
+}
+
+func newPassthroughCommand(name string, summary string, stdout io.Writer, run func(args []string) error) *cobra.Command {
+	return &cobra.Command{
+		Use:                name,
+		Short:              summary,
+		DisableFlagParsing: true,
+		Args:               cobra.ArbitraryArgs,
+		RunE: func(_ *cobra.Command, args []string) error {
+			if argsContainHelp(args) {
+				return runHelp(stdout, []string{name})
 			}
-		} else if !errors.Is(resolveErr, workspace.ErrNotGitRepo) {
-			return resolveErr
-		}
+			return run(args)
+		},
 	}
-	switch args[0] {
-	case "help", "-h", "--help":
-		printUsage(stdout)
-		return nil
-	case "init":
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("get cwd: %w", err)
-		}
-		ws, err := workspace.Resolve(cwd)
-		if err != nil {
-			if errors.Is(err, workspace.ErrNotGitRepo) {
-				return fmt.Errorf("links requires running inside a git repository/worktree")
-			}
-			return err
-		}
-		return runInit(ctx, stdout, ws, args[1:])
-	case "quickstart":
-		return runQuickstart(stdout, args[1:])
-	case "completion":
-		return runCompletion(stdout, args[1:])
-	case "hooks":
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("get cwd: %w", err)
-		}
-		ws, err := workspace.Resolve(cwd)
-		if err != nil {
-			if errors.Is(err, workspace.ErrNotGitRepo) {
-				return fmt.Errorf("links requires running inside a git repository/worktree")
-			}
-			return err
-		}
-		return runHooks(stdout, ws, args[1:])
-	case "migrate":
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("get cwd: %w", err)
-		}
-		ws, err := workspace.Resolve(cwd)
-		if err != nil {
-			if errors.Is(err, workspace.ErrNotGitRepo) {
-				return fmt.Errorf("links requires running inside a git repository/worktree")
-			}
-			return err
-		}
-		return runMigrate(stdout, ws, args[1:])
-	case "sync":
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("get cwd: %w", err)
-		}
-		ws, err := workspace.Resolve(cwd)
-		if err != nil {
-			if errors.Is(err, workspace.ErrNotGitRepo) {
-				return fmt.Errorf("links requires running inside a git repository/worktree")
-			}
-			return err
-		}
+}
+
+func runWithPreflight(commandArgs []string, run func() error) error {
+	if err := enforceBeadsPreflight(commandArgs); err != nil {
+		return err
+	}
+	return run()
+}
+
+func runWithWorkspace(ctx context.Context, commandArgs []string, requireDoltReady bool, run func(workspace.Info) error) error {
+	if err := enforceBeadsPreflight(commandArgs); err != nil {
+		return err
+	}
+	ws, err := resolveWorkspaceFromWD()
+	if err != nil {
+		return err
+	}
+	if requireDoltReady {
 		if _, err := doltcli.RequireMinimumVersion(ctx, ws.RootDir, doltcli.MinSupportedVersion); err != nil {
 			return err
 		}
 		if err := store.EnsureDatabase(ctx, ws.DatabasePath, ws.WorkspaceID); err != nil {
 			return err
 		}
-		return runSync(ctx, stdout, ws, args[1:])
+	}
+	return run(ws)
+}
+
+func runWithApp(ctx context.Context, commandArgs []string, run func(*app.App) error) error {
+	if err := enforceBeadsPreflight(commandArgs); err != nil {
+		return err
 	}
 	ap, err := app.OpenFromWD(ctx)
 	if err != nil {
@@ -157,57 +340,49 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 		return err
 	}
 	defer ap.Close()
+	return run(ap)
+}
 
-	switch args[0] {
-	case "new":
-		return runNew(ctx, stdout, ap, args[1:])
-	case "ready":
-		return runReady(ctx, stdout, ap, args[1:])
-	case "ls":
-		return runList(ctx, stdout, ap, args[1:])
-	case "show":
-		return runShow(ctx, stdout, ap, args[1:])
-	case "close":
-		return runTransition(ctx, stdout, ap, args[1:], "close")
-	case "open":
-		return runTransition(ctx, stdout, ap, args[1:], "reopen")
-	case "archive":
-		return runTransition(ctx, stdout, ap, args[1:], "archive")
-	case "delete":
-		return runTransition(ctx, stdout, ap, args[1:], "delete")
-	case "unarchive":
-		return runTransition(ctx, stdout, ap, args[1:], "unarchive")
-	case "restore":
-		return runTransition(ctx, stdout, ap, args[1:], "restore")
-	case "comment":
-		return runComment(ctx, stdout, ap, args[1:])
-	case "label":
-		return runLabel(ctx, stdout, ap, args[1:])
-	case "parent":
-		return runParent(ctx, stdout, ap, args[1:])
-	case "children":
-		return runChildren(ctx, stdout, ap, args[1:])
-	case "dep":
-		return runDep(ctx, stdout, ap, args[1:])
-	case "export":
-		return runExport(ctx, stdout, ap, args[1:])
-	case "beads":
-		return runBeads(ctx, stdout, ap, args[1:])
-	case "workspace":
-		return runWorkspace(stdout, ap, args[1:])
-	case "doctor":
-		return runDoctor(ctx, stdout, ap, args[1:])
-	case "fsck":
-		return runFsck(ctx, stdout, ap, args[1:])
-	case "backup":
-		return runBackup(ctx, stdout, ap, args[1:])
-	case "recover":
-		return runRecover(ctx, stdout, ap, args[1:])
-	case "bulk":
-		return runBulk(ctx, stdout, ap, args[1:])
-	default:
-		return fmt.Errorf("unknown command %q", args[0])
+func enforceBeadsPreflight(commandArgs []string) error {
+	if shouldBypassBeadsPreflight(commandArgs) {
+		return nil
 	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get cwd: %w", err)
+	}
+	ws, resolveErr := workspace.Resolve(cwd)
+	if resolveErr == nil {
+		return requireBeadsMigrationPreflight(ws)
+	}
+	if !errors.Is(resolveErr, workspace.ErrNotGitRepo) {
+		return resolveErr
+	}
+	return nil
+}
+
+func resolveWorkspaceFromWD() (workspace.Info, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return workspace.Info{}, fmt.Errorf("get cwd: %w", err)
+	}
+	ws, err := workspace.Resolve(cwd)
+	if err != nil {
+		if errors.Is(err, workspace.ErrNotGitRepo) {
+			return workspace.Info{}, fmt.Errorf("links requires running inside a git repository/worktree")
+		}
+		return workspace.Info{}, err
+	}
+	return ws, nil
+}
+
+func argsContainHelp(args []string) bool {
+	for _, arg := range args {
+		if arg == "--help" || arg == "-h" {
+			return true
+		}
+	}
+	return false
 }
 
 func parseGlobalOutputMode(args []string, stdout io.Writer) ([]string, outputMode, error) {
@@ -216,12 +391,11 @@ func parseGlobalOutputMode(args []string, stdout io.Writer) ([]string, outputMod
 	if err != nil {
 		return nil, "", err
 	}
-	index := 0
-	for index < len(args) {
+	remaining := make([]string, 0, len(args))
+	for index := 0; index < len(args); index++ {
 		switch args[index] {
 		case "--json":
 			mode = outputModeJSON
-			index++
 		case "--output":
 			if index+1 >= len(args) {
 				return nil, "", errors.New("usage: lit [--output auto|text|json] [--json] [command]")
@@ -231,7 +405,7 @@ func parseGlobalOutputMode(args []string, stdout io.Writer) ([]string, outputMod
 				return nil, "", parseErr
 			}
 			mode = parsedMode
-			index += 2
+			index++
 		default:
 			if strings.HasPrefix(args[index], "--output=") {
 				parsedMode, parseErr := parseOutputMode(strings.TrimPrefix(args[index], "--output="))
@@ -239,22 +413,23 @@ func parseGlobalOutputMode(args []string, stdout io.Writer) ([]string, outputMod
 					return nil, "", parseErr
 				}
 				mode = parsedMode
-				index++
 				continue
 			}
-			goto done
+			remaining = append(remaining, args[index])
 		}
 	}
-
-done:
 	if mode == outputModeAuto {
 		mode = detectOutputMode(stdout)
 	}
-	return args[index:], mode, nil
+	return remaining, mode, nil
 }
 
 func modeFromEnv() (outputMode, error) {
-	raw := strings.TrimSpace(strings.ToLower(os.Getenv(outputModeEnvVar)))
+	config := viper.New()
+	if err := config.BindEnv("output", outputModeEnvVar); err != nil {
+		return "", fmt.Errorf("bind %s: %w", outputModeEnvVar, err)
+	}
+	raw := strings.TrimSpace(strings.ToLower(config.GetString("output")))
 	if raw == "" {
 		return outputModeAuto, nil
 	}
@@ -1576,6 +1751,45 @@ func runCompletion(stdout io.Writer, args []string) error {
 	}
 }
 
+func runHelp(stdout io.Writer, args []string) error {
+	if len(args) == 0 {
+		printUsage(stdout)
+		return nil
+	}
+	if len(args) != 1 {
+		return errors.New("usage: lit help [command]")
+	}
+	command := strings.TrimSpace(args[0])
+	entry, ok := commandHelpEntryByName(command)
+	if !ok {
+		return fmt.Errorf("unknown command %q", command)
+	}
+	boundary := "Agent-facing operational command. Prefer deterministic machine-readable output (`--json` or `--output json`) in automation."
+	if entry.HumanCmd {
+		boundary = "Human bootstrap command. Run once per repository/worktree setup before autonomous agent operations."
+	}
+	lines := []string{
+		fmt.Sprintf("lit %s", entry.Command),
+		"",
+		entry.Summary,
+		boundary,
+		"",
+		"Usage:",
+		fmt.Sprintf("  %s", entry.Usage),
+	}
+	_, err := fmt.Fprintln(stdout, strings.Join(lines, "\n"))
+	return err
+}
+
+func commandHelpEntryByName(command string) (commandHelpEntry, bool) {
+	for _, entry := range commandHelpCatalog {
+		if entry.Command == command {
+			return entry, true
+		}
+	}
+	return commandHelpEntry{}, false
+}
+
 func runQuickstart(stdout io.Writer, args []string) error {
 	fs := flag.NewFlagSet("quickstart", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
@@ -2040,8 +2254,10 @@ Global Output Mode:
   --output MODE  Force output mode (auto|text|json)
   LIT_OUTPUT     Environment default when flags are not provided
 
-Issue Workflow:
-  init           Initialize links in the current repository (auto-migrates Beads residue)
+Human Bootstrap Boundary:
+  init           Human-run bootstrap (run once per repo/worktree)
+
+Agent Operations (JSON-first, deterministic):
   ready          List open work ordered by priority and recency
   new            Create an issue
   ls             List issues with filters/query/sort
@@ -2078,7 +2294,7 @@ Setup & Maintenance:
 Guidance & Tooling:
   quickstart     Agent quickstart workflow
   completion     Generate shell completion script
-  help           Show this help output
+  help           Show this help output (supports: lit help <command>)
 
 Command Syntax:
   lit init [--json] [--skip-hooks] [--skip-agents]
@@ -2091,6 +2307,7 @@ Command Syntax:
   lit sync remote ls [--json]
   lit sync pull --remote <name> --branch <name> [--json]
   lit sync push --remote <name> --branch <name> [--set-upstream] [--force] [--json]
+  lit help <command>
 
 Examples:
   lit init --json
@@ -2098,7 +2315,7 @@ Examples:
   lit new --title "Fix renderer race" --type bug --priority 1 --json
   lit ls --query "status:open type:task" --sort priority:asc,updated_at:desc --json
 
-Use "lit [command] --help" for more information about a command.
+Use "lit help <command>" or "lit [command] --help" for command-specific help.
 `)
 }
 
