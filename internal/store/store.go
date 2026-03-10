@@ -2164,19 +2164,30 @@ func validatePriority(priority int) error {
 	return nil
 }
 
-func normalizeStatus(status string) (string, error) {
+func NormalizeStatusToken(status string) (string, error) {
 	normalized := strings.TrimSpace(strings.ToLower(status))
 	if normalized == "in-progress" {
 		normalized = "in_progress"
 	}
 	switch normalized {
-	case "":
-		return "open", nil
 	case "open", "in_progress", "closed":
 		return normalized, nil
+	case "":
+		return "", nil
 	default:
 		return "", errors.New("status must be open, in_progress, or closed")
 	}
+}
+
+func normalizeStatus(status string) (string, error) {
+	normalized, err := NormalizeStatusToken(status)
+	if err != nil {
+		return "", err
+	}
+	if normalized == "" {
+		return "open", nil
+	}
+	return normalized, nil
 }
 
 func canonicalizeLabels(labels []string) ([]string, error) {

@@ -8,6 +8,10 @@ import (
 	"testing"
 )
 
+func normalizeWhitespace(input string) string {
+	return strings.Join(strings.Fields(input), " ")
+}
+
 func TestCompletionScriptsRender(t *testing.T) {
 	for _, shell := range []string{"bash", "zsh", "fish"} {
 		var stdout bytes.Buffer
@@ -25,14 +29,14 @@ func TestRunHelpIncludesCompletion(t *testing.T) {
 	if err := Run(context.Background(), &stdout, &stdout, []string{"help"}); err != nil {
 		t.Fatalf("Run(help) error = %v", err)
 	}
-	help := stdout.String()
-	if !strings.Contains(help, "completion  Generate shell completion script") {
+	help := normalizeWhitespace(stdout.String())
+	if !strings.Contains(help, "completion Generate shell completion script") {
 		t.Fatalf("help output missing completion command: %q", help)
 	}
-	if !strings.Contains(help, "quickstart  Agent quickstart workflow") {
+	if !strings.Contains(help, "quickstart Agent quickstart workflow") {
 		t.Fatalf("help output missing quickstart command: %q", help)
 	}
-	if !strings.Contains(help, "ready       List open work") {
+	if !strings.Contains(help, "ready List open work") {
 		t.Fatalf("help output missing ready command: %q", help)
 	}
 }
