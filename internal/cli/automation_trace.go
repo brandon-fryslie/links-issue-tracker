@@ -83,31 +83,54 @@ func maybeRecordAutomatedCommandTrace(ws workspace.Info, command string, sideEff
 }
 
 func recordAutomationTrace(ws workspace.Info, record automationTraceRecord) (automationTraceRef, error) {
-	if err := os.MkdirAll(automationTraceDir(ws), 0o755); err != nil {
+	traceDir := automationTraceDir(ws)
+	if err := os.MkdirAll(traceDir, 0o755); err != nil {
 		return automationTraceRef{}, fmt.Errorf("create automation trace dir: %w", err)
 	}
-	timestamp := time.Now().UTC()
-	traceID := fmt.Sprintf("%s-%s", timestamp.Format("20060102T150405.000000000Z"), traceSlug(record.Trigger))
-	record.ID = traceID
-	record.RecordedAt = timestamp.Format(time.RFC3339Nano)
-	record.WorkspaceID = ws.WorkspaceID
-	record.Trigger = strings.TrimSpace(record.Trigger)
-	record.Command = strings.TrimSpace(record.Command)
-	record.SideEffect = strings.TrimSpace(record.SideEffect)
-	record.Status = strings.TrimSpace(record.Status)
-	record.Reason = strings.TrimSpace(record.Reason)
-	record.Metadata = compactTraceMetadata(record.Metadata)
-	tracePath := filepath.Join(automationTraceDir(ws), traceID+".json")
 	// [LAW:one-source-of-truth] All automatic-action traces use one shared record shape and one storage directory.
 	payload, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		return automationTraceRef{}, fmt.Errorf("marshal automation trace: %w", err)
 	}
 	payload = append(payload, '\n')
-	if err := os.WriteFile(tracePath, payload, 0o644); err != nil {
-		return automationTraceRef{}, fmt.Errorf("write automation trace: %w", err)
+	for attempt := 0; attempt < 5; attempt++ {
+		timestamp := time.Now().UTC()
+		traceID := fmt.Sprintf("%s-%s", timestamp.Format("20060102T150405.000000000Z"), traceSlug(record.Trigger))
+		if attempt > 0 {
+			traceID = fmt.Sprintf("%s-%d", traceID, attempt)
+		}
+		record.ID = traceID
+		record.RecordedAt = timestamp.Format(time.RFC3339Nano)
+		record.WorkspaceID = ws.WorkspaceID
+		record.Trigger = strings.TrimSpace(record.Trigger)
+		record.Command = strings.TrimSpace(record.Command)
+		record.SideEffect = strings.TrimSpace(record.SideEffect)
+		record.Status = strings.TrimSpace(record.Status)
+		record.Reason = strings.TrimSpace(record.Reason)
+		record.Metadata = compactTraceMetadata(record.Metadata)
+		tracePath := filepath.Join(traceDir, traceID+".json")
+		payload, err := json.MarshalIndent(record, "", "  ")
+		if err != nil {
+			return automationTraceRef{}, fmt.Errorf("marshal automation trace: %w", err)
+		}
+		payload = append(payload, '\n')
+		file, openErr := os.OpenFile(tracePath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o644)
+		if openErr != nil {
+			if os.IsExist(openErr) {
+				continue
+			}
+			return automationTraceRef{}, fmt.Errorf("create automation trace: %w", openErr)
+		}
+		if _, writeErr := file.Write(payload); writeErr != nil {
+			_ = file.Close()
+			return automationTraceRef{}, fmt.Errorf("write automation trace: %w", writeErr)
+		}
+		if closeErr := file.Close(); closeErr != nil {
+			return automationTraceRef{}, fmt.Errorf("close automation trace: %w", closeErr)
+		}
+		return automationTraceRef{ID: traceID, Path: tracePath}, nil
 	}
-	return automationTraceRef{ID: traceID, Path: tracePath}, nil
+	return automationTraceRef{}, fmt.Errorf("create automation trace: too many id collisions")
 }
 
 func formatLitCommand(args []string) string {

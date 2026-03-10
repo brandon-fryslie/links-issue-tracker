@@ -111,8 +111,8 @@ func TestRunHooksViaCLI(t *testing.T) {
 	if payload["status"] != "installed" {
 		t.Fatalf("status = %v, want installed", payload["status"])
 	}
-	if strings.TrimSpace(payload["trace_dir"].(string)) == "" {
-		t.Fatalf("trace_dir = %v, want non-empty", payload["trace_dir"])
+	if strings.TrimSpace(payload["traces_dir"].(string)) == "" {
+		t.Fatalf("traces_dir = %v, want non-empty", payload["traces_dir"])
 	}
 }
 

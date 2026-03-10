@@ -1375,9 +1375,6 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 			traceReason,
 			traceMetadata,
 		)
-		if traceRecordErr != nil {
-			return traceRecordErr
-		}
 		if err != nil {
 			return err
 		}
@@ -1389,6 +1386,9 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		}
 		if traceRef != nil {
 			payload["trace_ref"] = traceRef.Path
+		}
+		if traceRecordErr != nil {
+			payload["trace_error"] = traceRecordErr.Error()
 		}
 		return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
 			p := v.(map[string]any)
