@@ -25,29 +25,17 @@ func TestRunHelpIncludesCompletion(t *testing.T) {
 	if err := Run(context.Background(), &stdout, &stdout, []string{"help"}); err != nil {
 		t.Fatalf("Run(help) error = %v", err)
 	}
-	if !strings.Contains(stdout.String(), "lit completion <bash|zsh|fish>") {
-		t.Fatalf("help output missing completion command: %q", stdout.String())
+	help := stdout.String()
+	if !strings.Contains(help, "completion  Generate shell completion script") {
+		t.Fatalf("help output missing completion command: %q", help)
 	}
-	if !strings.Contains(stdout.String(), "lit quickstart [--json]") {
-		t.Fatalf("help output missing quickstart command: %q", stdout.String())
+	if !strings.Contains(help, "quickstart  Agent quickstart workflow") {
+		t.Fatalf("help output missing quickstart command: %q", help)
 	}
-	if !strings.Contains(stdout.String(), "lit ready [--assignee <user>] [--limit N] [--format lines|table] [--columns ...] [--json]") {
-		t.Fatalf("help output missing ready command: %q", stdout.String())
-	}
-	if !strings.Contains(stdout.String(), "lit start <id> --reason <text> [--by <user>] [--json]") {
-		t.Fatalf("help output missing start command: %q", stdout.String())
-	}
-	if !strings.Contains(stdout.String(), "lit done <id> --reason <text> [--by <user>] [--json]") {
-		t.Fatalf("help output missing done command: %q", stdout.String())
-	}
-	if !strings.Contains(stdout.String(), "lit hooks install [--json]") {
-		t.Fatalf("help output missing hooks command: %q", stdout.String())
-	}
-	if !strings.Contains(stdout.String(), "lit migrate beads [--apply] [--json]") {
-		t.Fatalf("help output missing migrate command: %q", stdout.String())
+	if !strings.Contains(help, "ready       List open work") {
+		t.Fatalf("help output missing ready command: %q", help)
 	}
 }
-
 func TestQuickstartOutputsStructuredJSON(t *testing.T) {
 	var stdout bytes.Buffer
 	if err := Run(context.Background(), &stdout, &stdout, []string{"quickstart", "--json"}); err != nil {

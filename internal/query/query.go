@@ -109,6 +109,22 @@ func applyTerm(filter *store.ListIssuesFilter, term string) error {
 	}
 }
 
+func normalizeQueryStatus(input string) (string, error) {
+	normalized := strings.TrimSpace(strings.ToLower(input))
+	if normalized == "" {
+		return "", nil
+	}
+	if normalized == "in-progress" {
+		normalized = "in_progress"
+	}
+	switch normalized {
+	case "open", "in_progress", "closed":
+		return normalized, nil
+	default:
+		return "", fmt.Errorf("status must be open, in_progress, or closed")
+	}
+}
+
 func applyPriority(filter *store.ListIssuesFilter, expr string) error {
 	comparator, value, err := splitComparator(expr)
 	if err != nil {
@@ -202,22 +218,6 @@ func tokenize(input string) ([]string, error) {
 		out = append(out, current.String())
 	}
 	return out, nil
-}
-
-func normalizeQueryStatus(input string) (string, error) {
-	normalized := strings.TrimSpace(strings.ToLower(input))
-	if normalized == "" {
-		return "", nil
-	}
-	if normalized == "in-progress" {
-		normalized = "in_progress"
-	}
-	switch normalized {
-	case "open", "in_progress", "closed":
-		return normalized, nil
-	default:
-		return "", fmt.Errorf("status must be open, in_progress, or closed")
-	}
 }
 
 func validateFilter(filter store.ListIssuesFilter) error {

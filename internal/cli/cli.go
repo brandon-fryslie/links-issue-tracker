@@ -28,97 +28,333 @@ import (
 	"github.com/bmf/links-issue-tracker/internal/store"
 	"github.com/bmf/links-issue-tracker/internal/syncfile"
 	"github.com/bmf/links-issue-tracker/internal/workspace"
+	"github.com/spf13/cobra"
+	"github.com/spf13/viper"
+	"golang.org/x/term"
 )
 
 var missingRemoteBranchPattern = regexp.MustCompile(`branch "([^"]+)" not found on remote`)
 
+const outputModeEnvVar = "LIT_OUTPUT"
+
+const (
+	commandLockRetryDelay = 50 * time.Millisecond
+	commandLockStaleAfter = 10 * time.Minute
+)
+
+type outputMode string
+
+const (
+	outputModeAuto outputMode = "auto"
+	outputModeText outputMode = "text"
+	outputModeJSON outputMode = "json"
+)
+
+type outputModeWriter struct {
+	io.Writer
+	mode outputMode
+}
+
+func (w outputModeWriter) linksOutputMode() outputMode {
+	return w.mode
+}
+
+type outputModeProvider interface {
+	linksOutputMode() outputMode
+}
+
+const (
+	humanBootstrapHelp = "Human bootstrap command. Run once per repository/worktree setup before autonomous agent operations."
+	agentCommandHelp   = "Agent-facing operational command. Prefer deterministic machine-readable output (`--json` or `--output json`) in automation."
+)
+
 func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string) error {
-	if len(args) == 0 {
-		printUsage(stderr)
+	normalizedArgs, resolvedOutputMode, err := parseGlobalOutputMode(args, stdout)
+	if err != nil {
+		return err
+	}
+	stdout = outputModeWriter{Writer: stdout, mode: resolvedOutputMode}
+	root := newRootCommand(ctx, stdout, stderr)
+	root.SetArgs(normalizedArgs)
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.SilenceErrors = true
+	root.SilenceUsage = true
+	err = root.ExecuteContext(ctx)
+	if errors.Is(err, flag.ErrHelp) {
 		return nil
 	}
-	if !shouldBypassBeadsPreflight(args) {
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("get cwd: %w", err)
-		}
-		ws, resolveErr := workspace.Resolve(cwd)
-		if resolveErr == nil {
-			if preflightErr := requireBeadsMigrationPreflight(ws); preflightErr != nil {
-				return preflightErr
+	return err
+}
+
+func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *cobra.Command {
+	root := &cobra.Command{
+		Use:   "lit",
+		Short: "Worktree-native issue tracker",
+		Long: strings.Join([]string{
+			"Worktree-native issue tracker with Dolt-backed sync.",
+			"",
+			"Global output mode:",
+			"  default auto (TTY -> text, non-TTY -> json)",
+			"  --json shorthand for JSON compatibility",
+			"  --output auto|text|json to force mode",
+			"  LIT_OUTPUT environment default",
+		}, "\n"),
+		Args: cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 0 {
+				return fmt.Errorf("unknown command %q", args[0])
 			}
-		} else if !errors.Is(resolveErr, workspace.ErrNotGitRepo) {
-			return resolveErr
+			return cmd.Help()
+		},
+	}
+	root.CompletionOptions.DisableDefaultCmd = true
+	root.SetOut(stdout)
+	root.SetErr(stderr)
+	root.AddGroup(
+		&cobra.Group{ID: "bootstrap", Title: "Human Bootstrap"},
+		&cobra.Group{ID: "operations", Title: "Agent Operations"},
+		&cobra.Group{ID: "structure", Title: "Dependencies & Structure"},
+		&cobra.Group{ID: "data", Title: "Sync & Data"},
+		&cobra.Group{ID: "maintenance", Title: "Setup & Maintenance"},
+		&cobra.Group{ID: "guidance", Title: "Guidance & Tooling"},
+	)
+
+	addGroupedPassthrough(root, "bootstrap", "init", "Initialize links", func(args []string) error {
+		return runWithWorkspace(ctx, append([]string{"init"}, args...), false, func(ws workspace.Info) error {
+			return runInit(ctx, stdout, ws, args)
+		})
+	})
+	addGroupedPassthrough(root, "guidance", "quickstart", "Agent quickstart workflow", func(args []string) error {
+		return runWithPreflight(append([]string{"quickstart"}, args...), func() error {
+			return runQuickstart(stdout, args)
+		})
+	})
+	addGroupedPassthrough(root, "guidance", "completion", "Generate shell completion script", func(args []string) error {
+		return runCompletion(stdout, args)
+	})
+	addGroupedPassthrough(root, "maintenance", "hooks", "Install git hook automation", func(args []string) error {
+		return runWithWorkspace(ctx, append([]string{"hooks"}, args...), false, func(ws workspace.Info) error {
+			return runHooks(stdout, ws, args)
+		})
+	})
+	addGroupedPassthrough(root, "maintenance", "migrate", "Migrate from Beads to links", func(args []string) error {
+		return runWithWorkspace(ctx, append([]string{"migrate"}, args...), false, func(ws workspace.Info) error {
+			return runMigrate(stdout, ws, args)
+		})
+	})
+	addGroupedPassthrough(root, "data", "sync", "Mirror Dolt data through git remotes", func(args []string) error {
+		return runWithWorkspace(ctx, append([]string{"sync"}, args...), true, func(ws workspace.Info) error {
+			return runSync(ctx, stdout, ws, args)
+		})
+	})
+	addGroupedPassthrough(root, "operations", "new", "Create an issue", func(args []string) error {
+		return runWithApp(ctx, append([]string{"new"}, args...), func(ap *app.App) error {
+			return runNew(ctx, stdout, ap, args)
+		})
+	})
+	addGroupedPassthrough(root, "operations", "ready", "List open work", func(args []string) error {
+		return runWithApp(ctx, append([]string{"ready"}, args...), func(ap *app.App) error {
+			return runReady(ctx, stdout, ap, args)
+		})
+	})
+	addGroupedPassthrough(root, "operations", "ls", "List issues", func(args []string) error {
+		return runWithApp(ctx, append([]string{"ls"}, args...), func(ap *app.App) error {
+			return runList(ctx, stdout, ap, args)
+		})
+	})
+	addGroupedPassthrough(root, "operations", "show", "Show issue details", func(args []string) error {
+		return runWithApp(ctx, append([]string{"show"}, args...), func(ap *app.App) error {
+			return runShow(ctx, stdout, ap, args)
+		})
+	})
+	addGroupedPassthrough(root, "operations", "start", "Claim issue work", func(args []string) error {
+		return runWithApp(ctx, append([]string{"start"}, args...), func(ap *app.App) error {
+			return runTransition(ctx, stdout, ap, args, "start")
+		})
+	})
+	addGroupedPassthrough(root, "operations", "done", "Mark claimed work complete", func(args []string) error {
+		return runWithApp(ctx, append([]string{"done"}, args...), func(ap *app.App) error {
+			return runTransition(ctx, stdout, ap, args, "done")
+		})
+	})
+	addGroupedPassthrough(root, "operations", "close", "Close issue(s)", func(args []string) error {
+		return runWithApp(ctx, append([]string{"close"}, args...), func(ap *app.App) error {
+			return runTransition(ctx, stdout, ap, args, "close")
+		})
+	})
+	addGroupedPassthrough(root, "operations", "open", "Reopen issue(s)", func(args []string) error {
+		return runWithApp(ctx, append([]string{"open"}, args...), func(ap *app.App) error {
+			return runTransition(ctx, stdout, ap, args, "reopen")
+		})
+	})
+	addGroupedPassthrough(root, "operations", "archive", "Archive issue(s)", func(args []string) error {
+		return runWithApp(ctx, append([]string{"archive"}, args...), func(ap *app.App) error {
+			return runTransition(ctx, stdout, ap, args, "archive")
+		})
+	})
+	addGroupedPassthrough(root, "operations", "delete", "Delete issue(s)", func(args []string) error {
+		return runWithApp(ctx, append([]string{"delete"}, args...), func(ap *app.App) error {
+			return runTransition(ctx, stdout, ap, args, "delete")
+		})
+	})
+	addGroupedPassthrough(root, "operations", "unarchive", "Unarchive issue(s)", func(args []string) error {
+		return runWithApp(ctx, append([]string{"unarchive"}, args...), func(ap *app.App) error {
+			return runTransition(ctx, stdout, ap, args, "unarchive")
+		})
+	})
+	addGroupedPassthrough(root, "operations", "restore", "Restore deleted issue(s)", func(args []string) error {
+		return runWithApp(ctx, append([]string{"restore"}, args...), func(ap *app.App) error {
+			return runTransition(ctx, stdout, ap, args, "restore")
+		})
+	})
+	addGroupedPassthrough(root, "operations", "comment", "Add issue comments", func(args []string) error {
+		return runWithApp(ctx, append([]string{"comment"}, args...), func(ap *app.App) error {
+			return runComment(ctx, stdout, ap, args)
+		})
+	})
+	addGroupedPassthrough(root, "operations", "label", "Manage labels", func(args []string) error {
+		return runWithApp(ctx, append([]string{"label"}, args...), func(ap *app.App) error {
+			return runLabel(ctx, stdout, ap, args)
+		})
+	})
+	addGroupedPassthrough(root, "structure", "parent", "Manage parent relationships", func(args []string) error {
+		return runWithApp(ctx, append([]string{"parent"}, args...), func(ap *app.App) error {
+			return runParent(ctx, stdout, ap, args)
+		})
+	})
+	addGroupedPassthrough(root, "structure", "children", "List child issues", func(args []string) error {
+		return runWithApp(ctx, append([]string{"children"}, args...), func(ap *app.App) error {
+			return runChildren(ctx, stdout, ap, args)
+		})
+	})
+	addGroupedPassthrough(root, "structure", "dep", "Manage dependency edges", func(args []string) error {
+		return runWithApp(ctx, append([]string{"dep"}, args...), func(ap *app.App) error {
+			return runDep(ctx, stdout, ap, args)
+		})
+	})
+	addGroupedPassthrough(root, "data", "export", "Export workspace snapshot", func(args []string) error {
+		return runWithApp(ctx, append([]string{"export"}, args...), func(ap *app.App) error {
+			return runExport(ctx, stdout, ap, args)
+		})
+	})
+	addGroupedPassthrough(root, "data", "beads", "Import/export Beads databases", func(args []string) error {
+		return runWithApp(ctx, append([]string{"beads"}, args...), func(ap *app.App) error {
+			return runBeads(ctx, stdout, ap, args)
+		})
+	})
+	addGroupedPassthrough(root, "maintenance", "workspace", "Show workspace metadata", func(args []string) error {
+		return runWithApp(ctx, append([]string{"workspace"}, args...), func(ap *app.App) error {
+			return runWorkspace(stdout, ap, args)
+		})
+	})
+	addGroupedPassthrough(root, "maintenance", "doctor", "Health check", func(args []string) error {
+		return runWithApp(ctx, append([]string{"doctor"}, args...), func(ap *app.App) error {
+			return runDoctor(ctx, stdout, ap, args)
+		})
+	})
+	addGroupedPassthrough(root, "maintenance", "fsck", "Integrity check and optional repair", func(args []string) error {
+		return runWithApp(ctx, append([]string{"fsck"}, args...), func(ap *app.App) error {
+			return runFsck(ctx, stdout, ap, args)
+		})
+	})
+	addGroupedPassthrough(root, "data", "backup", "Backup snapshot operations", func(args []string) error {
+		return runWithApp(ctx, append([]string{"backup"}, args...), func(ap *app.App) error {
+			return runBackup(ctx, stdout, ap, args)
+		})
+	})
+	addGroupedPassthrough(root, "data", "recover", "Recover from backup or sync", func(args []string) error {
+		return runWithApp(ctx, append([]string{"recover"}, args...), func(ap *app.App) error {
+			return runRecover(ctx, stdout, ap, args)
+		})
+	})
+	addGroupedPassthrough(root, "operations", "bulk", "Bulk issue operations", func(args []string) error {
+		return runWithApp(ctx, append([]string{"bulk"}, args...), func(ap *app.App) error {
+			return runBulk(ctx, stdout, ap, args)
+		})
+	})
+	return root
+}
+
+func addGroupedPassthrough(root *cobra.Command, groupID string, name string, summary string, run func(args []string) error) {
+	cmd := newPassthroughCommand(name, summary, run)
+	cmd.GroupID = groupID
+	root.AddCommand(cmd)
+}
+
+func newPassthroughCommand(name string, summary string, run func(args []string) error) *cobra.Command {
+	description := agentCommandHelp
+	if name == "init" {
+		description = humanBootstrapHelp
+	}
+	return &cobra.Command{
+		Use:                name,
+		Short:              summary,
+		Long:               description,
+		DisableFlagParsing: true,
+		Args:               cobra.ArbitraryArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return run(args)
+		},
+	}
+}
+
+func runWithPreflight(commandArgs []string, run func() error) error {
+	_, _, err := enforceBeadsPreflight(commandArgs)
+	if err != nil {
+		return err
+	}
+	return run()
+}
+
+func runWithWorkspace(ctx context.Context, commandArgs []string, requireDoltReady bool, run func(workspace.Info) error) error {
+	preflightWorkspace, hasPreflightWorkspace, err := enforceBeadsPreflight(commandArgs)
+	if err != nil {
+		return err
+	}
+	// [LAW:one-source-of-truth] Reuse the preflight workspace resolution when available.
+	ws := preflightWorkspace
+	if !hasPreflightWorkspace {
+		ws, err = resolveWorkspaceFromWD()
+		if err != nil {
+			return err
 		}
 	}
-	switch args[0] {
-	case "help", "-h", "--help":
-		printUsage(stdout)
-		return nil
-	case "init":
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("get cwd: %w", err)
-		}
-		ws, err := workspace.Resolve(cwd)
-		if err != nil {
-			if errors.Is(err, workspace.ErrNotGitRepo) {
-				return fmt.Errorf("links requires running inside a git repository/worktree")
-			}
-			return err
-		}
-		return runInit(ctx, stdout, ws, args[1:])
-	case "quickstart":
-		return runQuickstart(stdout, args[1:])
-	case "completion":
-		return runCompletion(stdout, args[1:])
-	case "hooks":
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("get cwd: %w", err)
-		}
-		ws, err := workspace.Resolve(cwd)
-		if err != nil {
-			if errors.Is(err, workspace.ErrNotGitRepo) {
-				return fmt.Errorf("links requires running inside a git repository/worktree")
-			}
-			return err
-		}
-		return runHooks(stdout, ws, args[1:])
-	case "migrate":
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("get cwd: %w", err)
-		}
-		ws, err := workspace.Resolve(cwd)
-		if err != nil {
-			if errors.Is(err, workspace.ErrNotGitRepo) {
-				return fmt.Errorf("links requires running inside a git repository/worktree")
-			}
-			return err
-		}
-		return runMigrate(stdout, ws, args[1:])
-	case "sync":
-		cwd, err := os.Getwd()
-		if err != nil {
-			return fmt.Errorf("get cwd: %w", err)
-		}
-		ws, err := workspace.Resolve(cwd)
-		if err != nil {
-			if errors.Is(err, workspace.ErrNotGitRepo) {
-				return fmt.Errorf("links requires running inside a git repository/worktree")
-			}
-			return err
-		}
+	if requireDoltReady {
 		if _, err := doltcli.RequireMinimumVersion(ctx, ws.RootDir, doltcli.MinSupportedVersion); err != nil {
 			return err
 		}
 		if err := store.EnsureDatabase(ctx, ws.DatabasePath, ws.WorkspaceID); err != nil {
 			return err
 		}
-		return runSync(ctx, stdout, ws, args[1:])
 	}
-	ap, err := app.OpenFromWD(ctx)
+	return run(ws)
+}
+
+func runWithApp(ctx context.Context, commandArgs []string, run func(*app.App) error) error {
+	_, _, err := enforceBeadsPreflight(commandArgs)
+	if err != nil {
+		return err
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return fmt.Errorf("get cwd: %w", err)
+	}
+	ws, err := workspace.Resolve(cwd)
+	if err != nil {
+		if errors.Is(err, workspace.ErrNotGitRepo) {
+			return fmt.Errorf("links requires running inside a git repository/worktree")
+		}
+		return err
+	}
+	// [LAW:single-enforcer] CLI acquires a workspace command lock before opening app state so startup and mutation phases cannot overlap across commands.
+	releaseWorkspaceLock, err := acquireWorkspaceCommandLock(ctx, ws.DatabasePath)
+	if err != nil {
+		return err
+	}
+	defer releaseWorkspaceLock()
+
+	ap, err := app.Open(ctx, cwd)
 	if err != nil {
 		if errors.Is(err, workspace.ErrNotGitRepo) {
 			return fmt.Errorf("links requires running inside a git repository/worktree")
@@ -126,61 +362,225 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 		return err
 	}
 	defer ap.Close()
-
-	switch args[0] {
-	case "new":
-		return runNew(ctx, stdout, ap, args[1:])
-	case "ready":
-		return runReady(ctx, stdout, ap, args[1:])
-	case "ls":
-		return runList(ctx, stdout, ap, args[1:])
-	case "show":
-		return runShow(ctx, stdout, ap, args[1:])
-	case "close":
-		return runTransition(ctx, stdout, ap, args[1:], "close")
-	case "start":
-		return runTransition(ctx, stdout, ap, args[1:], "start")
-	case "done":
-		return runTransition(ctx, stdout, ap, args[1:], "done")
-	case "open":
-		return runTransition(ctx, stdout, ap, args[1:], "reopen")
-	case "archive":
-		return runTransition(ctx, stdout, ap, args[1:], "archive")
-	case "delete":
-		return runTransition(ctx, stdout, ap, args[1:], "delete")
-	case "unarchive":
-		return runTransition(ctx, stdout, ap, args[1:], "unarchive")
-	case "restore":
-		return runTransition(ctx, stdout, ap, args[1:], "restore")
-	case "comment":
-		return runComment(ctx, stdout, ap, args[1:])
-	case "label":
-		return runLabel(ctx, stdout, ap, args[1:])
-	case "parent":
-		return runParent(ctx, stdout, ap, args[1:])
-	case "children":
-		return runChildren(ctx, stdout, ap, args[1:])
-	case "dep":
-		return runDep(ctx, stdout, ap, args[1:])
-	case "export":
-		return runExport(ctx, stdout, ap, args[1:])
-	case "beads":
-		return runBeads(ctx, stdout, ap, args[1:])
-	case "workspace":
-		return runWorkspace(stdout, ap, args[1:])
-	case "doctor":
-		return runDoctor(ctx, stdout, ap, args[1:])
-	case "fsck":
-		return runFsck(ctx, stdout, ap, args[1:])
-	case "backup":
-		return runBackup(ctx, stdout, ap, args[1:])
-	case "recover":
-		return runRecover(ctx, stdout, ap, args[1:])
-	case "bulk":
-		return runBulk(ctx, stdout, ap, args[1:])
-	default:
-		return fmt.Errorf("unknown command %q", args[0])
+	// [LAW:single-enforcer] Command-level workspace mutation lock is acquired once at CLI dispatch to prevent overlapping write phases.
+	ctx, releaseMutationLock, err := ap.Store.AcquireMutationLock(ctx)
+	if err != nil {
+		return err
 	}
+	defer releaseMutationLock()
+	return run(ap)
+}
+
+func enforceBeadsPreflight(commandArgs []string) (workspace.Info, bool, error) {
+	if shouldBypassBeadsPreflight(commandArgs) {
+		return workspace.Info{}, false, nil
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		return workspace.Info{}, false, fmt.Errorf("get cwd: %w", err)
+	}
+	ws, resolveErr := workspace.Resolve(cwd)
+	if resolveErr == nil {
+		if err := requireBeadsMigrationPreflight(ws); err != nil {
+			return workspace.Info{}, false, err
+		}
+		return ws, true, nil
+	}
+	if !errors.Is(resolveErr, workspace.ErrNotGitRepo) {
+		return workspace.Info{}, false, resolveErr
+	}
+	return workspace.Info{}, false, nil
+}
+
+func resolveWorkspaceFromWD() (workspace.Info, error) {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return workspace.Info{}, fmt.Errorf("get cwd: %w", err)
+	}
+	ws, err := workspace.Resolve(cwd)
+	if err != nil {
+		if errors.Is(err, workspace.ErrNotGitRepo) {
+			return workspace.Info{}, fmt.Errorf("links requires running inside a git repository/worktree")
+		}
+		return workspace.Info{}, err
+	}
+	return ws, nil
+}
+
+func parseGlobalOutputMode(args []string, stdout io.Writer) ([]string, outputMode, error) {
+	// [LAW:single-enforcer] Global output precedence (--output/--json/env/auto) is enforced exactly once at CLI entry.
+	mode, err := modeFromEnv()
+	if err != nil {
+		return nil, "", err
+	}
+	index := 0
+	for index < len(args) {
+		switch {
+		case args[index] == "--":
+			index++
+			goto done
+		case args[index] == "--json":
+			mode = outputModeJSON
+			index++
+		case strings.HasPrefix(args[index], "--json="):
+			jsonValue := strings.TrimSpace(strings.TrimPrefix(args[index], "--json="))
+			parsed, parseErr := strconv.ParseBool(jsonValue)
+			if parseErr != nil {
+				return nil, "", fmt.Errorf("invalid --json value %q (expected true|false)", jsonValue)
+			}
+			if parsed {
+				mode = outputModeJSON
+			} else {
+				mode = outputModeText
+			}
+			index++
+		case args[index] == "--output":
+			if index+1 >= len(args) {
+				return nil, "", errors.New("usage: lit [--output auto|text|json] [--json] [command]")
+			}
+			parsedMode, parseErr := parseOutputMode(args[index+1])
+			if parseErr != nil {
+				return nil, "", parseErr
+			}
+			mode = parsedMode
+			index += 2
+		default:
+			if strings.HasPrefix(args[index], "--output=") {
+				parsedMode, parseErr := parseOutputMode(strings.TrimPrefix(args[index], "--output="))
+				if parseErr != nil {
+					return nil, "", parseErr
+				}
+				mode = parsedMode
+				index++
+				continue
+			}
+			goto done
+		}
+	}
+
+done:
+	if mode == outputModeAuto {
+		mode = detectOutputMode(stdout)
+	}
+	return args[index:], mode, nil
+}
+
+func parseFlagSet(fs *flag.FlagSet, args []string, helpOutput io.Writer) error {
+	fs.SetOutput(io.Discard)
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			// [LAW:single-enforcer] Flag help rendering is normalized in one parser path.
+			fs.SetOutput(helpOutput)
+			fs.Usage()
+		}
+		return err
+	}
+	return nil
+}
+
+func modeFromEnv() (outputMode, error) {
+	config := viper.New()
+	if err := config.BindEnv("output", outputModeEnvVar); err != nil {
+		return "", fmt.Errorf("bind %s: %w", outputModeEnvVar, err)
+	}
+	raw := strings.TrimSpace(strings.ToLower(config.GetString("output")))
+	if raw == "" {
+		return outputModeAuto, nil
+	}
+	return parseOutputMode(raw)
+}
+
+func acquireWorkspaceCommandLock(ctx context.Context, databasePath string) (func(), error) {
+	lockPath := filepath.Join(filepath.Clean(databasePath), ".links-command.lock")
+	for {
+		release, lockErr := tryAcquireCommandLockFile(lockPath)
+		if lockErr == nil {
+			return release, nil
+		}
+		if !errors.Is(lockErr, os.ErrExist) {
+			return nil, fmt.Errorf("acquire workspace command lock: %w", lockErr)
+		}
+		if staleErr := removeStaleCommandLockFile(lockPath, commandLockStaleAfter); staleErr != nil {
+			return nil, fmt.Errorf("acquire workspace command lock: %w", staleErr)
+		}
+		if waitErr := waitForCommandLock(ctx, commandLockRetryDelay); waitErr != nil {
+			return nil, waitErr
+		}
+	}
+}
+
+func tryAcquireCommandLockFile(lockPath string) (func(), error) {
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	_, _ = fmt.Fprintf(file, "%d\n", os.Getpid())
+	if closeErr := file.Close(); closeErr != nil {
+		_ = os.Remove(lockPath)
+		return nil, closeErr
+	}
+	return func() {
+		_ = os.Remove(lockPath)
+	}, nil
+}
+
+func removeStaleCommandLockFile(lockPath string, staleAfter time.Duration) error {
+	info, err := os.Stat(lockPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if time.Since(info.ModTime()) <= staleAfter {
+		return nil
+	}
+	if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
+func waitForCommandLock(ctx context.Context, delay time.Duration) error {
+	timer := time.NewTimer(delay)
+	defer func() {
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
+			}
+		}
+	}()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func parseOutputMode(raw string) (outputMode, error) {
+	switch strings.TrimSpace(strings.ToLower(raw)) {
+	case string(outputModeAuto):
+		return outputModeAuto, nil
+	case string(outputModeText):
+		return outputModeText, nil
+	case string(outputModeJSON):
+		return outputModeJSON, nil
+	default:
+		return "", fmt.Errorf("unsupported output mode %q (expected auto|text|json)", raw)
+	}
+}
+
+func detectOutputMode(stdout io.Writer) outputMode {
+	file, ok := stdout.(*os.File)
+	if !ok {
+		return outputModeJSON
+	}
+	if term.IsTerminal(int(file.Fd())) {
+		return outputModeText
+	}
+	return outputModeJSON
 }
 
 func runNew(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
@@ -193,7 +593,7 @@ func runNew(ctx context.Context, stdout io.Writer, ap *app.App, args []string) e
 	assignee := fs.String("assignee", "", "Assignee")
 	labels := fs.String("labels", "", "Comma-separated labels")
 	jsonOut := fs.Bool("json", false, "Output JSON")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args, stdout); err != nil {
 		return err
 	}
 	issue, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
@@ -227,7 +627,7 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	format := fs.String("format", "lines", "Output format: lines|table")
 	limit := fs.Int("limit", 0, "Limit results")
 	jsonOut := fs.Bool("json", false, "Output JSON")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args, stdout); err != nil {
 		return err
 	}
 	visited := map[string]bool{}
@@ -296,7 +696,7 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	if err != nil {
 		return err
 	}
-	if *jsonOut {
+	if shouldWriteJSON(stdout, *jsonOut) {
 		return writeJSON(stdout, issues)
 	}
 	columns := parseColumns(*columnsExpr)
@@ -318,7 +718,7 @@ func runReady(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 	columnsExpr := fs.String("columns", "", "Comma-separated output columns")
 	format := fs.String("format", "lines", "Output format: lines|table")
 	jsonOut := fs.Bool("json", false, "Output JSON")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args, stdout); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
@@ -338,7 +738,7 @@ func runReady(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 	if err != nil {
 		return err
 	}
-	if *jsonOut {
+	if shouldWriteJSON(stdout, *jsonOut) {
 		return writeJSON(stdout, issues)
 	}
 	columns := parseColumns(*columnsExpr)
@@ -354,14 +754,14 @@ func runReady(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 
 func runShow(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
 	positional, flagArgs := splitArgs(args, 1)
-	if len(positional) != 1 {
-		return errors.New("usage: lit show <id>")
-	}
 	fs := flag.NewFlagSet("show", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	jsonOut := fs.Bool("json", false, "Output JSON")
-	if err := fs.Parse(flagArgs); err != nil {
+	if err := parseFlagSet(fs, flagArgs, stdout); err != nil {
 		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("usage: lit show <id>")
 	}
 	if fs.NArg() != 0 {
 		return errors.New("usage: lit show <id>")
@@ -370,7 +770,7 @@ func runShow(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	if err != nil {
 		return err
 	}
-	if *jsonOut {
+	if shouldWriteJSON(stdout, *jsonOut) {
 		return writeJSON(stdout, detail)
 	}
 	return printIssueDetail(stdout, detail)
@@ -378,16 +778,16 @@ func runShow(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 
 func runTransition(ctx context.Context, stdout io.Writer, ap *app.App, args []string, action string) error {
 	positional, flagArgs := splitArgs(args, 1)
-	if len(positional) != 1 {
-		return fmt.Errorf("usage: lit %s <id> --reason <text>", transitionCommandName(action))
-	}
 	fs := flag.NewFlagSet(action, flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	reason := fs.String("reason", "", "Transition reason")
 	by := fs.String("by", os.Getenv("USER"), "Transition actor")
 	jsonOut := fs.Bool("json", false, "Output JSON")
-	if err := fs.Parse(flagArgs); err != nil {
+	if err := parseFlagSet(fs, flagArgs, stdout); err != nil {
 		return err
+	}
+	if len(positional) != 1 {
+		return fmt.Errorf("usage: lit %s <id> --reason <text>", transitionCommandName(action))
 	}
 	if fs.NArg() != 0 {
 		return fmt.Errorf("usage: lit %s <id> --reason <text>", transitionCommandName(action))
@@ -409,16 +809,16 @@ func runComment(ctx context.Context, stdout io.Writer, ap *app.App, args []strin
 		return errors.New("usage: lit comment add <id> --body <text>")
 	}
 	positional, flagArgs := splitArgs(args[1:], 1)
-	if len(positional) != 1 {
-		return errors.New("usage: lit comment add <id> --body <text>")
-	}
 	fs := flag.NewFlagSet("comment add", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	body := fs.String("body", "", "Comment body")
 	by := fs.String("by", os.Getenv("USER"), "Comment author")
 	jsonOut := fs.Bool("json", false, "Output JSON")
-	if err := fs.Parse(flagArgs); err != nil {
+	if err := parseFlagSet(fs, flagArgs, stdout); err != nil {
 		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("usage: lit comment add <id> --body <text>")
 	}
 	if fs.NArg() != 0 {
 		return errors.New("usage: lit comment add <id> --body <text>")
@@ -441,16 +841,16 @@ func runDep(ctx context.Context, stdout io.Writer, ap *app.App, args []string) e
 	switch args[0] {
 	case "add":
 		positional, flagArgs := splitArgs(args[1:], 2)
-		if len(positional) != 2 {
-			return errors.New("usage: lit dep add <src-id> <dst-id> [--type blocks|parent-child|related-to]")
-		}
 		fs := flag.NewFlagSet("dep add", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		relType := fs.String("type", "blocks", "Relation type: blocks|parent-child|related-to")
 		by := fs.String("by", os.Getenv("USER"), "Relation creator")
 		jsonOut := fs.Bool("json", false, "Output JSON")
-		if err := fs.Parse(flagArgs); err != nil {
+		if err := parseFlagSet(fs, flagArgs, stdout); err != nil {
 			return err
+		}
+		if len(positional) != 2 {
+			return errors.New("usage: lit dep add <src-id> <dst-id> [--type blocks|parent-child|related-to]")
 		}
 		if fs.NArg() != 0 {
 			return errors.New("usage: lit dep add <src-id> <dst-id> [--type blocks|parent-child|related-to]")
@@ -466,15 +866,15 @@ func runDep(ctx context.Context, stdout io.Writer, ap *app.App, args []string) e
 		})
 	case "rm":
 		positional, flagArgs := splitArgs(args[1:], 2)
-		if len(positional) != 2 {
-			return errors.New("usage: lit dep rm <src-id> <dst-id> [--type ...]")
-		}
 		fs := flag.NewFlagSet("dep rm", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		relType := fs.String("type", "blocks", "Relation type: blocks|parent-child|related-to")
 		jsonOut := fs.Bool("json", false, "Output JSON")
-		if err := fs.Parse(flagArgs); err != nil {
+		if err := parseFlagSet(fs, flagArgs, stdout); err != nil {
 			return err
+		}
+		if len(positional) != 2 {
+			return errors.New("usage: lit dep rm <src-id> <dst-id> [--type ...]")
 		}
 		if fs.NArg() != 0 {
 			return errors.New("usage: lit dep rm <src-id> <dst-id> [--type ...]")
@@ -488,15 +888,15 @@ func runDep(ctx context.Context, stdout io.Writer, ap *app.App, args []string) e
 		})
 	case "ls":
 		positional, flagArgs := splitArgs(args[1:], 1)
-		if len(positional) != 1 {
-			return errors.New("usage: lit dep ls <issue-id> [--type blocks|parent-child|related-to] [--json]")
-		}
 		fs := flag.NewFlagSet("dep ls", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		relType := fs.String("type", "", "Filter relation type")
 		jsonOut := fs.Bool("json", false, "Output JSON")
-		if err := fs.Parse(flagArgs); err != nil {
+		if err := parseFlagSet(fs, flagArgs, stdout); err != nil {
 			return err
+		}
+		if len(positional) != 1 {
+			return errors.New("usage: lit dep ls <issue-id> [--type blocks|parent-child|related-to] [--json]")
 		}
 		if fs.NArg() != 0 {
 			return errors.New("usage: lit dep ls <issue-id> [--type blocks|parent-child|related-to] [--json]")
@@ -526,15 +926,15 @@ func runLabel(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 	switch args[0] {
 	case "add":
 		positional, flagArgs := splitArgs(args[1:], 2)
-		if len(positional) != 2 {
-			return errors.New("usage: lit label add <issue-id> <label> [--by <user>] [--json]")
-		}
 		fs := flag.NewFlagSet("label add", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		by := fs.String("by", os.Getenv("USER"), "Label author")
 		jsonOut := fs.Bool("json", false, "Output JSON")
-		if err := fs.Parse(flagArgs); err != nil {
+		if err := parseFlagSet(fs, flagArgs, stdout); err != nil {
 			return err
+		}
+		if len(positional) != 2 {
+			return errors.New("usage: lit label add <issue-id> <label> [--by <user>] [--json]")
 		}
 		if fs.NArg() != 0 {
 			return errors.New("usage: lit label add <issue-id> <label> [--by <user>] [--json]")
@@ -546,14 +946,14 @@ func runLabel(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 		return printValue(stdout, labels, *jsonOut, printLabels)
 	case "rm":
 		positional, flagArgs := splitArgs(args[1:], 2)
-		if len(positional) != 2 {
-			return errors.New("usage: lit label rm <issue-id> <label> [--json]")
-		}
 		fs := flag.NewFlagSet("label rm", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		jsonOut := fs.Bool("json", false, "Output JSON")
-		if err := fs.Parse(flagArgs); err != nil {
+		if err := parseFlagSet(fs, flagArgs, stdout); err != nil {
 			return err
+		}
+		if len(positional) != 2 {
+			return errors.New("usage: lit label rm <issue-id> <label> [--json]")
 		}
 		if fs.NArg() != 0 {
 			return errors.New("usage: lit label rm <issue-id> <label> [--json]")
@@ -575,15 +975,15 @@ func runParent(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 	switch args[0] {
 	case "set":
 		positional, flagArgs := splitArgs(args[1:], 2)
-		if len(positional) != 2 {
-			return errors.New("usage: lit parent set <child-id> <parent-id> [--by <user>] [--json]")
-		}
 		fs := flag.NewFlagSet("parent set", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		by := fs.String("by", os.Getenv("USER"), "Relation creator")
 		jsonOut := fs.Bool("json", false, "Output JSON")
-		if err := fs.Parse(flagArgs); err != nil {
+		if err := parseFlagSet(fs, flagArgs, stdout); err != nil {
 			return err
+		}
+		if len(positional) != 2 {
+			return errors.New("usage: lit parent set <child-id> <parent-id> [--by <user>] [--json]")
 		}
 		rel, err := ap.Store.SetParent(ctx, store.SetParentInput{
 			ChildID:   positional[0],
@@ -600,14 +1000,14 @@ func runParent(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 		})
 	case "clear":
 		positional, flagArgs := splitArgs(args[1:], 1)
-		if len(positional) != 1 {
-			return errors.New("usage: lit parent clear <child-id> [--json]")
-		}
 		fs := flag.NewFlagSet("parent clear", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		jsonOut := fs.Bool("json", false, "Output JSON")
-		if err := fs.Parse(flagArgs); err != nil {
+		if err := parseFlagSet(fs, flagArgs, stdout); err != nil {
 			return err
+		}
+		if len(positional) != 1 {
+			return errors.New("usage: lit parent clear <child-id> [--json]")
 		}
 		if err := ap.Store.ClearParent(ctx, positional[0]); err != nil {
 			return err
@@ -623,20 +1023,20 @@ func runParent(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 
 func runChildren(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
 	positional, flagArgs := splitArgs(args, 1)
-	if len(positional) != 1 {
-		return errors.New("usage: lit children <parent-id> [--json]")
-	}
 	fs := flag.NewFlagSet("children", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	jsonOut := fs.Bool("json", false, "Output JSON")
-	if err := fs.Parse(flagArgs); err != nil {
+	if err := parseFlagSet(fs, flagArgs, stdout); err != nil {
 		return err
+	}
+	if len(positional) != 1 {
+		return errors.New("usage: lit children <parent-id> [--json]")
 	}
 	children, err := ap.Store.ListChildren(ctx, positional[0])
 	if err != nil {
 		return err
 	}
-	if *jsonOut {
+	if shouldWriteJSON(stdout, *jsonOut) {
 		return writeJSON(stdout, children)
 	}
 	return printIssueLines(stdout, children, []string{"id", "state", "title"})
@@ -646,7 +1046,7 @@ func runExport(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 	fs := flag.NewFlagSet("export", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	jsonOut := fs.Bool("json", true, "Output JSON")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args, stdout); err != nil {
 		return err
 	}
 	export, err := ap.Store.Export(ctx)
@@ -668,7 +1068,7 @@ func runBeads(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 		fs.SetOutput(io.Discard)
 		dbPath := fs.String("db", "", "Path to beads Dolt root/database")
 		jsonOut := fs.Bool("json", false, "Output JSON")
-		if err := fs.Parse(args[1:]); err != nil {
+		if err := parseFlagSet(fs, args[1:], stdout); err != nil {
 			return err
 		}
 		if strings.TrimSpace(*dbPath) == "" {
@@ -688,7 +1088,7 @@ func runBeads(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 		fs.SetOutput(io.Discard)
 		dbPath := fs.String("db", "", "Path to beads Dolt root/database")
 		jsonOut := fs.Bool("json", false, "Output JSON")
-		if err := fs.Parse(args[1:]); err != nil {
+		if err := parseFlagSet(fs, args[1:], stdout); err != nil {
 			return err
 		}
 		if strings.TrimSpace(*dbPath) == "" {
@@ -712,7 +1112,7 @@ func runWorkspace(stdout io.Writer, ap *app.App, args []string) error {
 	fs := flag.NewFlagSet("workspace", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	jsonOut := fs.Bool("json", false, "Output JSON")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args, stdout); err != nil {
 		return err
 	}
 	payload := map[string]string{
@@ -722,7 +1122,7 @@ func runWorkspace(stdout io.Writer, ap *app.App, args []string) error {
 		"database_path":  ap.Workspace.DatabasePath,
 		"dolt_repo_path": ap.Workspace.DoltRepoPath,
 	}
-	if *jsonOut {
+	if shouldWriteJSON(stdout, *jsonOut) {
 		return writeJSON(stdout, payload)
 	}
 	for _, key := range []string{"workspace_id", "git_common_dir", "storage_dir", "database_path", "dolt_repo_path"} {
@@ -751,7 +1151,7 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 			fs := flag.NewFlagSet("sync remote ls", flag.ContinueOnError)
 			fs.SetOutput(io.Discard)
 			jsonOut := fs.Bool("json", false, "Output JSON")
-			if err := fs.Parse(args[2:]); err != nil {
+			if err := parseFlagSet(fs, args[2:], stdout); err != nil {
 				return err
 			}
 			payload := map[string]any{
@@ -781,7 +1181,7 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		remote := fs.String("remote", "origin", "Remote name")
 		prune := fs.Bool("prune", false, "Pass --prune to dolt fetch")
 		jsonOut := fs.Bool("json", false, "Output JSON")
-		if err := fs.Parse(args[1:]); err != nil {
+		if err := parseFlagSet(fs, args[1:], stdout); err != nil {
 			return err
 		}
 		commandArgs := []string{"fetch", strings.TrimSpace(*remote)}
@@ -812,7 +1212,7 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		remote := fs.String("remote", "origin", "Remote name")
 		branch := fs.String("branch", "", "Branch name (defaults to current)")
 		jsonOut := fs.Bool("json", false, "Output JSON")
-		if err := fs.Parse(args[1:]); err != nil {
+		if err := parseFlagSet(fs, args[1:], stdout); err != nil {
 			return err
 		}
 		remoteName := strings.TrimSpace(*remote)
@@ -835,28 +1235,30 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		setUpstream := fs.Bool("set-upstream", false, "Pass -u to dolt push")
 		force := fs.Bool("force", false, "Pass --force to dolt push")
 		jsonOut := fs.Bool("json", false, "Output JSON")
-		if err := fs.Parse(args[1:]); err != nil {
+		if err := parseFlagSet(fs, args[1:], stdout); err != nil {
 			return err
 		}
-		commandArgs := []string{"push"}
-		if *setUpstream {
-			commandArgs = append(commandArgs, "-u")
+		remoteName := strings.TrimSpace(*remote)
+		requestedBranch := strings.TrimSpace(*branch)
+		currentBranch, err := resolveSyncPushCurrentBranch(ctx, ws, requestedBranch)
+		if err != nil {
+			return err
 		}
-		if *force {
-			commandArgs = append(commandArgs, "--force")
-		}
-		commandArgs = append(commandArgs, strings.TrimSpace(*remote))
-		if strings.TrimSpace(*branch) != "" {
-			commandArgs = append(commandArgs, strings.TrimSpace(*branch))
-		}
+		commandArgs := buildSyncPushCommandArgs(
+			remoteName,
+			requestedBranch,
+			currentBranch,
+			*setUpstream,
+			*force,
+		)
 		output, err := doltcli.Run(ctx, ws.DoltRepoPath, commandArgs...)
 		if err != nil {
 			return err
 		}
 		payload := map[string]any{
 			"status": "ok",
-			"remote": strings.TrimSpace(*remote),
-			"branch": strings.TrimSpace(*branch),
+			"remote": remoteName,
+			"branch": requestedBranch,
 			"raw":    output,
 		}
 		return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
@@ -876,7 +1278,7 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		fs := flag.NewFlagSet("sync status", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		jsonOut := fs.Bool("json", false, "Output JSON")
-		if err := fs.Parse(args[1:]); err != nil {
+		if err := parseFlagSet(fs, args[1:], stdout); err != nil {
 			return err
 		}
 		version, err := doltcli.InstalledVersion(ctx, ws.DoltRepoPath)
@@ -927,6 +1329,26 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 	default:
 		return errors.New("usage: lit sync <status|remote|fetch|pull|push> ...")
 	}
+}
+
+func syncPushBranchLookupArgs(requestedBranch string) []string {
+	// [LAW:dataflow-not-control-flow] Sync push always runs this stage; branch data selects no-op vs lookup inputs.
+	if strings.TrimSpace(requestedBranch) == "" {
+		return []string{}
+	}
+	return []string{"branch", "--show-current"}
+}
+
+func resolveSyncPushCurrentBranch(ctx context.Context, ws workspace.Info, requestedBranch string) (string, error) {
+	lookupArgs := syncPushBranchLookupArgs(requestedBranch)
+	if len(lookupArgs) == 0 {
+		return "", nil
+	}
+	currentBranch, err := doltcli.Run(ctx, ws.DoltRepoPath, lookupArgs...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(currentBranch), nil
 }
 
 func buildSyncPullPayload(remote string, requestedBranch string, output string, runErr error) (map[string]any, error) {
@@ -1008,6 +1430,28 @@ func printSyncPullPayload(w io.Writer, v any) error {
 		_, err := fmt.Fprintf(w, "pulled %s\n", remote)
 		return err
 	}
+}
+
+func buildSyncPushCommandArgs(remote string, requestedBranch string, currentBranch string, setUpstream bool, force bool) []string {
+	// [LAW:one-source-of-truth] Push source always comes from the current Dolt branch; requested branch is a remote projection target.
+	commandArgs := []string{"push"}
+	if setUpstream {
+		commandArgs = append(commandArgs, "-u")
+	}
+	if force {
+		commandArgs = append(commandArgs, "--force")
+	}
+	commandArgs = append(commandArgs, remote)
+	if requestedBranch == "" {
+		return commandArgs
+	}
+	sourceRef := strings.TrimSpace(currentBranch)
+	if sourceRef == "" {
+		// [LAW:dataflow-not-control-flow] Empty branch-name output maps to a deterministic source ref (`HEAD`) instead of changing push stage behavior.
+		sourceRef = "HEAD"
+	}
+	refspec := fmt.Sprintf("%s:%s", sourceRef, requestedBranch)
+	return append(commandArgs, refspec)
 }
 
 type remoteSyncChanges struct {
@@ -1152,14 +1596,14 @@ func runDoctor(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 	fs := flag.NewFlagSet("doctor", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	jsonOut := fs.Bool("json", false, "Output JSON")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args, stdout); err != nil {
 		return err
 	}
 	report, err := ap.Store.Doctor(ctx)
 	if err != nil {
 		return err
 	}
-	if *jsonOut {
+	if shouldWriteJSON(stdout, *jsonOut) {
 		if err := writeJSON(stdout, report); err != nil {
 			return err
 		}
@@ -1180,14 +1624,14 @@ func runFsck(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	fs.SetOutput(io.Discard)
 	repair := fs.Bool("repair", false, "Attempt safe repairs")
 	jsonOut := fs.Bool("json", false, "Output JSON")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args, stdout); err != nil {
 		return err
 	}
 	report, err := ap.Store.Fsck(ctx, *repair)
 	if err != nil {
 		return err
 	}
-	if *jsonOut {
+	if shouldWriteJSON(stdout, *jsonOut) {
 		if err := writeJSON(stdout, report); err != nil {
 			return err
 		}
@@ -1213,7 +1657,7 @@ func runBackup(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 		fs.SetOutput(io.Discard)
 		keep := fs.Int("keep", 20, "Snapshots to keep after rotation")
 		jsonOut := fs.Bool("json", false, "Output JSON")
-		if err := fs.Parse(args[1:]); err != nil {
+		if err := parseFlagSet(fs, args[1:], stdout); err != nil {
 			return err
 		}
 		export, err := ap.Store.Export(ctx)
@@ -1236,7 +1680,7 @@ func runBackup(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 		fs := flag.NewFlagSet("backup list", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		jsonOut := fs.Bool("json", false, "Output JSON")
-		if err := fs.Parse(args[1:]); err != nil {
+		if err := parseFlagSet(fs, args[1:], stdout); err != nil {
 			return err
 		}
 		snapshots, err := backup.List(ap.Workspace.StorageDir)
@@ -1259,7 +1703,7 @@ func runBackup(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 		latest := fs.Bool("latest", false, "Restore latest backup snapshot")
 		force := fs.Bool("force", false, "Force restore over unsynced state")
 		jsonOut := fs.Bool("json", false, "Output JSON")
-		if err := fs.Parse(args[1:]); err != nil {
+		if err := parseFlagSet(fs, args[1:], stdout); err != nil {
 			return err
 		}
 		restorePath := strings.TrimSpace(*path)
@@ -1298,7 +1742,7 @@ func runRecover(ctx context.Context, stdout io.Writer, ap *app.App, args []strin
 	latestBackup := fs.Bool("latest-backup", false, "Restore from latest backup snapshot")
 	force := fs.Bool("force", false, "Force restore over unsynced state")
 	jsonOut := fs.Bool("json", false, "Output JSON")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args, stdout); err != nil {
 		return err
 	}
 	var restorePath string
@@ -1346,7 +1790,7 @@ func runBulk(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 		label := fs.String("label", "", "Label name")
 		by := fs.String("by", os.Getenv("USER"), "Label actor")
 		jsonOut := fs.Bool("json", false, "Output JSON")
-		if err := fs.Parse(args[2:]); err != nil {
+		if err := parseFlagSet(fs, args[2:], stdout); err != nil {
 			return err
 		}
 		issueIDs := splitCSV(*ids)
@@ -1396,7 +1840,7 @@ func runBulk(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 		reason := fs.String("reason", "", "Lifecycle reason")
 		by := fs.String("by", os.Getenv("USER"), "Lifecycle actor")
 		jsonOut := fs.Bool("json", false, "Output JSON")
-		if err := fs.Parse(args[1:]); err != nil {
+		if err := parseFlagSet(fs, args[1:], stdout); err != nil {
 			return err
 		}
 		issueIDs := splitCSV(*ids)
@@ -1435,7 +1879,7 @@ func runBulk(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 		path := fs.String("path", "", "Path to JSON export")
 		force := fs.Bool("force", false, "Force import over unsynced local state")
 		jsonOut := fs.Bool("json", false, "Output JSON")
-		if err := fs.Parse(args[1:]); err != nil {
+		if err := parseFlagSet(fs, args[1:], stdout); err != nil {
 			return err
 		}
 		if strings.TrimSpace(*path) == "" {
@@ -1478,7 +1922,7 @@ func runQuickstart(stdout io.Writer, args []string) error {
 	fs := flag.NewFlagSet("quickstart", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	jsonOut := fs.Bool("json", false, "Output JSON")
-	if err := fs.Parse(args); err != nil {
+	if err := parseFlagSet(fs, args, stdout); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
@@ -1583,8 +2027,24 @@ func writeJSON(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
-func printValue(w io.Writer, v any, jsonOut bool, textFn func(io.Writer, any) error) error {
+func shouldWriteJSON(w io.Writer, jsonOut bool) bool {
 	if jsonOut {
+		return true
+	}
+	// [LAW:one-source-of-truth] Writer-bound output mode is the canonical default signal for format selection.
+	return outputModeFromWriter(w) == outputModeJSON
+}
+
+func outputModeFromWriter(w io.Writer) outputMode {
+	provider, ok := w.(outputModeProvider)
+	if !ok {
+		return outputModeText
+	}
+	return provider.linksOutputMode()
+}
+
+func printValue(w io.Writer, v any, jsonOut bool, textFn func(io.Writer, any) error) error {
+	if shouldWriteJSON(w, jsonOut) {
 		return writeJSON(w, v)
 	}
 	return textFn(w, v)
@@ -1915,9 +2375,21 @@ func printUsage(w io.Writer) {
 
 Worktree-native issue tracker with Dolt-backed sync.
 
+Output:
+  --output auto|json|text     Output mode for commands that support structured output.
+  --json                      Shorthand for --output json.
+  Precedence: --output > --json > LIT_OUTPUT > auto
+  Auto behavior: TTY -> text, non-TTY -> json
+
 Usage:
-  lit [command]
-  lit [command] [flags]
+  lit [--output auto|text|json] [--json] [command]
+  lit [--output auto|text|json] [--json] [command] [flags]
+
+Global Output Mode:
+  default        auto (TTY -> text, non-TTY -> json)
+  --json         Explicit shorthand for JSON output compatibility
+  --output MODE  Force output mode (auto|text|json)
+  LIT_OUTPUT     Environment default when flags are not provided
 
 Issue Workflow:
   init           Initialize links in the current repository (auto-migrates Beads residue)

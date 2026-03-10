@@ -61,3 +61,9 @@ func TestStatusAliasInProgressNormalizesToBeadsValue(t *testing.T) {
 		t.Fatalf("Status = %q, want in_progress", result.Filter.Status)
 	}
 }
+
+func TestParseRejectsInvalidStatus(t *testing.T) {
+	if _, err := Parse(`status:todo`); err == nil {
+		t.Fatal("expected invalid status error")
+	}
+}
