@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -41,6 +42,8 @@ const (
 	commandLockRetryDelay = 50 * time.Millisecond
 	commandLockStaleAfter = 10 * time.Minute
 )
+
+var commandLockPIDRunning = isCommandLockPIDRunning
 
 type outputMode string
 
@@ -149,128 +152,128 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 		})
 	})
 	addGroupedPassthrough(root, "operations", "new", "Create an issue", func(args []string) error {
-		return runWithApp(ctx, append([]string{"new"}, args...), func(ap *app.App) error {
-			return runNew(ctx, stdout, ap, args)
+		return runWithApp(ctx, append([]string{"new"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runNew(runCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "operations", "ready", "List open work", func(args []string) error {
-		return runWithApp(ctx, append([]string{"ready"}, args...), func(ap *app.App) error {
-			return runReady(ctx, stdout, ap, args)
+		return runWithApp(ctx, append([]string{"ready"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runReady(runCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "operations", "ls", "List issues", func(args []string) error {
-		return runWithApp(ctx, append([]string{"ls"}, args...), func(ap *app.App) error {
-			return runList(ctx, stdout, ap, args)
+		return runWithApp(ctx, append([]string{"ls"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runList(runCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "operations", "show", "Show issue details", func(args []string) error {
-		return runWithApp(ctx, append([]string{"show"}, args...), func(ap *app.App) error {
-			return runShow(ctx, stdout, ap, args)
+		return runWithApp(ctx, append([]string{"show"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runShow(runCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "operations", "start", "Claim issue work", func(args []string) error {
-		return runWithApp(ctx, append([]string{"start"}, args...), func(ap *app.App) error {
-			return runTransition(ctx, stdout, ap, args, "start")
+		return runWithApp(ctx, append([]string{"start"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runTransition(runCtx, stdout, ap, args, "start")
 		})
 	})
 	addGroupedPassthrough(root, "operations", "done", "Mark claimed work complete", func(args []string) error {
-		return runWithApp(ctx, append([]string{"done"}, args...), func(ap *app.App) error {
-			return runTransition(ctx, stdout, ap, args, "done")
+		return runWithApp(ctx, append([]string{"done"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runTransition(runCtx, stdout, ap, args, "done")
 		})
 	})
 	addGroupedPassthrough(root, "operations", "close", "Close issue(s)", func(args []string) error {
-		return runWithApp(ctx, append([]string{"close"}, args...), func(ap *app.App) error {
-			return runTransition(ctx, stdout, ap, args, "close")
+		return runWithApp(ctx, append([]string{"close"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runTransition(runCtx, stdout, ap, args, "close")
 		})
 	})
 	addGroupedPassthrough(root, "operations", "open", "Reopen issue(s)", func(args []string) error {
-		return runWithApp(ctx, append([]string{"open"}, args...), func(ap *app.App) error {
-			return runTransition(ctx, stdout, ap, args, "reopen")
+		return runWithApp(ctx, append([]string{"open"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runTransition(runCtx, stdout, ap, args, "reopen")
 		})
 	})
 	addGroupedPassthrough(root, "operations", "archive", "Archive issue(s)", func(args []string) error {
-		return runWithApp(ctx, append([]string{"archive"}, args...), func(ap *app.App) error {
-			return runTransition(ctx, stdout, ap, args, "archive")
+		return runWithApp(ctx, append([]string{"archive"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runTransition(runCtx, stdout, ap, args, "archive")
 		})
 	})
 	addGroupedPassthrough(root, "operations", "delete", "Delete issue(s)", func(args []string) error {
-		return runWithApp(ctx, append([]string{"delete"}, args...), func(ap *app.App) error {
-			return runTransition(ctx, stdout, ap, args, "delete")
+		return runWithApp(ctx, append([]string{"delete"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runTransition(runCtx, stdout, ap, args, "delete")
 		})
 	})
 	addGroupedPassthrough(root, "operations", "unarchive", "Unarchive issue(s)", func(args []string) error {
-		return runWithApp(ctx, append([]string{"unarchive"}, args...), func(ap *app.App) error {
-			return runTransition(ctx, stdout, ap, args, "unarchive")
+		return runWithApp(ctx, append([]string{"unarchive"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runTransition(runCtx, stdout, ap, args, "unarchive")
 		})
 	})
 	addGroupedPassthrough(root, "operations", "restore", "Restore deleted issue(s)", func(args []string) error {
-		return runWithApp(ctx, append([]string{"restore"}, args...), func(ap *app.App) error {
-			return runTransition(ctx, stdout, ap, args, "restore")
+		return runWithApp(ctx, append([]string{"restore"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runTransition(runCtx, stdout, ap, args, "restore")
 		})
 	})
 	addGroupedPassthrough(root, "operations", "comment", "Add issue comments", func(args []string) error {
-		return runWithApp(ctx, append([]string{"comment"}, args...), func(ap *app.App) error {
-			return runComment(ctx, stdout, ap, args)
+		return runWithApp(ctx, append([]string{"comment"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runComment(runCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "operations", "label", "Manage labels", func(args []string) error {
-		return runWithApp(ctx, append([]string{"label"}, args...), func(ap *app.App) error {
-			return runLabel(ctx, stdout, ap, args)
+		return runWithApp(ctx, append([]string{"label"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runLabel(runCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "structure", "parent", "Manage parent relationships", func(args []string) error {
-		return runWithApp(ctx, append([]string{"parent"}, args...), func(ap *app.App) error {
-			return runParent(ctx, stdout, ap, args)
+		return runWithApp(ctx, append([]string{"parent"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runParent(runCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "structure", "children", "List child issues", func(args []string) error {
-		return runWithApp(ctx, append([]string{"children"}, args...), func(ap *app.App) error {
-			return runChildren(ctx, stdout, ap, args)
+		return runWithApp(ctx, append([]string{"children"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runChildren(runCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "structure", "dep", "Manage dependency edges", func(args []string) error {
-		return runWithApp(ctx, append([]string{"dep"}, args...), func(ap *app.App) error {
-			return runDep(ctx, stdout, ap, args)
+		return runWithApp(ctx, append([]string{"dep"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runDep(runCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "data", "export", "Export workspace snapshot", func(args []string) error {
-		return runWithApp(ctx, append([]string{"export"}, args...), func(ap *app.App) error {
-			return runExport(ctx, stdout, ap, args)
+		return runWithApp(ctx, append([]string{"export"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runExport(runCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "data", "beads", "Import/export Beads databases", func(args []string) error {
-		return runWithApp(ctx, append([]string{"beads"}, args...), func(ap *app.App) error {
-			return runBeads(ctx, stdout, ap, args)
+		return runWithApp(ctx, append([]string{"beads"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runBeads(runCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "maintenance", "workspace", "Show workspace metadata", func(args []string) error {
-		return runWithApp(ctx, append([]string{"workspace"}, args...), func(ap *app.App) error {
+		return runWithApp(ctx, append([]string{"workspace"}, args...), func(runCtx context.Context, ap *app.App) error {
 			return runWorkspace(stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "maintenance", "doctor", "Health check", func(args []string) error {
-		return runWithApp(ctx, append([]string{"doctor"}, args...), func(ap *app.App) error {
-			return runDoctor(ctx, stdout, ap, args)
+		return runWithApp(ctx, append([]string{"doctor"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runDoctor(runCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "maintenance", "fsck", "Integrity check and optional repair", func(args []string) error {
-		return runWithApp(ctx, append([]string{"fsck"}, args...), func(ap *app.App) error {
-			return runFsck(ctx, stdout, ap, args)
+		return runWithApp(ctx, append([]string{"fsck"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runFsck(runCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "data", "backup", "Backup snapshot operations", func(args []string) error {
-		return runWithApp(ctx, append([]string{"backup"}, args...), func(ap *app.App) error {
-			return runBackup(ctx, stdout, ap, args)
+		return runWithApp(ctx, append([]string{"backup"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runBackup(runCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "data", "recover", "Recover from backup or sync", func(args []string) error {
-		return runWithApp(ctx, append([]string{"recover"}, args...), func(ap *app.App) error {
-			return runRecover(ctx, stdout, ap, args)
+		return runWithApp(ctx, append([]string{"recover"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runRecover(runCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "operations", "bulk", "Bulk issue operations", func(args []string) error {
-		return runWithApp(ctx, append([]string{"bulk"}, args...), func(ap *app.App) error {
-			return runBulk(ctx, stdout, ap, args)
+		return runWithApp(ctx, append([]string{"bulk"}, args...), func(runCtx context.Context, ap *app.App) error {
+			return runBulk(runCtx, stdout, ap, args)
 		})
 	})
 	return root
@@ -331,7 +334,7 @@ func runWithWorkspace(ctx context.Context, commandArgs []string, requireDoltRead
 	return run(ws)
 }
 
-func runWithApp(ctx context.Context, commandArgs []string, run func(*app.App) error) error {
+func runWithApp(ctx context.Context, commandArgs []string, run func(context.Context, *app.App) error) error {
 	_, _, err := enforceBeadsPreflight(commandArgs)
 	if err != nil {
 		return err
@@ -368,7 +371,7 @@ func runWithApp(ctx context.Context, commandArgs []string, run func(*app.App) er
 		return err
 	}
 	defer releaseMutationLock()
-	return run(ap)
+	return run(ctx, ap)
 }
 
 func enforceBeadsPreflight(commandArgs []string) (workspace.Info, bool, error) {
@@ -532,13 +535,83 @@ func removeStaleCommandLockFile(lockPath string, staleAfter time.Duration) error
 	if err != nil {
 		return err
 	}
-	if time.Since(info.ModTime()) <= staleAfter {
+	isStaleByAge := time.Since(info.ModTime()) > staleAfter
+	isStaleByOwner, err := commandLockOwnedByDeadProcess(lockPath)
+	if err != nil {
+		return err
+	}
+	if !isStaleByAge && !isStaleByOwner {
 		return nil
 	}
 	if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
+}
+
+func commandLockOwnedByDeadProcess(lockPath string) (bool, error) {
+	// [LAW:single-enforcer] Command-lock owner liveness classification is centralized here to avoid divergent stale-lock behavior.
+	pid, hasOwnerPID, err := readCommandLockOwnerPID(lockPath)
+	if err != nil {
+		return false, err
+	}
+	if !hasOwnerPID {
+		return true, nil
+	}
+	running, err := commandLockPIDRunning(pid)
+	if err != nil {
+		return false, err
+	}
+	return !running, nil
+}
+
+func readCommandLockOwnerPID(lockPath string) (int, bool, error) {
+	content, err := os.ReadFile(lockPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	pidText := strings.TrimSpace(string(content))
+	if pidText == "" {
+		return 0, false, nil
+	}
+	pid, err := strconv.Atoi(pidText)
+	if err != nil || pid <= 0 {
+		return 0, false, nil
+	}
+	return pid, true, nil
+}
+
+func isCommandLockPIDRunning(pid int) (bool, error) {
+	if pid <= 0 {
+		return false, nil
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false, nil
+	}
+	err = process.Signal(syscall.Signal(0))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrProcessDone) {
+		return false, nil
+	}
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "no such process"),
+		strings.Contains(message, "process already finished"),
+		strings.Contains(message, "already finished"):
+		return false, nil
+	case strings.Contains(message, "operation not permitted"),
+		strings.Contains(message, "permission denied"):
+		return true, nil
+	default:
+		// Unknown probe errors are treated as running to avoid removing an active lock.
+		return true, nil
+	}
 }
 
 func waitForCommandLock(ctx context.Context, delay time.Duration) error {

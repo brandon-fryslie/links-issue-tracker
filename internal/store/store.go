@@ -9,8 +9,10 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	_ "github.com/dolthub/driver"
@@ -27,6 +29,7 @@ const (
 
 var ErrTransientManifestReadOnly = errors.New("transient manifest read-only")
 var processCommitMutex sync.Mutex
+var commitLockPIDRunning = isCommitLockPIDRunning
 
 const (
 	transientManifestRetryMaxAttempts = 12
@@ -2388,13 +2391,83 @@ func removeStaleCommitLock(path string, staleAfter time.Duration) error {
 	if err != nil {
 		return err
 	}
-	if time.Since(info.ModTime()) <= staleAfter {
+	isStaleByAge := time.Since(info.ModTime()) > staleAfter
+	isStaleByOwner, err := commitLockOwnedByDeadProcess(path)
+	if err != nil {
+		return err
+	}
+	if !isStaleByAge && !isStaleByOwner {
 		return nil
 	}
 	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
+}
+
+func commitLockOwnedByDeadProcess(path string) (bool, error) {
+	// [LAW:single-enforcer] Commit-lock owner liveness classification is centralized here to keep stale-lock handling deterministic.
+	pid, hasOwnerPID, err := readCommitLockOwnerPID(path)
+	if err != nil {
+		return false, err
+	}
+	if !hasOwnerPID {
+		return true, nil
+	}
+	running, err := commitLockPIDRunning(pid)
+	if err != nil {
+		return false, err
+	}
+	return !running, nil
+}
+
+func readCommitLockOwnerPID(path string) (int, bool, error) {
+	content, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	pidText := strings.TrimSpace(string(content))
+	if pidText == "" {
+		return 0, false, nil
+	}
+	pid, err := strconv.Atoi(pidText)
+	if err != nil || pid <= 0 {
+		return 0, false, nil
+	}
+	return pid, true, nil
+}
+
+func isCommitLockPIDRunning(pid int) (bool, error) {
+	if pid <= 0 {
+		return false, nil
+	}
+	process, err := os.FindProcess(pid)
+	if err != nil {
+		return false, nil
+	}
+	err = process.Signal(syscall.Signal(0))
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrProcessDone) {
+		return false, nil
+	}
+	message := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(message, "no such process"),
+		strings.Contains(message, "process already finished"),
+		strings.Contains(message, "already finished"):
+		return false, nil
+	case strings.Contains(message, "operation not permitted"),
+		strings.Contains(message, "permission denied"):
+		return true, nil
+	default:
+		// Unknown probe errors are treated as running to avoid removing an active lock.
+		return true, nil
+	}
 }
 
 type transientManifestReadOnlyError struct {
