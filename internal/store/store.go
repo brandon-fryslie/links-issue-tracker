@@ -338,32 +338,32 @@ func (s *Store) ensureUnifiedStatusSchema(ctx context.Context) (bool, error) {
 		context string
 	}{
 		{
-			probe:   `SELECT COUNT(*) FROM issues WHERE status = 'in-progress'`,
+			probe:   `SELECT 1 FROM issues WHERE status = 'in-progress' LIMIT 1`,
 			stmt:    `UPDATE issues SET status = 'in_progress' WHERE status = 'in-progress'`,
 			context: "normalize legacy in-progress status",
 		},
 		{
-			probe:   `SELECT COUNT(*) FROM issues WHERE status = 'todo'`,
+			probe:   `SELECT 1 FROM issues WHERE status = 'todo' LIMIT 1`,
 			stmt:    `UPDATE issues SET status = 'open' WHERE status = 'todo'`,
 			context: "normalize legacy todo status",
 		},
 		{
-			probe:   `SELECT COUNT(*) FROM issues WHERE status = 'done'`,
+			probe:   `SELECT 1 FROM issues WHERE status = 'done' LIMIT 1`,
 			stmt:    `UPDATE issues SET status = 'closed' WHERE status = 'done'`,
 			context: "normalize legacy done status",
 		},
 		{
-			probe:   `SELECT COUNT(*) FROM issues WHERE status NOT IN ('open','in_progress','closed')`,
+			probe:   `SELECT 1 FROM issues WHERE status NOT IN ('open','in_progress','closed') LIMIT 1`,
 			stmt:    `UPDATE issues SET status = 'open' WHERE status NOT IN ('open','in_progress','closed')`,
 			context: "normalize invalid status",
 		},
 		{
-			probe:   `SELECT COUNT(*) FROM issues WHERE closed_at IS NOT NULL AND status <> 'closed'`,
+			probe:   `SELECT 1 FROM issues WHERE closed_at IS NOT NULL AND status <> 'closed' LIMIT 1`,
 			stmt:    `UPDATE issues SET status = 'closed' WHERE closed_at IS NOT NULL AND status <> 'closed'`,
 			context: "normalize closed_at status",
 		},
 		{
-			probe:   `SELECT COUNT(*) FROM issues WHERE status <> 'closed' AND closed_at IS NOT NULL`,
+			probe:   `SELECT 1 FROM issues WHERE status <> 'closed' AND closed_at IS NOT NULL LIMIT 1`,
 			stmt:    `UPDATE issues SET closed_at = NULL WHERE status <> 'closed'`,
 			context: "normalize non-closed closed_at",
 		},
@@ -1907,12 +1907,12 @@ func (s *Store) ensureMetaValue(ctx context.Context, key, value string) (bool, e
 }
 
 func (s *Store) execReconciliationUpdate(ctx context.Context, probe string, stmt string, contextLabel string) (bool, error) {
-	var count int
-	if err := s.db.QueryRowContext(ctx, probe).Scan(&count); err != nil {
+	var matched int
+	if err := s.db.QueryRowContext(ctx, probe).Scan(&matched); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
 		return false, fmt.Errorf("%s: probe rows: %w", contextLabel, err)
-	}
-	if count == 0 {
-		return false, nil
 	}
 	if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 		return false, fmt.Errorf("%s: %w", contextLabel, err)
