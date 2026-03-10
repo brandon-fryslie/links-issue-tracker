@@ -468,7 +468,7 @@ func enforceBeadsPreflight(commandArgs []string) (workspace.Info, bool, error) {
 	}
 	ws, resolveErr := workspace.Resolve(cwd)
 	if resolveErr == nil {
-		if err := requireBeadsMigrationPreflight(ws); err != nil {
+		if err := requireBeadsMigrationPreflight(ws, commandArgs); err != nil {
 			return workspace.Info{}, false, err
 		}
 		return ws, true, nil
@@ -1212,11 +1212,12 @@ func runWorkspace(stdout io.Writer, ap *app.App, args []string) error {
 		"storage_dir":    ap.Workspace.StorageDir,
 		"database_path":  ap.Workspace.DatabasePath,
 		"dolt_repo_path": ap.Workspace.DoltRepoPath,
+		"traces_dir":     automationTraceDir(ap.Workspace),
 	}
 	if shouldWriteJSON(stdout, *jsonOut) {
 		return writeJSON(stdout, payload)
 	}
-	for _, key := range []string{"workspace_id", "git_common_dir", "storage_dir", "database_path", "dolt_repo_path"} {
+	for _, key := range []string{"workspace_id", "git_common_dir", "storage_dir", "database_path", "dolt_repo_path", "traces_dir"} {
 		if _, err := fmt.Fprintf(stdout, "%s: %s\n", key, payload[key]); err != nil {
 			return err
 		}
@@ -1343,6 +1344,40 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 			*force,
 		)
 		output, err := doltcli.Run(ctx, ws.DoltRepoPath, commandArgs...)
+		traceMetadata := map[string]string{
+			"remote":       remoteName,
+			"branch":       requestedBranch,
+			"dolt_command": strings.Join(append([]string{"dolt"}, commandArgs...), " "),
+		}
+		traceStatus := "ok"
+		traceReason := "managed automation requested sync push"
+		if err != nil {
+			traceStatus = "error"
+			traceReason = err.Error()
+			traceMetadata["error"] = err.Error()
+		}
+		litCommandArgs := []string{"sync", "push", "--remote", remoteName}
+		if requestedBranch != "" {
+			litCommandArgs = append(litCommandArgs, "--branch", requestedBranch)
+		}
+		if *setUpstream {
+			litCommandArgs = append(litCommandArgs, "--set-upstream")
+		}
+		if *force {
+			litCommandArgs = append(litCommandArgs, "--force")
+		}
+		// [LAW:one-source-of-truth] Hook-triggered sync traces reuse the shared automation trace writer instead of shell-local trace formats.
+		traceRef, traceRecordErr := maybeRecordAutomatedCommandTrace(
+			ws,
+			formatLitCommand(litCommandArgs),
+			"mirror Dolt data to the configured git remote",
+			traceStatus,
+			traceReason,
+			traceMetadata,
+		)
+		if traceRecordErr != nil {
+			return traceRecordErr
+		}
 		if err != nil {
 			return err
 		}
@@ -1351,6 +1386,9 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 			"remote": remoteName,
 			"branch": requestedBranch,
 			"raw":    output,
+		}
+		if traceRef != nil {
+			payload["trace_ref"] = traceRef.Path
 		}
 		return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
 			p := v.(map[string]any)
@@ -1543,6 +1581,25 @@ func buildSyncPushCommandArgs(remote string, requestedBranch string, currentBran
 	}
 	refspec := fmt.Sprintf("%s:%s", sourceRef, requestedBranch)
 	return append(commandArgs, refspec)
+}
+
+type errorDetailer interface {
+	ErrorDetails() map[string]any
+}
+
+func ErrorPayload(err error) map[string]any {
+	payload := map[string]any{
+		"message":   err.Error(),
+		"exit_code": ExitCode(err),
+	}
+	var detailer errorDetailer
+	// [LAW:single-enforcer] Structured error enrichment is applied once at the CLI boundary so JSON error details cannot drift across entrypoints.
+	if errors.As(err, &detailer) {
+		for key, value := range detailer.ErrorDetails() {
+			payload[key] = value
+		}
+	}
+	return map[string]any{"error": payload}
 }
 
 type remoteSyncChanges struct {
