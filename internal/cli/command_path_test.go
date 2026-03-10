@@ -79,3 +79,34 @@ func TestRunNewCompletesWithoutDeadlock(t *testing.T) {
 		t.Fatal("Run(new --json) timed out; likely mutation lock context regression")
 	}
 }
+
+func TestRunNestedHelpAfterValidSubcommandPassesThrough(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+
+	prevWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatalf("Chdir(repo) error = %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prevWD) })
+
+	var initOut bytes.Buffer
+	if err := Run(context.Background(), &initOut, &initOut, []string{"init", "--json"}); err != nil {
+		t.Fatalf("Run(init --json) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), &stdout, &stdout, []string{"dep", "add", "--help"}); err != nil {
+		t.Fatalf("Run(dep add --help) error = %v", err)
+	}
+	output := stdout.String()
+	if !strings.Contains(output, "Usage of dep add:") {
+		t.Fatalf("help output = %q, want dep add help text", output)
+	}
+	if strings.Contains(output, "usage: lit dep <add|rm|ls> ...") {
+		t.Fatalf("help output unexpectedly returned top-level dep usage: %q", output)
+	}
+}

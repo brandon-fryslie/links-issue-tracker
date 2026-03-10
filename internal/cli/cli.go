@@ -339,11 +339,11 @@ func runWithPreflight(commandArgs []string, run func() error) error {
 
 func validateNestedCommandPath(args []string, usage string, commands ...string) error {
 	// [LAW:single-enforcer] Nested command path validation is centralized here so invalid/help paths fail before startup side effects.
-	if len(args) == 0 || containsHelpFlag(args) {
+	if len(args) == 0 {
 		return errors.New(usage)
 	}
 	subcommand := strings.TrimSpace(args[0])
-	if subcommand == "" || strings.HasPrefix(subcommand, "-") {
+	if subcommand == "" || subcommand == "--help" || subcommand == "-h" || strings.HasPrefix(subcommand, "-") {
 		return errors.New(usage)
 	}
 	for _, command := range commands {
@@ -352,16 +352,6 @@ func validateNestedCommandPath(args []string, usage string, commands ...string) 
 		}
 	}
 	return errors.New(usage)
-}
-
-func containsHelpFlag(args []string) bool {
-	for _, arg := range args {
-		trimmed := strings.TrimSpace(arg)
-		if trimmed == "--help" || trimmed == "-h" {
-			return true
-		}
-	}
-	return false
 }
 
 func validateHooksCommandPath(args []string) error {
