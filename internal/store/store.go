@@ -2375,7 +2375,11 @@ func tryAcquireFileLock(path string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	_, _ = fmt.Fprintf(file, "%d\n", os.Getpid())
+	if _, err := fmt.Fprintf(file, "%d\n", os.Getpid()); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return false, err
+	}
 	if closeErr := file.Close(); closeErr != nil {
 		_ = os.Remove(path)
 		return false, closeErr
@@ -2412,7 +2416,7 @@ func commitLockOwnedByDeadProcess(path string) (bool, error) {
 		return false, err
 	}
 	if !hasOwnerPID {
-		return true, nil
+		return false, nil
 	}
 	running, err := commitLockPIDRunning(pid)
 	if err != nil {
@@ -2452,22 +2456,14 @@ func isCommitLockPIDRunning(pid int) (bool, error) {
 	if err == nil {
 		return true, nil
 	}
-	if errors.Is(err, os.ErrProcessDone) {
+	if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
 		return false, nil
 	}
-	message := strings.ToLower(err.Error())
-	switch {
-	case strings.Contains(message, "no such process"),
-		strings.Contains(message, "process already finished"),
-		strings.Contains(message, "already finished"):
-		return false, nil
-	case strings.Contains(message, "operation not permitted"),
-		strings.Contains(message, "permission denied"):
-		return true, nil
-	default:
-		// Unknown probe errors are treated as running to avoid removing an active lock.
+	if errors.Is(err, syscall.EPERM) {
 		return true, nil
 	}
+	// Unknown probe errors are treated as running to avoid removing an active lock.
+	return true, nil
 }
 
 type transientManifestReadOnlyError struct {

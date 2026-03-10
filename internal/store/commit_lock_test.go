@@ -51,7 +51,7 @@ func TestRemoveStaleCommitLockKeepsFreshLiveOwner(t *testing.T) {
 	}
 }
 
-func TestRemoveStaleCommitLockRemovesMalformedOwner(t *testing.T) {
+func TestRemoveStaleCommitLockKeepsFreshMalformedOwner(t *testing.T) {
 	lockPath := filepath.Join(t.TempDir(), ".links-commit.lock")
 	if err := os.WriteFile(lockPath, []byte("not-a-pid\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile(lock) error = %v", err)
@@ -67,8 +67,26 @@ func TestRemoveStaleCommitLockRemovesMalformedOwner(t *testing.T) {
 	if err := removeStaleCommitLock(lockPath, 10*time.Minute); err != nil {
 		t.Fatalf("removeStaleCommitLock() error = %v", err)
 	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("fresh malformed lock should remain, stat err = %v", err)
+	}
+}
+
+func TestRemoveStaleCommitLockRemovesStaleMalformedOwner(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), ".links-commit.lock")
+	if err := os.WriteFile(lockPath, []byte("not-a-pid\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(lock) error = %v", err)
+	}
+	staleTime := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(lockPath, staleTime, staleTime); err != nil {
+		t.Fatalf("Chtimes(lock) error = %v", err)
+	}
+
+	if err := removeStaleCommitLock(lockPath, time.Minute); err != nil {
+		t.Fatalf("removeStaleCommitLock() error = %v", err)
+	}
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
-		t.Fatalf("malformed lock should be removed, stat err = %v", err)
+		t.Fatalf("stale malformed lock should be removed, stat err = %v", err)
 	}
 }
 

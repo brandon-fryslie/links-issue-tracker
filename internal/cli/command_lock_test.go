@@ -51,7 +51,7 @@ func TestRemoveStaleCommandLockFileKeepsFreshLiveOwner(t *testing.T) {
 	}
 }
 
-func TestRemoveStaleCommandLockFileRemovesMalformedOwner(t *testing.T) {
+func TestRemoveStaleCommandLockFileKeepsFreshMalformedOwner(t *testing.T) {
 	lockPath := filepath.Join(t.TempDir(), ".links-command.lock")
 	if err := os.WriteFile(lockPath, []byte("not-a-pid\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile(lock) error = %v", err)
@@ -67,8 +67,26 @@ func TestRemoveStaleCommandLockFileRemovesMalformedOwner(t *testing.T) {
 	if err := removeStaleCommandLockFile(lockPath, 10*time.Minute); err != nil {
 		t.Fatalf("removeStaleCommandLockFile() error = %v", err)
 	}
+	if _, err := os.Stat(lockPath); err != nil {
+		t.Fatalf("fresh malformed lock should remain, stat err = %v", err)
+	}
+}
+
+func TestRemoveStaleCommandLockFileRemovesStaleMalformedOwner(t *testing.T) {
+	lockPath := filepath.Join(t.TempDir(), ".links-command.lock")
+	if err := os.WriteFile(lockPath, []byte("not-a-pid\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(lock) error = %v", err)
+	}
+	staleTime := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(lockPath, staleTime, staleTime); err != nil {
+		t.Fatalf("Chtimes(lock) error = %v", err)
+	}
+
+	if err := removeStaleCommandLockFile(lockPath, time.Minute); err != nil {
+		t.Fatalf("removeStaleCommandLockFile() error = %v", err)
+	}
 	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
-		t.Fatalf("malformed lock should be removed, stat err = %v", err)
+		t.Fatalf("stale malformed lock should be removed, stat err = %v", err)
 	}
 }
 

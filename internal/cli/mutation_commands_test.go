@@ -29,17 +29,18 @@ func TestMutationCommandsDoNotDeadlock(t *testing.T) {
 
 	runWithTimeout := func(args []string, timeout time.Duration) (bytes.Buffer, error) {
 		var stdout bytes.Buffer
-		var runErr error
-		done := make(chan struct{})
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		defer cancel()
+
+		errCh := make(chan error, 1)
 		go func() {
-			runErr = Run(context.Background(), &stdout, &stdout, args)
-			close(done)
+			errCh <- Run(ctx, &stdout, &stdout, args)
 		}()
 		select {
-		case <-done:
+		case runErr := <-errCh:
 			return stdout, runErr
-		case <-time.After(timeout):
-			t.Fatalf("Run(%v) timed out after %s", args, timeout)
+		case <-ctx.Done():
+			t.Fatalf("Run(%v) timed out after %s: %v", args, timeout, ctx.Err())
 			return bytes.Buffer{}, nil
 		}
 	}
