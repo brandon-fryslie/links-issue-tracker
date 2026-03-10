@@ -1228,14 +1228,16 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		if err := parseFlagSet(fs, args[1:], stdout); err != nil {
 			return err
 		}
-		currentBranch, err := doltcli.Run(ctx, ws.DoltRepoPath, "branch", "--show-current")
+		remoteName := strings.TrimSpace(*remote)
+		requestedBranch := strings.TrimSpace(*branch)
+		currentBranch, err := resolveSyncPushCurrentBranch(ctx, ws, requestedBranch)
 		if err != nil {
 			return err
 		}
 		commandArgs := buildSyncPushCommandArgs(
-			strings.TrimSpace(*remote),
-			strings.TrimSpace(*branch),
-			strings.TrimSpace(currentBranch),
+			remoteName,
+			requestedBranch,
+			currentBranch,
 			*setUpstream,
 			*force,
 		)
@@ -1245,8 +1247,8 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		}
 		payload := map[string]any{
 			"status": "ok",
-			"remote": strings.TrimSpace(*remote),
-			"branch": strings.TrimSpace(*branch),
+			"remote": remoteName,
+			"branch": requestedBranch,
 			"raw":    output,
 		}
 		return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
@@ -1317,6 +1319,26 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 	default:
 		return errors.New("usage: lit sync <status|remote|fetch|pull|push> ...")
 	}
+}
+
+func syncPushBranchLookupArgs(requestedBranch string) []string {
+	// [LAW:dataflow-not-control-flow] Sync push always runs this stage; branch data selects no-op vs lookup inputs.
+	if strings.TrimSpace(requestedBranch) == "" {
+		return []string{}
+	}
+	return []string{"branch", "--show-current"}
+}
+
+func resolveSyncPushCurrentBranch(ctx context.Context, ws workspace.Info, requestedBranch string) (string, error) {
+	lookupArgs := syncPushBranchLookupArgs(requestedBranch)
+	if len(lookupArgs) == 0 {
+		return "", nil
+	}
+	currentBranch, err := doltcli.Run(ctx, ws.DoltRepoPath, lookupArgs...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(currentBranch), nil
 }
 
 func buildSyncPullPayload(remote string, requestedBranch string, output string, runErr error) (map[string]any, error) {

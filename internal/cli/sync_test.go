@@ -128,3 +128,19 @@ func TestBuildSyncPushCommandArgsFallsBackWhenCurrentBranchMissing(t *testing.T)
 		t.Fatalf("buildSyncPushCommandArgs() = %#v, want %#v", got, want)
 	}
 }
+
+func TestSyncPushBranchLookupArgsWithoutRequestedBranch(t *testing.T) {
+	got := syncPushBranchLookupArgs("")
+	want := []string{}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("syncPushBranchLookupArgs() = %#v, want %#v", got, want)
+	}
+}
+
+func TestSyncPushBranchLookupArgsWithRequestedBranch(t *testing.T) {
+	got := syncPushBranchLookupArgs("codex/docs-change-intake-policy")
+	want := []string{"branch", "--show-current"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("syncPushBranchLookupArgs() = %#v, want %#v", got, want)
+	}
+}
