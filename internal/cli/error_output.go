@@ -54,42 +54,41 @@ func buildCommandErrorPayload(err error) commandErrorPayload {
 func shouldEmitJSONError(args []string, stdout io.Writer) bool {
 	// [LAW:one-source-of-truth] Error-output format follows the same global output precedence resolver as normal command output.
 	_, mode, err := parseGlobalOutputMode(args, stdout)
-	if err == nil {
-		return mode == outputModeJSON
-	}
-	if hasExplicitJSONErrorRequest(args) {
+	if mode == outputModeJSON {
 		return true
+	}
+	if explicitJSON, hasExplicitJSON := explicitJSONErrorRequest(args); hasExplicitJSON {
+		return explicitJSON
+	}
+	if err == nil {
+		return false
 	}
 	return detectOutputMode(stdout) == outputModeJSON
 }
 
-func hasExplicitJSONErrorRequest(args []string) bool {
+func explicitJSONErrorRequest(args []string) (bool, bool) {
+	explicitJSON := false
+	hasExplicitJSON := false
 	for index := 0; index < len(args); index++ {
 		switch {
 		case args[index] == "--":
-			return false
+			return explicitJSON, hasExplicitJSON
 		case args[index] == "--json":
-			return true
+			explicitJSON = true
+			hasExplicitJSON = true
 		case strings.HasPrefix(args[index], "--json="):
 			jsonValue := strings.TrimSpace(strings.TrimPrefix(args[index], "--json="))
 			parsed, parseErr := strconv.ParseBool(jsonValue)
 			if parseErr != nil {
-				return true
+				explicitJSON = true
+				hasExplicitJSON = true
+				continue
 			}
-			return parsed
-		case args[index] == "--output":
-			if index+1 >= len(args) {
-				return false
-			}
-			return strings.EqualFold(strings.TrimSpace(args[index+1]), string(outputModeJSON))
-		case strings.HasPrefix(args[index], "--output="):
-			value := strings.TrimSpace(strings.TrimPrefix(args[index], "--output="))
-			return strings.EqualFold(value, string(outputModeJSON))
-		default:
-			return false
+			explicitJSON = parsed
+			hasExplicitJSON = true
 		}
 	}
-	return false
+	return explicitJSON, hasExplicitJSON
 }
 
 func commandErrorCode(exitCode int) string {

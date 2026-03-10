@@ -110,10 +110,31 @@ func TestShouldEmitJSONError(t *testing.T) {
 		}
 	})
 
+	t.Run("command-local json flag wins for startup errors", func(t *testing.T) {
+		t.Setenv(outputModeEnvVar, "text")
+		if !shouldEmitJSONError([]string{"ready", "--json"}, nonTTY) {
+			t.Fatal("expected json mode from command-local --json")
+		}
+	})
+
+	t.Run("command-local json false does not force json", func(t *testing.T) {
+		t.Setenv(outputModeEnvVar, "text")
+		if shouldEmitJSONError([]string{"ready", "--json=false"}, nonTTY) {
+			t.Fatal("expected command-local --json=false to avoid forcing json")
+		}
+	})
+
 	t.Run("parse error still honors explicit json request", func(t *testing.T) {
 		t.Setenv(outputModeEnvVar, "")
 		if !shouldEmitJSONError([]string{"--json=nope", "quickstart"}, nonTTY) {
 			t.Fatal("expected json mode fallback for invalid explicit --json value")
+		}
+	})
+
+	t.Run("command-local parse error still honors explicit json request", func(t *testing.T) {
+		t.Setenv(outputModeEnvVar, "text")
+		if !shouldEmitJSONError([]string{"ready", "--json=nope"}, nonTTY) {
+			t.Fatal("expected command-local invalid --json value to force json error output")
 		}
 	})
 }
