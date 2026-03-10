@@ -16,6 +16,15 @@ lit help
 
 Command-local `--json` remains supported for existing scripts.
 
+When output mode resolves to JSON, failures emit a stable envelope:
+
+- `error.code`: `usage|validation|not_found|conflict|corruption|generic`
+- `error.reason`: deterministic failure classifier
+- `error.remediation`: actionable next step
+- `error.trace_ref`: stable hash reference for the failure payload
+- `error.exit_code`: numeric process exit code
+- `error.message`: original error text
+
 ## Common commands
 
 ### Output mode
@@ -32,6 +41,7 @@ Command-local `--json` remains supported for existing scripts.
 ```sh
 lit new --title "..." --type task --priority 2 --json
 lit ready --json
+lit ls --query "status:open" --json
 lit ls --json
 lit show <issue-id> --json
 ```

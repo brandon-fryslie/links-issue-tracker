@@ -27,6 +27,13 @@ Output mode defaults to `auto`:
 - non-TTY sessions emit JSON
 - `--json` remains an explicit JSON shorthand for script compatibility
 - `--output auto|text|json` and `LIT_OUTPUT` control overrides
+- failure output in JSON mode uses a stable envelope:
+  - `error.code` (`usage|validation|not_found|conflict|corruption|generic`)
+  - `error.reason`
+  - `error.remediation`
+  - `error.trace_ref`
+  - `error.exit_code`
+  - `error.message`
 
 Initialize in your repo (auto-migrates Beads residue and installs defaults):
 
@@ -48,7 +55,7 @@ Create and inspect work:
 lit new --title "First task" --type task --priority 2 --json
 lit ready --json
 lit start <issue-id> --reason "claim" --json
-lit done <issue-id> --reason "implemented" --json
+lit done <issue-id> --reason "completed" --json
 lit ls --json
 lit show <issue-id> --json
 ```
