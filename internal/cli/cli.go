@@ -374,12 +374,28 @@ func parseGlobalOutputMode(args []string, stdout io.Writer) ([]string, outputMod
 	if err != nil {
 		return nil, "", err
 	}
-	remaining := make([]string, 0, len(args))
-	for index := 0; index < len(args); index++ {
-		switch args[index] {
-		case "--json":
+	index := 0
+	for index < len(args) {
+		switch {
+		case args[index] == "--":
+			index++
+			goto done
+		case args[index] == "--json":
 			mode = outputModeJSON
-		case "--output":
+			index++
+		case strings.HasPrefix(args[index], "--json="):
+			jsonValue := strings.TrimSpace(strings.TrimPrefix(args[index], "--json="))
+			parsed, parseErr := strconv.ParseBool(jsonValue)
+			if parseErr != nil {
+				return nil, "", fmt.Errorf("invalid --json value %q (expected true|false)", jsonValue)
+			}
+			if parsed {
+				mode = outputModeJSON
+			} else {
+				mode = outputModeText
+			}
+			index++
+		case args[index] == "--output":
 			if index+1 >= len(args) {
 				return nil, "", errors.New("usage: lit [--output auto|text|json] [--json] [command]")
 			}
@@ -2195,6 +2211,89 @@ type CorruptionError struct {
 }
 
 func (e CorruptionError) Error() string { return e.Message }
+
+func printUsage(w io.Writer) {
+	fmt.Fprint(w, `links / lit
+
+Worktree-native issue tracker with Dolt-backed sync.
+
+Output:
+  --output auto|json|text     Output mode for commands that support structured output.
+  --json                      Shorthand for --output json.
+  Precedence: --output > --json > LIT_OUTPUT > auto
+  Auto behavior: TTY -> text, non-TTY -> json
+
+Usage:
+  lit [--output auto|text|json] [--json] [command]
+  lit [--output auto|text|json] [--json] [command] [flags]
+
+Global Output Mode:
+  default        auto (TTY -> text, non-TTY -> json)
+  --json         Explicit shorthand for JSON output compatibility
+  --output MODE  Force output mode (auto|text|json)
+  LIT_OUTPUT     Environment default when flags are not provided
+
+Issue Workflow:
+  init           Initialize links in the current repository (auto-migrates Beads residue)
+  ready          List open work ordered by priority and recency
+  new            Create an issue
+  ls             List issues with filters/query/sort
+  show           Show issue details
+  close          Close issue(s)
+  open           Reopen issue(s)
+  archive        Archive issue(s)
+  delete         Soft-delete issue(s)
+  unarchive      Unarchive issue(s)
+  restore        Restore deleted issue(s)
+  comment        Add issue comments
+  label          Add/remove issue labels
+  bulk           Bulk issue operations (label, close, archive, import)
+
+Dependencies & Structure:
+  parent         Manage parent/child links
+  children       List child issues
+  dep            Manage dependency edges
+
+Sync & Data:
+  export         Export workspace snapshot JSON
+  sync           Mirror Dolt data through git remotes
+  backup         Create/list/restore backup snapshots
+  recover        Recover from sync file or backup
+  beads          Import/export from Beads Dolt databases
+
+Setup & Maintenance:
+  workspace      Show workspace metadata
+  hooks          Install git hook automation
+  migrate        Migrate from Beads to links
+  doctor         Health check
+  fsck           Integrity check and optional repair
+
+Guidance & Tooling:
+  quickstart     Agent quickstart workflow
+  completion     Generate shell completion script
+  help           Show this help output
+
+Command Syntax:
+  lit init [--json] [--skip-hooks] [--skip-agents]
+  lit ready [--assignee <user>] [--limit N] [--format lines|table] [--columns ...] [--json]
+  lit hooks install [--json]
+  lit migrate beads [--apply] [--json]
+  lit quickstart [--json]
+  lit completion <bash|zsh|fish>
+  lit workspace [--json]
+  lit sync remote ls [--json]
+  lit sync pull --remote <name> --branch <name> [--json]
+  lit sync push --remote <name> --branch <name> [--set-upstream] [--force] [--json]
+
+Examples:
+  lit init --json
+  lit ready --json
+  lit new --title "Fix renderer race" --type bug --priority 1 --json
+  lit ls --query "status:open type:task" --sort priority:asc,updated_at:desc --json
+
+Use "lit [command] --help" for more information about a command.
+`)
+}
 
 func splitArgs(args []string, positionalCount int) ([]string, []string) {
 	positionals := make([]string, 0, positionalCount)
