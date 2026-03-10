@@ -55,6 +55,28 @@ func TestBuildCommandErrorPayloadNotFound(t *testing.T) {
 	}
 }
 
+func TestBuildCommandErrorPayloadInvalidGlobalFlags(t *testing.T) {
+	t.Run("invalid json flag", func(t *testing.T) {
+		payload := buildCommandErrorPayload(errors.New(`invalid --json value "nope" (expected true|false)`))
+		if payload.Reason != "invalid_json_flag" {
+			t.Fatalf("reason = %q, want invalid_json_flag", payload.Reason)
+		}
+		if !strings.Contains(payload.Remediation, "--json=true") {
+			t.Fatalf("unexpected remediation: %q", payload.Remediation)
+		}
+	})
+
+	t.Run("unsupported output mode", func(t *testing.T) {
+		payload := buildCommandErrorPayload(errors.New(`unsupported output mode "nope" (expected auto|text|json)`))
+		if payload.Reason != "unsupported_output_mode" {
+			t.Fatalf("reason = %q, want unsupported_output_mode", payload.Reason)
+		}
+		if !strings.Contains(payload.Remediation, "--output json") {
+			t.Fatalf("unexpected remediation: %q", payload.Remediation)
+		}
+	})
+}
+
 func TestBuildCommandErrorPayloadTraceRefDeterministic(t *testing.T) {
 	err := errors.New("boom")
 	a := buildCommandErrorPayload(err)
@@ -98,7 +120,6 @@ func TestShouldEmitJSONError(t *testing.T) {
 
 func TestWriteCommandErrorJSON(t *testing.T) {
 	t.Setenv(outputModeEnvVar, "")
-	t.Setenv("LIT_ERROR_JSON", "0")
 
 	var stderr bytes.Buffer
 	var stdout bytes.Buffer
@@ -125,7 +146,6 @@ func TestWriteCommandErrorJSON(t *testing.T) {
 
 func TestWriteCommandErrorText(t *testing.T) {
 	t.Setenv(outputModeEnvVar, "text")
-	t.Setenv("LIT_ERROR_JSON", "0")
 
 	var stderr bytes.Buffer
 	var stdout bytes.Buffer
@@ -136,16 +156,19 @@ func TestWriteCommandErrorText(t *testing.T) {
 	}
 }
 
-func TestWriteCommandErrorEnvOverride(t *testing.T) {
-	t.Setenv(outputModeEnvVar, "text")
-	t.Setenv("LIT_ERROR_JSON", "1")
+func TestWriteCommandErrorStartupValidationJSON(t *testing.T) {
+	t.Setenv(outputModeEnvVar, "")
 
 	var stderr bytes.Buffer
 	var stdout bytes.Buffer
-	WriteCommandError(&stderr, &stdout, []string{"unknown"}, errors.New(`unknown command "unknown"`))
+	WriteCommandError(&stderr, &stdout, []string{"--output", "nope", "ready"}, errors.New(`unsupported output mode "nope" (expected auto|text|json)`))
 
 	var payload map[string]map[string]any
 	if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
-		t.Fatalf("stderr should be json with env override: %v", err)
+		t.Fatalf("stderr should be json for startup validation errors: %v", err)
+	}
+	errorPayload := payload["error"]
+	if errorPayload["reason"] != "unsupported_output_mode" {
+		t.Fatalf("reason = %v, want unsupported_output_mode", errorPayload["reason"])
 	}
 }

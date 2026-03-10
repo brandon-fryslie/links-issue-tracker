@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"strconv"
 	"strings"
 
@@ -25,7 +24,7 @@ type commandErrorPayload struct {
 
 func WriteCommandError(stderr io.Writer, stdout io.Writer, args []string, err error) int {
 	payload := buildCommandErrorPayload(err)
-	if shouldEmitJSONError(args, stdout) || strings.TrimSpace(os.Getenv("LIT_ERROR_JSON")) == "1" {
+	if shouldEmitJSONError(args, stdout) {
 		_ = json.NewEncoder(stderr).Encode(map[string]any{
 			"error": payload,
 		})
@@ -133,6 +132,10 @@ func commandErrorReason(err error) string {
 		return "unknown_command"
 	case strings.HasPrefix(message, "usage:"):
 		return "usage_error"
+	case strings.Contains(message, "invalid --json value"):
+		return "invalid_json_flag"
+	case strings.Contains(message, "unsupported output mode"):
+		return "unsupported_output_mode"
 	case strings.Contains(message, "cannot update manifest") && strings.Contains(message, "read only"):
 		return "manifest_read_only"
 	case strings.Contains(message, "requires running inside a git repository"):
@@ -150,6 +153,10 @@ func commandErrorRemediation(reason string) string {
 		return "Run `lit --help` (or `lit help <command>`) to select a supported command path."
 	case "usage_error":
 		return "Run the command with `--help` and retry with valid arguments."
+	case "invalid_json_flag":
+		return "Use `--json`, `--json=true`, or `--json=false`."
+	case "unsupported_output_mode":
+		return "Use `--output auto`, `--output text`, or `--output json`."
 	case "entity_not_found":
 		return "Verify the target ID exists with `lit ls --json` or `lit show <id> --json`."
 	case "merge_conflict":
