@@ -11,7 +11,7 @@
    - `lit start <issue-id> --reason "claim" --json`
    - `lit comment add <issue-id> --body "Starting: <plan>" --json`
 4. Sync:
-   - `lit sync pull --remote origin --json` before work
+   - `lit sync pull --json` before work
 5. Close out:
    - `lit done <issue-id> --reason "<completion summary>" --json`
    - `lit comment add <issue-id> --body "Done: <summary>" --json`

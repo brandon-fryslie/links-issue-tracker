@@ -69,9 +69,9 @@ lit show <issue-id> --json
 Push/pull DB changes through Dolt remotes mirrored from Git remotes:
 
 ```sh
-lit sync pull --remote origin --json
+lit sync pull --json
 # ...make lit changes...
-lit sync push --remote origin --json
+lit sync push --json
 ```
 
 Useful commands:

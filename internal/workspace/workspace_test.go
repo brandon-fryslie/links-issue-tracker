@@ -118,6 +118,18 @@ func TestDefaultRemoteBranchUsesRemoteHeadAdvertisement(t *testing.T) {
 	}
 }
 
+func TestUpstreamRemoteFromRef(t *testing.T) {
+	if got := upstreamRemoteFromRef("origin/main"); got != "origin" {
+		t.Fatalf("upstreamRemoteFromRef() = %q, want origin", got)
+	}
+	if got := upstreamRemoteFromRef("upstream/master"); got != "upstream" {
+		t.Fatalf("upstreamRemoteFromRef() = %q, want upstream", got)
+	}
+	if got := upstreamRemoteFromRef("main"); got != "" {
+		t.Fatalf("upstreamRemoteFromRef() = %q, want empty", got)
+	}
+}
+
 func run(t *testing.T, dir string, name string, args ...string) {
 	t.Helper()
 	cmd := exec.Command(name, args...)

@@ -32,7 +32,7 @@ This repository is configured for agent-native issue tracking with `+"`lit`"+`.
 Session bootstrap (every session / after compaction):
 1. Run `+"`lit quickstart --json`"+`.
 2. Run `+"`lit workspace --json`"+`.
-3. If remotes are configured, run `+"`lit sync pull --remote origin --json`"+` (uses the remote default branch; debug override: `+"`LINKS_DEBUG_DOLT_SYNC_BRANCH`"+`).
+3. If remotes are configured, run `+"`lit sync pull --json`"+` (uses upstream remote when configured, otherwise the single configured remote; debug override: `+"`LINKS_DEBUG_DOLT_SYNC_BRANCH`"+`).
 
 Work acquisition:
 1. Use the issue ID already assigned in context when present.

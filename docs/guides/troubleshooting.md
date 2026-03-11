@@ -13,7 +13,7 @@ Upgrade Dolt to `>= 1.81.10`.
 The hook is warn-only and never blocks push. The warning includes `trigger=git-pre-push`, the remote, and a `trace=` path under the workspace `traces_dir`. Retry manually:
 
 ```sh
-lit sync push --remote origin
+lit sync push
 ```
 
 Then check status:

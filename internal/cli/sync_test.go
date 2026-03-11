@@ -105,6 +105,34 @@ func TestPrintSyncPullPayloadSkippedText(t *testing.T) {
 	}
 }
 
+func TestPrintSyncPullPayloadNoRemoteSkippedText(t *testing.T) {
+	payload := map[string]any{
+		"status": "skipped",
+		"reason": "no_sync_remote",
+	}
+	var out bytes.Buffer
+	if err := printSyncPullPayload(&out, payload); err != nil {
+		t.Fatalf("printSyncPullPayload() error = %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "skipped sync pull: no eligible git remote" {
+		t.Fatalf("printSyncPullPayload() = %q, want no-remote message", got)
+	}
+}
+
+func TestPrintSyncPushPayloadNoRemoteSkippedText(t *testing.T) {
+	payload := map[string]any{
+		"status": "skipped",
+		"reason": "no_sync_remote",
+	}
+	var out bytes.Buffer
+	if err := printSyncPushPayload(&out, payload); err != nil {
+		t.Fatalf("printSyncPushPayload() error = %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "skipped sync push: no eligible git remote" {
+		t.Fatalf("printSyncPushPayload() = %q, want no-remote message", got)
+	}
+}
+
 func TestBuildSyncPushCommandArgsWithoutSyncBranchUsesDefaultPush(t *testing.T) {
 	got := buildSyncPushCommandArgs("origin", "", false, false)
 	want := []string{"push", "origin"}
@@ -157,6 +185,44 @@ func TestFirstNonEmptySyncBranchFollowsDeterministicPriority(t *testing.T) {
 	got = firstNonEmptySyncBranch("", "")
 	if got != "" {
 		t.Fatalf("firstNonEmptySyncBranch() = %q, want empty", got)
+	}
+}
+
+func TestResolveSyncRemoteUsesRequestedRemoteFirst(t *testing.T) {
+	remotes := []workspace.GitRemote{{Name: "origin"}, {Name: "upstream"}}
+	got := resolveSyncRemote("origin", "upstream", remotes)
+	if got != "origin" {
+		t.Fatalf("resolveSyncRemote() = %q, want origin", got)
+	}
+}
+
+func TestResolveSyncRemoteUsesUpstreamRemoteWhenPresent(t *testing.T) {
+	remotes := []workspace.GitRemote{{Name: "origin"}, {Name: "upstream"}}
+	got := resolveSyncRemote("", "upstream", remotes)
+	if got != "upstream" {
+		t.Fatalf("resolveSyncRemote() = %q, want upstream", got)
+	}
+}
+
+func TestResolveSyncRemoteUsesSingleRemoteFallback(t *testing.T) {
+	remotes := []workspace.GitRemote{{Name: "origin"}}
+	got := resolveSyncRemote("", "", remotes)
+	if got != "origin" {
+		t.Fatalf("resolveSyncRemote() = %q, want origin", got)
+	}
+}
+
+func TestResolveSyncRemoteIgnoresUnknownUpstreamRemote(t *testing.T) {
+	remotes := []workspace.GitRemote{{Name: "origin"}, {Name: "upstream"}}
+	got := resolveSyncRemote("", "missing", remotes)
+	if got != "" {
+		t.Fatalf("resolveSyncRemote() = %q, want empty", got)
+	}
+}
+
+func TestResolveSyncRemoteReturnsEmptyWhenNoEligibleRemote(t *testing.T) {
+	if got := resolveSyncRemote("", "", nil); got != "" {
+		t.Fatalf("resolveSyncRemote() = %q, want empty", got)
 	}
 }
 

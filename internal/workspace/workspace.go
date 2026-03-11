@@ -37,6 +37,11 @@ type GitRemote struct {
 	URL  string `json:"url"`
 }
 
+func UpstreamRemote(cwd string) string {
+	upstreamRef, _ := gitOutput(cwd, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}")
+	return upstreamRemoteFromRef(upstreamRef)
+}
+
 func DefaultRemoteBranch(cwd string, remote string) string {
 	remoteName := normalizeRemoteName(remote)
 	symbolicRefOutput, _ := gitOutput(cwd, "symbolic-ref", "--quiet", "--short", "refs/remotes/"+remoteName+"/HEAD")
@@ -121,6 +126,15 @@ func defaultRemoteBranchFromLSRemote(output string) string {
 		return strings.TrimSpace(branch)
 	}
 	return ""
+}
+
+func upstreamRemoteFromRef(ref string) string {
+	trimmed := strings.TrimSpace(ref)
+	parts := strings.SplitN(trimmed, "/", 2)
+	if len(parts) != 2 {
+		return ""
+	}
+	return strings.TrimSpace(parts[0])
 }
 
 func firstNonEmptyTrimmed(values ...string) string {

@@ -24,17 +24,17 @@ $(git rev-parse --git-common-dir)/links/dolt
 lit hooks install
 git remote add origin https://github.com/<org>/<repo>.git
 lit sync remote ls --json
-lit sync fetch --remote origin
-lit sync pull --remote origin --json
+lit sync fetch
+lit sync pull --json
 ```
 
 ## Daily workflow
 
 ```sh
 lit sync status
-lit sync pull --remote origin --json
+lit sync pull --json
 # ...work with lit commands...
-lit sync push --remote origin --json
+lit sync push --json
 ```
 
 ## Commands
@@ -49,6 +49,12 @@ Sync branch selection:
 
 - default: repository default branch from the configured remote
 - debug override: set `LINKS_DEBUG_DOLT_SYNC_BRANCH=<branch>`
+
+Sync remote selection for pull/push when `--remote` is omitted:
+
+- branch upstream remote (when configured)
+- otherwise, the single configured Git remote
+- if no eligible remote exists, sync pull/push return `status=skipped` and do not run Dolt sync side effects
 
 Before each `lit sync` command, `lit` reconciles Dolt remotes to exactly match `git remote -v` fetch URLs:
 
