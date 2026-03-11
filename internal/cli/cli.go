@@ -102,17 +102,24 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return operationTimeoutError(normalizedArgs, operationTimeout)
+		}
 		return err
 	case <-timeoutCtx.Done():
 		if !errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) {
 			return timeoutCtx.Err()
 		}
-		telemetryPath, telemetryErr := writeOperationTimeoutTelemetry(normalizedArgs, operationTimeout)
-		if telemetryErr != nil {
-			return fmt.Errorf("operation timed out after %s and telemetry capture failed: %w", operationTimeout, telemetryErr)
-		}
-		return fmt.Errorf("operation timed out after %s; killed execution and wrote telemetry to %s", operationTimeout, telemetryPath)
+		return operationTimeoutError(normalizedArgs, operationTimeout)
 	}
+}
+
+func operationTimeoutError(args []string, timeout time.Duration) error {
+	telemetryPath, telemetryErr := writeOperationTimeoutTelemetry(args, timeout)
+	if telemetryErr != nil {
+		return fmt.Errorf("operation timed out after %s and telemetry capture failed: %w", timeout, telemetryErr)
+	}
+	return fmt.Errorf("operation timed out after %s; killed execution and wrote telemetry to %s", timeout, telemetryPath)
 }
 
 func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *cobra.Command {
@@ -813,7 +820,7 @@ func runNew(ctx context.Context, stdout io.Writer, ap *app.App, args []string) e
 		Title: *title, Description: *description, IssueType: *issueType, Priority: *priority, Assignee: *assignee, Labels: splitCSV(*labels),
 	})
 	if err != nil {
-		return err
+		return handleQueuedMutationError(stdout, *jsonOut, err)
 	}
 	return printValue(stdout, issue, *jsonOut, printIssueSummary)
 }
@@ -1074,7 +1081,7 @@ func runUpdate(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 				CreatedBy: *by,
 			})
 			if err != nil {
-				return err
+				return handleQueuedMutationError(stdout, *jsonOut, err)
 			}
 			issue = transitioned
 		}
@@ -1108,7 +1115,7 @@ func runUpdate(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 		}
 		updated, err := ap.Store.UpdateIssue(ctx, issueID, update)
 		if err != nil {
-			return err
+			return handleQueuedMutationError(stdout, *jsonOut, err)
 		}
 		issue = updated
 	}
@@ -1150,7 +1157,7 @@ func runTransition(ctx context.Context, stdout io.Writer, ap *app.App, args []st
 		CreatedBy: *by,
 	})
 	if err != nil {
-		return err
+		return handleQueuedMutationError(stdout, *jsonOut, err)
 	}
 	return printValue(stdout, issue, *jsonOut, printIssueSummary)
 }
@@ -1171,6 +1178,22 @@ func writeQueuedMutationResponse(stdout io.Writer, jsonOut bool, mutationErr err
 	_, err := fmt.Fprintf(stdout, "queued %s %s\n", queued.OperationID, queued.Operation)
 	return true, err
 }
+
+func handleQueuedMutationError(stdout io.Writer, jsonOut bool, mutationErr error) error {
+	if mutationErr == nil {
+		return nil
+	}
+	// [LAW:single-enforcer] Queued-mutation response formatting is enforced once for all mutating CLI entrypoints.
+	wroteQueuedResponse, writeErr := writeQueuedMutationResponse(stdout, jsonOut, mutationErr)
+	if writeErr != nil {
+		return writeErr
+	}
+	if wroteQueuedResponse {
+		return nil
+	}
+	return mutationErr
+}
+
 func runComment(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
 	if len(args) == 0 || args[0] != "add" {
 		return errors.New("usage: lit comment add <id> --body <text>")
@@ -1192,7 +1215,7 @@ func runComment(ctx context.Context, stdout io.Writer, ap *app.App, args []strin
 	}
 	comment, err := ap.Store.AddComment(ctx, store.AddCommentInput{IssueID: positional[0], Body: *body, CreatedBy: *by})
 	if err != nil {
-		return err
+		return handleQueuedMutationError(stdout, *jsonOut, err)
 	}
 	return printValue(stdout, comment, *jsonOut, func(w io.Writer, v any) error {
 		c := v.(model.Comment)
@@ -1224,7 +1247,7 @@ func runDep(ctx context.Context, stdout io.Writer, ap *app.App, args []string) e
 		}
 		rel, err := ap.Store.AddRelation(ctx, store.AddRelationInput{SrcID: positional[0], DstID: positional[1], Type: *relType, CreatedBy: *by})
 		if err != nil {
-			return err
+			return handleQueuedMutationError(stdout, *jsonOut, err)
 		}
 		return printValue(stdout, rel, *jsonOut, func(w io.Writer, v any) error {
 			r := v.(model.Relation)
@@ -1247,7 +1270,7 @@ func runDep(ctx context.Context, stdout io.Writer, ap *app.App, args []string) e
 			return errors.New("usage: lit dep rm <src-id> <dst-id> [--type ...]")
 		}
 		if err := ap.Store.RemoveRelation(ctx, positional[0], positional[1], *relType); err != nil {
-			return err
+			return handleQueuedMutationError(stdout, *jsonOut, err)
 		}
 		return printValue(stdout, map[string]string{"status": "ok"}, *jsonOut, func(w io.Writer, _ any) error {
 			_, err := fmt.Fprintln(w, "ok")
@@ -1308,7 +1331,7 @@ func runLabel(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 		}
 		labels, err := ap.Store.AddLabel(ctx, store.AddLabelInput{IssueID: positional[0], Name: positional[1], CreatedBy: *by})
 		if err != nil {
-			return err
+			return handleQueuedMutationError(stdout, *jsonOut, err)
 		}
 		return printValue(stdout, labels, *jsonOut, printLabels)
 	case "rm":
@@ -1327,7 +1350,7 @@ func runLabel(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 		}
 		labels, err := ap.Store.RemoveLabel(ctx, positional[0], positional[1])
 		if err != nil {
-			return err
+			return handleQueuedMutationError(stdout, *jsonOut, err)
 		}
 		return printValue(stdout, labels, *jsonOut, printLabels)
 	default:
@@ -1358,7 +1381,7 @@ func runParent(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 			CreatedBy: *by,
 		})
 		if err != nil {
-			return err
+			return handleQueuedMutationError(stdout, *jsonOut, err)
 		}
 		return printValue(stdout, rel, *jsonOut, func(w io.Writer, v any) error {
 			relation := v.(model.Relation)
@@ -1377,7 +1400,7 @@ func runParent(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 			return errors.New("usage: lit parent clear <child-id> [--json]")
 		}
 		if err := ap.Store.ClearParent(ctx, positional[0]); err != nil {
-			return err
+			return handleQueuedMutationError(stdout, *jsonOut, err)
 		}
 		return printValue(stdout, map[string]string{"status": "ok"}, *jsonOut, func(w io.Writer, _ any) error {
 			_, err := fmt.Fprintln(w, "ok")
@@ -2239,7 +2262,7 @@ func runFsck(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	}
 	report, err := ap.Store.Fsck(ctx, *repair)
 	if err != nil {
-		return err
+		return handleQueuedMutationError(stdout, *jsonOut, err)
 	}
 	if shouldWriteJSON(stdout, *jsonOut) {
 		if err := writeJSON(stdout, report); err != nil {

@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	defaultOperationTimeout = 45 * time.Second
+	defaultOperationTimeout = 5 * time.Second
 	operationTimeoutEnvVar  = "LIT_OPERATION_TIMEOUT"
 )
 

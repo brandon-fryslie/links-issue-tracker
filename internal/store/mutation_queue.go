@@ -25,6 +25,8 @@ const (
 	// [LAW:no-mode-explosion] Queue apply timeout is a single bounded policy for all queue-driven mutation attempts.
 	mutationQueueApplyTimeout = 300 * time.Millisecond
 	mutationQueueLockStaleAge = 30 * time.Second
+	// [LAW:no-mode-explosion] Queue compaction uses one canonical threshold instead of command-specific knobs.
+	mutationQueueCompactionThresholdBytes = 1 << 20
 )
 
 const (
@@ -119,6 +121,7 @@ func (s *Store) syncQueueBeforeRead(ctx context.Context) error {
 			"event": "queue_read_apply_error",
 			"error": err.Error(),
 		})
+		return err
 	}
 	return nil
 }
@@ -249,14 +252,16 @@ func removeStaleMutationQueueLock(lockPath string, staleAfter time.Duration) err
 	if err != nil {
 		return fmt.Errorf("stat mutation queue lock: %w", err)
 	}
-	if time.Since(info.ModTime()) <= staleAfter {
-		running, knownOwner, runErr := mutationQueueLockOwnerRunning(lockPath)
-		if runErr != nil {
-			return runErr
-		}
-		if !knownOwner || running {
-			return nil
-		}
+	running, knownOwner, runErr := mutationQueueLockOwnerRunning(lockPath)
+	if runErr != nil {
+		return runErr
+	}
+	// [LAW:single-enforcer] Liveness ownership is the single authority for lock-file deletion decisions.
+	if knownOwner && running {
+		return nil
+	}
+	if !knownOwner && time.Since(info.ModTime()) <= staleAfter {
+		return nil
 	}
 	if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("remove stale mutation queue lock: %w", err)
@@ -364,16 +369,21 @@ func (s *Store) applyMutationQueueLocked(ctx context.Context) error {
 		value, applyErr := s.applyMutationQueueEntry(ctx, entry)
 		s.storeMutationQueueResult(entry.ID, mutationQueueResult{value: value, err: applyErr})
 		if applyErr != nil {
+			retryable := shouldRetryQueuedMutationError(applyErr)
 			_ = s.writeMutationQueueTelemetry(map[string]any{
 				"event":      "queue_entry_apply_error",
 				"entry_id":   entry.ID,
 				"operation":  entry.Operation,
 				"error":      applyErr.Error(),
+				"retryable":  retryable,
 				"queue_path": s.queuePath,
 			})
+			if retryable {
+				return fmt.Errorf("apply queued mutation entry %s (%s): %w", entry.ID, entry.Operation, applyErr)
+			}
 			currentOffset = nextOffset
-			if offsetErr := s.writeMutationQueueOffset(currentOffset); offsetErr != nil {
-				return offsetErr
+			if err := s.writeMutationQueueOffset(currentOffset); err != nil {
+				return err
 			}
 			continue
 		}
@@ -384,6 +394,67 @@ func (s *Store) applyMutationQueueLocked(ctx context.Context) error {
 		}
 	}
 
+	if err := s.compactMutationQueueIfNeeded(currentOffset); err != nil {
+		return err
+	}
+	return nil
+}
+
+func shouldRetryQueuedMutationError(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	if errors.Is(err, ErrTransientManifestReadOnly) {
+		return true
+	}
+	var transientErr transientManifestReadOnlyError
+	if errors.As(err, &transientErr) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "acquire commit lock: lock not acquired")
+}
+
+func (s *Store) compactMutationQueueIfNeeded(offset int64) error {
+	if offset < mutationQueueCompactionThresholdBytes {
+		return nil
+	}
+	info, err := os.Stat(s.queuePath)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("stat mutation queue for compaction: %w", err)
+	}
+	// [LAW:one-source-of-truth] Queue file size and consumed offset are the canonical compaction inputs.
+	if info.Size() != offset {
+		return nil
+	}
+	file, err := os.OpenFile(s.queuePath, os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open mutation queue for compaction: %w", err)
+	}
+	defer file.Close()
+	verifiedInfo, err := file.Stat()
+	if err != nil {
+		return fmt.Errorf("stat open mutation queue for compaction: %w", err)
+	}
+	if verifiedInfo.Size() != offset {
+		return nil
+	}
+	if err := file.Truncate(0); err != nil {
+		return fmt.Errorf("truncate mutation queue during compaction: %w", err)
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("seek mutation queue after compaction: %w", err)
+	}
+	if err := s.writeMutationQueueOffset(0); err != nil {
+		return err
+	}
+	_ = s.writeMutationQueueTelemetry(map[string]any{
+		"event":            "queue_compacted",
+		"compacted_bytes":  offset,
+		"new_queue_offset": 0,
+	})
 	return nil
 }
 
