@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -249,7 +250,7 @@ func removeStaleMutationQueueLock(lockPath string, staleAfter time.Duration) err
 		return fmt.Errorf("stat mutation queue lock: %w", err)
 	}
 	if time.Since(info.ModTime()) <= staleAfter {
-		running, knownOwner, runErr := commitLockOwnerRunning(lockPath)
+		running, knownOwner, runErr := mutationQueueLockOwnerRunning(lockPath)
 		if runErr != nil {
 			return runErr
 		}
@@ -261,6 +262,36 @@ func removeStaleMutationQueueLock(lockPath string, staleAfter time.Duration) err
 		return fmt.Errorf("remove stale mutation queue lock: %w", err)
 	}
 	return nil
+}
+
+func mutationQueueLockOwnerRunning(path string) (running bool, knownOwner bool, err error) {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return false, false, nil
+	}
+	if err != nil {
+		return false, false, err
+	}
+	pidValue := strings.TrimSpace(string(raw))
+	if pidValue == "" {
+		return false, false, nil
+	}
+	pid, err := strconv.Atoi(pidValue)
+	if err != nil || pid <= 0 {
+		return false, false, nil
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return false, true, nil
+	}
+	signalErr := proc.Signal(syscall.Signal(0))
+	if signalErr == nil || errors.Is(signalErr, syscall.EPERM) {
+		return true, true, nil
+	}
+	if errors.Is(signalErr, os.ErrProcessDone) || errors.Is(signalErr, syscall.ESRCH) {
+		return false, true, nil
+	}
+	return false, true, signalErr
 }
 
 func (s *Store) applyMutationQueueLocked(ctx context.Context) error {
