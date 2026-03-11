@@ -45,12 +45,13 @@ func UpstreamRemote(cwd string) string {
 func DefaultRemoteBranch(cwd string, remote string) string {
 	remoteName := normalizeRemoteName(remote)
 	symbolicRefOutput, _ := gitOutput(cwd, "symbolic-ref", "--quiet", "--short", "refs/remotes/"+remoteName+"/HEAD")
+	symbolicBranch := strings.TrimSpace(defaultRemoteBranchFromSymbolicRef(remoteName, symbolicRefOutput))
+	if symbolicBranch != "" {
+		return symbolicBranch
+	}
 	lsRemoteOutput, _ := gitOutput(cwd, "ls-remote", "--symref", remoteName, "HEAD")
 	// [LAW:one-source-of-truth] Branch resolution follows one deterministic candidate chain: local remote HEAD, then remote HEAD advertisement.
-	return firstNonEmptyTrimmed(
-		defaultRemoteBranchFromSymbolicRef(remoteName, symbolicRefOutput),
-		defaultRemoteBranchFromLSRemote(lsRemoteOutput),
-	)
+	return strings.TrimSpace(defaultRemoteBranchFromLSRemote(lsRemoteOutput))
 }
 
 func Resolve(cwd string) (Info, error) {
