@@ -71,7 +71,7 @@ Push/pull DB changes through Dolt remotes mirrored from Git remotes:
 ```sh
 lit sync pull --remote origin --json
 # ...make lit changes...
-lit sync push --remote origin --branch main
+lit sync push --remote origin --json
 ```
 
 Useful commands:

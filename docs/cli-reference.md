@@ -72,8 +72,12 @@ lit migrate beads --apply --json
 lit hooks install
 lit sync status --json
 lit sync pull --remote origin --json
-lit sync push --remote origin --branch main
+lit sync push --remote origin --json
 ```
+
+Debug override:
+
+- `LINKS_DEBUG_DOLT_SYNC_BRANCH=<branch>` forces `lit sync pull` and `lit sync push` to target that branch.
 
 ### Health and recovery
 

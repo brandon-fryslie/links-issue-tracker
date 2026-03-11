@@ -37,6 +37,7 @@ import (
 var missingRemoteBranchPattern = regexp.MustCompile(`branch "([^"]+)" not found on remote`)
 
 const outputModeEnvVar = "LIT_OUTPUT"
+const debugSyncBranchEnvVar = "LINKS_DEBUG_DOLT_SYNC_BRANCH"
 
 const (
 	commandLockRetryDelay = 50 * time.Millisecond
@@ -1378,13 +1379,12 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		fs := flag.NewFlagSet("sync pull", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		remote := fs.String("remote", "origin", "Remote name")
-		branch := fs.String("branch", "", "Branch name (defaults to current, then remote default)")
 		jsonOut := fs.Bool("json", false, "Output JSON")
 		if err := parseFlagSet(fs, args[1:], stdout); err != nil {
 			return err
 		}
 		remoteName := strings.TrimSpace(*remote)
-		resolvedBranch, err := resolveSyncPullBranch(ctx, ws, remoteName, strings.TrimSpace(*branch))
+		resolvedBranch, err := resolveSyncBranch(ws.RootDir, remoteName)
 		if err != nil {
 			return err
 		}
@@ -1399,7 +1399,6 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		fs := flag.NewFlagSet("sync push", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		remote := fs.String("remote", "origin", "Remote name")
-		branch := fs.String("branch", "", "Branch name (defaults to current)")
 		setUpstream := fs.Bool("set-upstream", false, "Pass -u to dolt push")
 		force := fs.Bool("force", false, "Pass --force to dolt push")
 		jsonOut := fs.Bool("json", false, "Output JSON")
@@ -1407,22 +1406,20 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 			return err
 		}
 		remoteName := strings.TrimSpace(*remote)
-		requestedBranch := strings.TrimSpace(*branch)
-		currentBranch, err := resolveSyncPushCurrentBranch(ctx, ws, requestedBranch)
+		syncBranch, err := resolveSyncBranch(ws.RootDir, remoteName)
 		if err != nil {
 			return err
 		}
 		commandArgs := buildSyncPushCommandArgs(
 			remoteName,
-			requestedBranch,
-			currentBranch,
+			syncBranch,
 			*setUpstream,
 			*force,
 		)
 		output, err := doltcli.Run(ctx, ws.DoltRepoPath, commandArgs...)
 		traceMetadata := map[string]string{
 			"remote":       remoteName,
-			"branch":       requestedBranch,
+			"sync_branch":  syncBranch,
 			"dolt_command": strings.Join(append([]string{"dolt"}, commandArgs...), " "),
 		}
 		traceStatus := "ok"
@@ -1433,9 +1430,6 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 			traceMetadata["error"] = err.Error()
 		}
 		litCommandArgs := []string{"sync", "push", "--remote", remoteName}
-		if requestedBranch != "" {
-			litCommandArgs = append(litCommandArgs, "--branch", requestedBranch)
-		}
 		if *setUpstream {
 			litCommandArgs = append(litCommandArgs, "--set-upstream")
 		}
@@ -1457,7 +1451,7 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		payload := map[string]any{
 			"status": "ok",
 			"remote": remoteName,
-			"branch": requestedBranch,
+			"branch": syncBranch,
 			"raw":    output,
 		}
 		if traceRef != nil {
@@ -1536,14 +1530,6 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 	}
 }
 
-func syncPushBranchLookupArgs(requestedBranch string) []string {
-	// [LAW:dataflow-not-control-flow] Sync push always runs this stage; branch data selects no-op vs lookup inputs.
-	if strings.TrimSpace(requestedBranch) == "" {
-		return []string{}
-	}
-	return []string{"branch", "--show-current"}
-}
-
 func buildSyncPullCommandArgs(remote string, branch string) []string {
 	commandArgs := []string{"pull", remote}
 	normalizedBranch := strings.TrimSpace(branch)
@@ -1551,36 +1537,6 @@ func buildSyncPullCommandArgs(remote string, branch string) []string {
 		return commandArgs
 	}
 	return append(commandArgs, normalizedBranch)
-}
-
-func syncPullBranchLookupArgs(requestedBranch string) []string {
-	// [LAW:dataflow-not-control-flow] Sync pull always runs branch resolution; inputs choose passthrough vs lookup behavior.
-	if strings.TrimSpace(requestedBranch) != "" {
-		return []string{}
-	}
-	return []string{"branch", "--show-current"}
-}
-
-func resolveSyncPullBranch(ctx context.Context, ws workspace.Info, remote string, requestedBranch string) (string, error) {
-	lookupArgs := syncPullBranchLookupArgs(requestedBranch)
-	currentBranch := ""
-	if len(lookupArgs) > 0 {
-		output, err := doltcli.Run(ctx, ws.DoltRepoPath, lookupArgs...)
-		if err != nil {
-			return "", err
-		}
-		currentBranch = strings.TrimSpace(output)
-	}
-	defaultBranch := resolveSyncPullDefaultBranch(ws.RootDir, remote, requestedBranch, currentBranch)
-	// [LAW:one-source-of-truth] Pull branch selection is computed once from ordered candidates and reused by command execution and payload rendering.
-	return firstNonEmptySyncBranch(requestedBranch, currentBranch, defaultBranch), nil
-}
-
-func resolveSyncPullDefaultBranch(rootDir string, remote string, requestedBranch string, currentBranch string) string {
-	if strings.TrimSpace(requestedBranch) != "" || strings.TrimSpace(currentBranch) != "" {
-		return ""
-	}
-	return strings.TrimSpace(workspace.DefaultRemoteBranch(rootDir, remote))
 }
 
 func firstNonEmptySyncBranch(candidates ...string) string {
@@ -1593,16 +1549,19 @@ func firstNonEmptySyncBranch(candidates ...string) string {
 	return ""
 }
 
-func resolveSyncPushCurrentBranch(ctx context.Context, ws workspace.Info, requestedBranch string) (string, error) {
-	lookupArgs := syncPushBranchLookupArgs(requestedBranch)
-	if len(lookupArgs) == 0 {
-		return "", nil
+func resolveSyncBranch(rootDir string, remote string) (string, error) {
+	debugOverride := strings.TrimSpace(os.Getenv(debugSyncBranchEnvVar))
+	defaultBranch := strings.TrimSpace(workspace.DefaultRemoteBranch(rootDir, remote))
+	// [LAW:single-enforcer] Sync branch selection is centralized so pull/push/hooks consume one canonical branch decision.
+	resolvedBranch := firstNonEmptySyncBranch(debugOverride, defaultBranch)
+	if resolvedBranch == "" {
+		return "", fmt.Errorf(
+			"resolve sync branch for remote %q: default branch unavailable; configure %s to override",
+			strings.TrimSpace(remote),
+			debugSyncBranchEnvVar,
+		)
 	}
-	currentBranch, err := doltcli.Run(ctx, ws.DoltRepoPath, lookupArgs...)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(currentBranch), nil
+	return resolvedBranch, nil
 }
 
 func buildSyncPullPayload(remote string, requestedBranch string, output string, runErr error) (map[string]any, error) {
@@ -1619,8 +1578,8 @@ func buildSyncPullPayload(remote string, requestedBranch string, output string, 
 	if !matchesMissingBranch {
 		return nil, runErr
 	}
-	nextCommand := fmt.Sprintf("lit sync push --remote %s --branch %s --set-upstream", remote, missingBranch)
-	retryCommand := fmt.Sprintf("lit sync pull --remote %s --branch %s", remote, missingBranch)
+	nextCommand := fmt.Sprintf("lit sync push --remote %s --set-upstream", remote)
+	retryCommand := fmt.Sprintf("lit sync pull --remote %s", remote)
 	// [LAW:dataflow-not-control-flow] Sync pull always returns structured payload; outcome variance lives in status/reason fields.
 	return map[string]any{
 		"status":        "skipped",
@@ -1686,8 +1645,8 @@ func printSyncPullPayload(w io.Writer, v any) error {
 	}
 }
 
-func buildSyncPushCommandArgs(remote string, requestedBranch string, currentBranch string, setUpstream bool, force bool) []string {
-	// [LAW:one-source-of-truth] Push source always comes from the current Dolt branch; requested branch is a remote projection target.
+func buildSyncPushCommandArgs(remote string, syncBranch string, setUpstream bool, force bool) []string {
+	// [LAW:one-source-of-truth] Sync pushes always target one canonical remote branch instead of caller-selected branch variants.
 	commandArgs := []string{"push"}
 	if setUpstream {
 		commandArgs = append(commandArgs, "-u")
@@ -1696,15 +1655,11 @@ func buildSyncPushCommandArgs(remote string, requestedBranch string, currentBran
 		commandArgs = append(commandArgs, "--force")
 	}
 	commandArgs = append(commandArgs, remote)
-	if requestedBranch == "" {
+	normalizedSyncBranch := strings.TrimSpace(syncBranch)
+	if normalizedSyncBranch == "" {
 		return commandArgs
 	}
-	sourceRef := strings.TrimSpace(currentBranch)
-	if sourceRef == "" {
-		// [LAW:dataflow-not-control-flow] Empty branch-name output maps to a deterministic source ref (`HEAD`) instead of changing push stage behavior.
-		sourceRef = "HEAD"
-	}
-	refspec := fmt.Sprintf("%s:%s", sourceRef, requestedBranch)
+	refspec := fmt.Sprintf("HEAD:%s", normalizedSyncBranch)
 	return append(commandArgs, refspec)
 }
 
@@ -2216,7 +2171,7 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"git remote add origin https://github.com/org/repo.git",
 			"lit sync remote ls --json",
 			"lit sync pull --remote origin --json",
-			"lit sync push --remote origin --branch main --json",
+			"lit sync push --remote origin --json",
 		},
 		"exit_codes": map[string]int{
 			"ok":         ExitOK,
@@ -2259,7 +2214,7 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"   `lit sync remote ls --json`",
 			"   `lit sync fetch --remote origin --json`",
 			"   `lit sync pull --remote origin --json`",
-			"   `lit sync push --remote origin --branch main --json`",
+			"   `lit sync push --remote origin --json`",
 			"   If sync warning appears, agent should auto-retry silently before escalating.",
 			"",
 			"6) Integrity and recovery",
@@ -2649,6 +2604,10 @@ Global Output Mode:
   --output MODE  Force output mode (auto|text|json)
   LIT_OUTPUT     Environment default when flags are not provided
 
+Sync Branch:
+  default        remote default branch (resolved from git remote HEAD)
+  debug override LINKS_DEBUG_DOLT_SYNC_BRANCH
+
 Issue Workflow:
   init           Initialize links in the current repository (auto-migrates Beads residue)
   ready          List open work ordered by priority and recency
@@ -2702,8 +2661,8 @@ Command Syntax:
   lit completion <bash|zsh|fish>
   lit workspace [--json]
   lit sync remote ls [--json]
-  lit sync pull --remote <name> [--branch <name>] [--json]
-  lit sync push --remote <name> --branch <name> [--set-upstream] [--force] [--json]
+  lit sync pull --remote <name> [--json]
+  lit sync push --remote <name> [--set-upstream] [--force] [--json]
 
 Examples:
   lit init --json

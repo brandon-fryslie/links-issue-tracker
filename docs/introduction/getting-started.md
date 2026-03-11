@@ -39,7 +39,7 @@ lit sync remote ls --json
 ```sh
 lit sync pull --remote origin --json
 # ...make lit changes...
-lit sync push --remote origin --branch main
+lit sync push --remote origin --json
 ```
 
 ## 6. Health check

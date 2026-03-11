@@ -65,7 +65,7 @@ func TestBuildSyncPullPayloadReturnsSkippedForMissingRemoteBranch(t *testing.T) 
 		t.Fatalf("branch = %v, want feature/local-only", payload["branch"])
 	}
 	nextCommand := payload["next_command"].(string)
-	if !strings.Contains(nextCommand, "lit sync push --remote origin --branch feature/local-only --set-upstream") {
+	if !strings.Contains(nextCommand, "lit sync push --remote origin --set-upstream") {
 		t.Fatalf("next_command missing deterministic remediation: %q", nextCommand)
 	}
 }
@@ -86,8 +86,8 @@ func TestPrintSyncPullPayloadSkippedText(t *testing.T) {
 		"status":        "skipped",
 		"remote":        "origin",
 		"branch":        "feature/local-only",
-		"next_command":  "lit sync push --remote origin --branch feature/local-only --set-upstream",
-		"retry_command": "lit sync pull --remote origin --branch feature/local-only",
+		"next_command":  "lit sync push --remote origin --set-upstream",
+		"retry_command": "lit sync pull --remote origin",
 	}
 	var out bytes.Buffer
 	if err := printSyncPullPayload(&out, payload); err != nil {
@@ -97,43 +97,35 @@ func TestPrintSyncPullPayloadSkippedText(t *testing.T) {
 	if !strings.Contains(text, "skipped pull origin/feature/local-only: remote branch missing") {
 		t.Fatalf("unexpected skipped text: %q", text)
 	}
-	if !strings.Contains(text, "lit sync push --remote origin --branch feature/local-only --set-upstream") {
+	if !strings.Contains(text, "lit sync push --remote origin --set-upstream") {
 		t.Fatalf("missing next command in text: %q", text)
 	}
-	if !strings.Contains(text, "lit sync pull --remote origin --branch feature/local-only") {
+	if !strings.Contains(text, "lit sync pull --remote origin") {
 		t.Fatalf("missing retry command in text: %q", text)
 	}
 }
 
-func TestBuildSyncPushCommandArgsWithoutBranchUsesDefaultPush(t *testing.T) {
-	got := buildSyncPushCommandArgs("origin", "", "main", false, false)
+func TestBuildSyncPushCommandArgsWithoutSyncBranchUsesDefaultPush(t *testing.T) {
+	got := buildSyncPushCommandArgs("origin", "", false, false)
 	want := []string{"push", "origin"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("buildSyncPushCommandArgs() = %#v, want %#v", got, want)
 	}
 }
 
-func TestBuildSyncPushCommandArgsBuildsCurrentToRequestedRefspec(t *testing.T) {
-	got := buildSyncPushCommandArgs("origin", "codex/docs-change-intake-policy", "main", true, false)
-	want := []string{"push", "-u", "origin", "main:codex/docs-change-intake-policy"}
+func TestBuildSyncPushCommandArgsBuildsHeadToSyncBranchRefspec(t *testing.T) {
+	got := buildSyncPushCommandArgs("origin", "main", true, false)
+	want := []string{"push", "-u", "origin", "HEAD:main"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("buildSyncPushCommandArgs() = %#v, want %#v", got, want)
 	}
 }
 
-func TestBuildSyncPushCommandArgsUsesHeadWhenCurrentBranchMissing(t *testing.T) {
-	got := buildSyncPushCommandArgs("origin", "feature/local-only", "", false, true)
+func TestBuildSyncPushCommandArgsForceUsesSyncBranchRefspec(t *testing.T) {
+	got := buildSyncPushCommandArgs("origin", "feature/local-only", false, true)
 	want := []string{"push", "--force", "origin", "HEAD:feature/local-only"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("buildSyncPushCommandArgs() = %#v, want %#v", got, want)
-	}
-}
-
-func TestSyncPushBranchLookupArgsWithoutRequestedBranch(t *testing.T) {
-	got := syncPushBranchLookupArgs("")
-	want := []string{}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("syncPushBranchLookupArgs() = %#v, want %#v", got, want)
 	}
 }
 
@@ -153,55 +145,39 @@ func TestBuildSyncPullCommandArgsWithBranchUsesExplicitBranch(t *testing.T) {
 	}
 }
 
-func TestSyncPullBranchLookupArgsWithoutRequestedBranch(t *testing.T) {
-	got := syncPullBranchLookupArgs("")
-	want := []string{"branch", "--show-current"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("syncPullBranchLookupArgs() = %#v, want %#v", got, want)
-	}
-}
-
-func TestSyncPullBranchLookupArgsWithRequestedBranch(t *testing.T) {
-	got := syncPullBranchLookupArgs("release")
-	want := []string{}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("syncPullBranchLookupArgs() = %#v, want %#v", got, want)
-	}
-}
-
-func TestResolveSyncPullDefaultBranchSkipsRemoteLookupWhenRequestedBranchSet(t *testing.T) {
-	got := resolveSyncPullDefaultBranch("", "origin", "main", "")
-	if got != "" {
-		t.Fatalf("resolveSyncPullDefaultBranch() = %q, want empty", got)
-	}
-}
-
-func TestResolveSyncPullDefaultBranchSkipsRemoteLookupWhenCurrentBranchSet(t *testing.T) {
-	got := resolveSyncPullDefaultBranch("", "origin", "", "feature/test")
-	if got != "" {
-		t.Fatalf("resolveSyncPullDefaultBranch() = %q, want empty", got)
-	}
-}
-
 func TestFirstNonEmptySyncBranchFollowsDeterministicPriority(t *testing.T) {
-	got := firstNonEmptySyncBranch("requested", "current", "default")
-	if got != "requested" {
-		t.Fatalf("firstNonEmptySyncBranch() = %q, want requested", got)
+	got := firstNonEmptySyncBranch("debug", "default")
+	if got != "debug" {
+		t.Fatalf("firstNonEmptySyncBranch() = %q, want debug", got)
 	}
-	got = firstNonEmptySyncBranch("", "current", "default")
-	if got != "current" {
-		t.Fatalf("firstNonEmptySyncBranch() = %q, want current", got)
-	}
-	got = firstNonEmptySyncBranch("", "", "default")
+	got = firstNonEmptySyncBranch("", "default")
 	if got != "default" {
 		t.Fatalf("firstNonEmptySyncBranch() = %q, want default", got)
 	}
+	got = firstNonEmptySyncBranch("", "")
+	if got != "" {
+		t.Fatalf("firstNonEmptySyncBranch() = %q, want empty", got)
+	}
 }
 
-func TestSyncPushBranchLookupArgsWithRequestedBranch(t *testing.T) {
-	got := syncPushBranchLookupArgs("codex/docs-change-intake-policy")
-	want := []string{"branch", "--show-current"}
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("syncPushBranchLookupArgs() = %#v, want %#v", got, want)
+func TestResolveSyncBranchUsesDebugOverrideWhenPresent(t *testing.T) {
+	t.Setenv(debugSyncBranchEnvVar, "debug-branch")
+	got, err := resolveSyncBranch(t.TempDir(), "origin")
+	if err != nil {
+		t.Fatalf("resolveSyncBranch() error = %v", err)
+	}
+	if got != "debug-branch" {
+		t.Fatalf("resolveSyncBranch() = %q, want debug-branch", got)
+	}
+}
+
+func TestResolveSyncBranchErrorsWhenDefaultBranchUnavailable(t *testing.T) {
+	t.Setenv(debugSyncBranchEnvVar, "")
+	_, err := resolveSyncBranch(t.TempDir(), "origin")
+	if err == nil {
+		t.Fatal("expected error when default branch is unavailable")
+	}
+	if !strings.Contains(err.Error(), debugSyncBranchEnvVar) {
+		t.Fatalf("error = %q, want mention of %s", err.Error(), debugSyncBranchEnvVar)
 	}
 }
