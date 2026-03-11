@@ -108,3 +108,26 @@ func TestRunUpdateRejectsReasonWithoutStatus(t *testing.T) {
 		t.Fatalf("runUpdate error = %q, want %q", err.Error(), "--reason requires --status")
 	}
 }
+
+func TestRunUpdateRejectsEmptyStatusValue(t *testing.T) {
+	ctx := context.Background()
+	ap := newTestCLIApp(t)
+
+	created, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
+		Title:     "Empty status",
+		IssueType: "task",
+		Priority:  2,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue() error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err = runUpdate(ctx, &stdout, ap, []string{created.ID, "--status=", "--json"})
+	if err == nil {
+		t.Fatal("runUpdate(--status= --json) error = nil, want validation error")
+	}
+	if err.Error() != "--status requires a non-empty value" {
+		t.Fatalf("runUpdate error = %q, want %q", err.Error(), "--status requires a non-empty value")
+	}
+}

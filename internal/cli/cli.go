@@ -1007,6 +1007,9 @@ func runUpdate(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 		if err != nil {
 			return err
 		}
+		if targetStatus == "" {
+			return errors.New("--status requires a non-empty value")
+		}
 		current, err := ap.Store.GetIssue(ctx, issueID)
 		if err != nil {
 			return err
