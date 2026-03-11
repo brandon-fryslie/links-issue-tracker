@@ -49,6 +49,22 @@ func TestSameRemoteURLIgnoresGitPrefix(t *testing.T) {
 	}
 }
 
+func TestSameRemoteURLTreatsSCPLikeAndSSHFormsAsEqual(t *testing.T) {
+	left := "git@github.com:brandon-fryslie/links-issue-tracker.git"
+	right := "git+ssh://git@github.com/./brandon-fryslie/links-issue-tracker.git"
+	if !sameRemoteURL(left, right) {
+		t.Fatalf("sameRemoteURL(%q, %q) = false, want true", left, right)
+	}
+}
+
+func TestSameRemoteURLDetectsDifferentRemotePaths(t *testing.T) {
+	left := "git@github.com:brandon-fryslie/links-issue-tracker.git"
+	right := "git+ssh://git@github.com/./brandon-fryslie/another.git"
+	if sameRemoteURL(left, right) {
+		t.Fatalf("sameRemoteURL(%q, %q) = true, want false", left, right)
+	}
+}
+
 func TestBuildSyncPullPayloadReturnsSkippedForMissingRemoteBranch(t *testing.T) {
 	runErr := errors.New(`dolt pull origin feature/local-only: branch "feature/local-only" not found on remote`)
 	payload, err := buildSyncPullPayload("origin", "feature/local-only", "", runErr)
