@@ -66,6 +66,14 @@ func TestSameRemoteURLDetectsDifferentRemotePaths(t *testing.T) {
 	}
 }
 
+func TestSameRemoteURLSupportsBracketedIPv6SCPLikeHosts(t *testing.T) {
+	left := "git@[fe80::1]:brandon-fryslie/links-issue-tracker.git"
+	right := "ssh://git@[fe80::1]/brandon-fryslie/links-issue-tracker.git"
+	if !sameRemoteURL(left, right) {
+		t.Fatalf("sameRemoteURL(%q, %q) = false, want true", left, right)
+	}
+}
+
 func TestBuildSyncPullPayloadReturnsSkippedForMissingRemoteBranch(t *testing.T) {
 	runErr := errors.New(`dolt pull origin feature/local-only: branch "feature/local-only" not found on remote`)
 	payload, err := buildSyncPullPayload("origin", "feature/local-only", "", runErr)

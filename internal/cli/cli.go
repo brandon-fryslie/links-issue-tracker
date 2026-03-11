@@ -2057,7 +2057,7 @@ func normalizeSCPLikeRemoteURL(input string) string {
 	if strings.Contains(input, "://") {
 		return input
 	}
-	separator := strings.Index(input, ":")
+	separator := scpHostPathSeparator(input)
 	if separator <= 0 {
 		return input
 	}
@@ -2070,6 +2070,25 @@ func normalizeSCPLikeRemoteURL(input string) string {
 		return "ssh://" + hostPart + pathPart
 	}
 	return "ssh://" + hostPart + "/" + pathPart
+}
+
+func scpHostPathSeparator(input string) int {
+	separator := -1
+	inBrackets := false
+	for index, character := range input {
+		switch character {
+		case '[':
+			inBrackets = true
+		case ']':
+			inBrackets = false
+		case ':':
+			if !inBrackets {
+				separator = index
+				return separator
+			}
+		}
+	}
+	return separator
 }
 
 func normalizeRemotePath(input string) string {
