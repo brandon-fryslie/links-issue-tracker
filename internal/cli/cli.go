@@ -1445,7 +1445,8 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		if err != nil {
 			return err
 		}
-		commandArgs := buildSyncPushCommandArgs(
+			// [LAW:dataflow-not-control-flow] Sync push runs one deterministic path from resolved remote+branch state; retries are not encoded in control flow.
+			commandArgs := buildSyncPushCommandArgs(
 			remoteName,
 			syncBranch,
 			*setUpstream,
@@ -1577,8 +1578,11 @@ func firstNonEmptySyncBranch(candidates ...string) string {
 func resolveSyncRemote(requestedRemote string, upstreamRemote string, gitRemotes []workspace.GitRemote) string {
 	validatedRequestedRemote := strings.TrimSpace(requestedRemote)
 	if validatedRequestedRemote != "" {
-		// [LAW:one-source-of-truth] Explicit CLI remote is canonical for sync pull/push remote targeting.
-		return validatedRequestedRemote
+		// [LAW:one-source-of-truth] Hook-triggered sync must target the explicit push remote when it exists.
+		if syncRemoteExists(validatedRequestedRemote, gitRemotes) {
+			return validatedRequestedRemote
+		}
+		return ""
 	}
 	singleRemote := ""
 	if len(gitRemotes) == 1 {
