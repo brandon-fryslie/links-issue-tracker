@@ -1349,6 +1349,7 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		fs.SetOutput(io.Discard)
 		remote := fs.String("remote", "origin", "Remote name")
 		prune := fs.Bool("prune", false, "Pass --prune to dolt fetch")
+		verbose := fs.Bool("verbose", false, "Include detailed remote output")
 		jsonOut := fs.Bool("json", false, "Output JSON")
 		if err := parseFlagSet(fs, args[1:], stdout); err != nil {
 			return err
@@ -1368,6 +1369,10 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		}
 		return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
 			p := v.(map[string]any)
+			if !*verbose {
+				_, err := fmt.Fprintln(w, "fetched")
+				return err
+			}
 			if strings.TrimSpace(p["raw"].(string)) != "" {
 				_, err := fmt.Fprintln(w, strings.TrimSpace(p["raw"].(string)))
 				return err
@@ -1379,6 +1384,7 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		fs := flag.NewFlagSet("sync pull", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		remote := fs.String("remote", "", "Remote name (defaults to upstream remote, then single configured remote)")
+		verbose := fs.Bool("verbose", false, "Include detailed remote output")
 		jsonOut := fs.Bool("json", false, "Output JSON")
 		if err := parseFlagSet(fs, args[1:], stdout); err != nil {
 			return err
@@ -1395,7 +1401,9 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 				"raw":    "no upstream remote and no single configured remote; skipping sync pull",
 			}
 			// [LAW:dataflow-not-control-flow] exception: explicit no-remote policy requires suppressing sync side effects when remote resolution yields empty input.
-			return printValue(stdout, payload, *jsonOut, printSyncPullPayload)
+			return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
+				return printSyncPullPayload(w, v, *verbose)
+			})
 		}
 		resolvedBranch, err := resolveSyncBranch(ws.RootDir, remoteName)
 		if err != nil {
@@ -1407,13 +1415,16 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		if handledErr != nil {
 			return handledErr
 		}
-		return printValue(stdout, payload, *jsonOut, printSyncPullPayload)
+		return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
+			return printSyncPullPayload(w, v, *verbose)
+		})
 	case "push":
 		fs := flag.NewFlagSet("sync push", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
 		remote := fs.String("remote", "", "Remote name (defaults to upstream remote, then single configured remote)")
 		setUpstream := fs.Bool("set-upstream", false, "Pass -u to dolt push")
 		force := fs.Bool("force", false, "Pass --force to dolt push")
+		verbose := fs.Bool("verbose", false, "Include detailed remote output")
 		jsonOut := fs.Bool("json", false, "Output JSON")
 		if err := parseFlagSet(fs, args[1:], stdout); err != nil {
 			return err
@@ -1430,7 +1441,9 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 				"raw":    "no upstream remote and no single configured remote; skipping sync push",
 			}
 			// [LAW:dataflow-not-control-flow] exception: explicit no-remote policy requires suppressing sync side effects when remote resolution yields empty input.
-			return printValue(stdout, payload, *jsonOut, printSyncPushPayload)
+			return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
+				return printSyncPushPayload(w, v, *verbose)
+			})
 		}
 		syncBranch, err := resolveSyncBranch(ws.RootDir, remoteName)
 		if err != nil {
@@ -1486,7 +1499,9 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		if traceRecordErr != nil {
 			payload["trace_error"] = traceRecordErr.Error()
 		}
-		return printValue(stdout, payload, *jsonOut, printSyncPushPayload)
+		return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
+			return printSyncPushPayload(w, v, *verbose)
+		})
 	case "status":
 		fs := flag.NewFlagSet("sync status", flag.ContinueOnError)
 		fs.SetOutput(io.Discard)
@@ -1662,7 +1677,7 @@ func detectMissingRemoteBranch(message string, requestedBranch string) (string, 
 	return branch, true
 }
 
-func printSyncPullPayload(w io.Writer, v any) error {
+func printSyncPullPayload(w io.Writer, v any, verbose bool) error {
 	payload := v.(map[string]any)
 	status := strings.TrimSpace(fmt.Sprintf("%v", payload["status"]))
 	remote := strings.TrimSpace(fmt.Sprintf("%v", payload["remote"]))
@@ -1671,11 +1686,23 @@ func printSyncPullPayload(w io.Writer, v any) error {
 	case "skipped":
 		reason := strings.TrimSpace(fmt.Sprintf("%v", payload["reason"]))
 		if reason == "no_sync_remote" {
+			if !verbose {
+				return nil
+			}
 			_, err := fmt.Fprintln(w, "skipped sync pull: no eligible git remote")
 			return err
 		}
 		nextCommand := strings.TrimSpace(fmt.Sprintf("%v", payload["next_command"]))
 		retryCommand := strings.TrimSpace(fmt.Sprintf("%v", payload["retry_command"]))
+		if !verbose {
+			_, err := fmt.Fprintf(
+				w,
+				"sync pull skipped; run `%s`, then retry `%s`\n",
+				nextCommand,
+				retryCommand,
+			)
+			return err
+		}
 		_, err := fmt.Fprintf(
 			w,
 			"skipped pull %s/%s: remote branch missing; run `%s`, then retry `%s`\n",
@@ -1687,6 +1714,10 @@ func printSyncPullPayload(w io.Writer, v any) error {
 		return err
 	default:
 		raw, hasRaw := payload["raw"].(string)
+		if !verbose {
+			_, err := fmt.Fprintln(w, "pulled")
+			return err
+		}
 		if hasRaw && strings.TrimSpace(raw) != "" {
 			_, err := fmt.Fprintln(w, raw)
 			return err
@@ -1700,10 +1731,17 @@ func printSyncPullPayload(w io.Writer, v any) error {
 	}
 }
 
-func printSyncPushPayload(w io.Writer, v any) error {
+func printSyncPushPayload(w io.Writer, v any, verbose bool) error {
 	payload := v.(map[string]any)
 	status := strings.TrimSpace(fmt.Sprintf("%v", payload["status"]))
 	raw, hasRaw := payload["raw"].(string)
+	if !verbose && status == "skipped" {
+		return nil
+	}
+	if !verbose {
+		_, err := fmt.Fprintln(w, "pushed")
+		return err
+	}
 	if hasRaw && strings.TrimSpace(raw) != "" {
 		_, err := fmt.Fprintln(w, strings.TrimSpace(raw))
 		return err
@@ -2742,8 +2780,9 @@ Command Syntax:
   lit completion <bash|zsh|fish>
   lit workspace [--json]
   lit sync remote ls [--json]
-  lit sync pull [--remote <name>] [--json]
-  lit sync push [--remote <name>] [--set-upstream] [--force] [--json]
+  lit sync fetch [--remote <name>] [--prune] [--verbose] [--json]
+  lit sync pull [--remote <name>] [--verbose] [--json]
+  lit sync push [--remote <name>] [--set-upstream] [--force] [--verbose] [--json]
 
 Examples:
   lit init --json

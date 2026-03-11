@@ -90,7 +90,7 @@ func TestPrintSyncPullPayloadSkippedText(t *testing.T) {
 		"retry_command": "lit sync pull --remote origin",
 	}
 	var out bytes.Buffer
-	if err := printSyncPullPayload(&out, payload); err != nil {
+	if err := printSyncPullPayload(&out, payload, true); err != nil {
 		t.Fatalf("printSyncPullPayload() error = %v", err)
 	}
 	text := out.String()
@@ -105,17 +105,52 @@ func TestPrintSyncPullPayloadSkippedText(t *testing.T) {
 	}
 }
 
+func TestPrintSyncPullPayloadSkippedTextWithoutVerboseOmitsRemoteDetails(t *testing.T) {
+	payload := map[string]any{
+		"status":        "skipped",
+		"remote":        "origin",
+		"branch":        "feature/local-only",
+		"next_command":  "lit sync push --remote origin --set-upstream",
+		"retry_command": "lit sync pull --remote origin",
+	}
+	var out bytes.Buffer
+	if err := printSyncPullPayload(&out, payload, false); err != nil {
+		t.Fatalf("printSyncPullPayload() error = %v", err)
+	}
+	text := out.String()
+	if strings.Contains(text, "origin/feature/local-only") {
+		t.Fatalf("printSyncPullPayload() unexpectedly includes remote details: %q", text)
+	}
+	if !strings.Contains(text, "sync pull skipped; run") {
+		t.Fatalf("printSyncPullPayload() missing terse skipped guidance: %q", text)
+	}
+}
+
 func TestPrintSyncPullPayloadNoRemoteSkippedText(t *testing.T) {
 	payload := map[string]any{
 		"status": "skipped",
 		"reason": "no_sync_remote",
 	}
 	var out bytes.Buffer
-	if err := printSyncPullPayload(&out, payload); err != nil {
+	if err := printSyncPullPayload(&out, payload, false); err != nil {
+		t.Fatalf("printSyncPullPayload() error = %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "" {
+		t.Fatalf("printSyncPullPayload() = %q, want empty output", got)
+	}
+}
+
+func TestPrintSyncPullPayloadNoRemoteSkippedVerboseText(t *testing.T) {
+	payload := map[string]any{
+		"status": "skipped",
+		"reason": "no_sync_remote",
+	}
+	var out bytes.Buffer
+	if err := printSyncPullPayload(&out, payload, true); err != nil {
 		t.Fatalf("printSyncPullPayload() error = %v", err)
 	}
 	if got := strings.TrimSpace(out.String()); got != "skipped sync pull: no eligible git remote" {
-		t.Fatalf("printSyncPullPayload() = %q, want no-remote message", got)
+		t.Fatalf("printSyncPullPayload() = %q, want verbose no-remote message", got)
 	}
 }
 
@@ -125,11 +160,57 @@ func TestPrintSyncPushPayloadNoRemoteSkippedText(t *testing.T) {
 		"reason": "no_sync_remote",
 	}
 	var out bytes.Buffer
-	if err := printSyncPushPayload(&out, payload); err != nil {
+	if err := printSyncPushPayload(&out, payload, false); err != nil {
+		t.Fatalf("printSyncPushPayload() error = %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "" {
+		t.Fatalf("printSyncPushPayload() = %q, want empty output", got)
+	}
+}
+
+func TestPrintSyncPushPayloadNoRemoteSkippedVerboseText(t *testing.T) {
+	payload := map[string]any{
+		"status": "skipped",
+		"reason": "no_sync_remote",
+	}
+	var out bytes.Buffer
+	if err := printSyncPushPayload(&out, payload, true); err != nil {
 		t.Fatalf("printSyncPushPayload() error = %v", err)
 	}
 	if got := strings.TrimSpace(out.String()); got != "skipped sync push: no eligible git remote" {
-		t.Fatalf("printSyncPushPayload() = %q, want no-remote message", got)
+		t.Fatalf("printSyncPushPayload() = %q, want verbose no-remote message", got)
+	}
+}
+
+func TestPrintSyncPullPayloadDefaultSuccessTextHidesRemoteDetails(t *testing.T) {
+	payload := map[string]any{
+		"status": "ok",
+		"remote": "origin",
+		"branch": "main",
+		"raw":    "From origin",
+	}
+	var out bytes.Buffer
+	if err := printSyncPullPayload(&out, payload, false); err != nil {
+		t.Fatalf("printSyncPullPayload() error = %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "pulled" {
+		t.Fatalf("printSyncPullPayload() = %q, want pulled", got)
+	}
+}
+
+func TestPrintSyncPushPayloadDefaultSuccessTextHidesRemoteDetails(t *testing.T) {
+	payload := map[string]any{
+		"status": "ok",
+		"remote": "origin",
+		"branch": "main",
+		"raw":    "Pushing to origin",
+	}
+	var out bytes.Buffer
+	if err := printSyncPushPayload(&out, payload, false); err != nil {
+		t.Fatalf("printSyncPushPayload() error = %v", err)
+	}
+	if got := strings.TrimSpace(out.String()); got != "pushed" {
+		t.Fatalf("printSyncPushPayload() = %q, want pushed", got)
 	}
 }
 

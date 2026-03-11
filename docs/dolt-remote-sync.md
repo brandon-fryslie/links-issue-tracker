@@ -41,9 +41,9 @@ lit sync push --json
 
 - `lit sync status [--json]`
 - `lit sync remote ls [--json]`
-- `lit sync fetch [--remote <name>] [--prune] [--json]`
-- `lit sync pull [--remote <name>] [--json]`
-- `lit sync push [--remote <name>] [--set-upstream] [--force] [--json]`
+- `lit sync fetch [--remote <name>] [--prune] [--verbose] [--json]`
+- `lit sync pull [--remote <name>] [--verbose] [--json]`
+- `lit sync push [--remote <name>] [--set-upstream] [--force] [--verbose] [--json]`
 
 Sync branch selection:
 
@@ -55,6 +55,11 @@ Sync remote selection for pull/push when `--remote` is omitted:
 - branch upstream remote (when configured)
 - otherwise, the single configured Git remote
 - if no eligible remote exists, sync pull/push return `status=skipped` and do not run Dolt sync side effects
+
+Text output behavior:
+
+- default output is terse and hides remote-specific details
+- use `--verbose` to include remote/branch details in text output
 
 Before each `lit sync` command, `lit` reconciles Dolt remotes to exactly match `git remote -v` fetch URLs:
 
