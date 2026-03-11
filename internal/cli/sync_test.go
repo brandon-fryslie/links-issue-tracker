@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"reflect"
 	"strings"
@@ -342,5 +343,39 @@ func TestResolveSyncBranchErrorsWhenDefaultBranchUnavailable(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), debugSyncBranchEnvVar) {
 		t.Fatalf("error = %q, want mention of %s", err.Error(), debugSyncBranchEnvVar)
+	}
+}
+
+func TestRunWithManifestReadOnlyRetryRetriesOnce(t *testing.T) {
+	attempts := 0
+	output, err := runWithManifestReadOnlyRetry(context.Background(), func(context.Context) (string, error) {
+		attempts++
+		if attempts == 1 {
+			return "", errors.New("cannot update manifest: database is read only")
+		}
+		return "ok", nil
+	})
+	if err != nil {
+		t.Fatalf("runWithManifestReadOnlyRetry() error = %v", err)
+	}
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
+	}
+	if output != "ok" {
+		t.Fatalf("output = %q, want ok", output)
+	}
+}
+
+func TestRunWithManifestReadOnlyRetryDoesNotRetryOtherErrors(t *testing.T) {
+	attempts := 0
+	_, err := runWithManifestReadOnlyRetry(context.Background(), func(context.Context) (string, error) {
+		attempts++
+		return "", errors.New("fatal: network unavailable")
+	})
+	if err == nil {
+		t.Fatal("runWithManifestReadOnlyRetry() error = nil, want non-manifest error")
+	}
+	if attempts != 1 {
+		t.Fatalf("attempts = %d, want 1", attempts)
 	}
 }

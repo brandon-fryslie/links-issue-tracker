@@ -42,8 +42,9 @@ const outputModeEnvVar = "LIT_OUTPUT"
 const debugSyncBranchEnvVar = "LINKS_DEBUG_DOLT_SYNC_BRANCH"
 
 const (
-	commandLockRetryDelay = 50 * time.Millisecond
-	commandLockStaleAfter = 10 * time.Minute
+	commandLockRetryDelay             = 50 * time.Millisecond
+	commandLockStaleAfter             = 10 * time.Minute
+	syncManifestReadOnlyRetryAttempts = 2
 )
 
 var commandLockPIDRunning = isCommandLockPIDRunning
@@ -1503,7 +1504,7 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		if *prune {
 			commandArgs = append(commandArgs, "--prune")
 		}
-		output, err := doltcli.Run(ctx, ws.DoltRepoPath, commandArgs...)
+		output, err := runDoltSyncCommand(ctx, ws.DoltRepoPath, commandArgs...)
 		if err != nil {
 			return err
 		}
@@ -1555,7 +1556,7 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 			return err
 		}
 		commandArgs := buildSyncPullCommandArgs(remoteName, resolvedBranch)
-		output, err := doltcli.Run(ctx, ws.DoltRepoPath, commandArgs...)
+		output, err := runDoltSyncCommand(ctx, ws.DoltRepoPath, commandArgs...)
 		payload, handledErr := buildSyncPullPayload(remoteName, resolvedBranch, output, err)
 		if handledErr != nil {
 			return handledErr
@@ -1600,7 +1601,7 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 			*setUpstream,
 			*force,
 		)
-		output, err := doltcli.Run(ctx, ws.DoltRepoPath, commandArgs...)
+		output, err := runDoltSyncCommand(ctx, ws.DoltRepoPath, commandArgs...)
 		traceMetadata := map[string]string{
 			"remote":       remoteName,
 			"sync_branch":  syncBranch,
@@ -1961,17 +1962,17 @@ func syncDoltRemotesFromGit(ctx context.Context, ws workspace.Info) (remoteSyncS
 	for _, remote := range gitRemotes {
 		currentURL, exists := doltByName[remote.Name]
 		if !exists {
-			if _, err := doltcli.Run(ctx, ws.DoltRepoPath, "remote", "add", remote.Name, remote.URL); err != nil {
+			if _, err := runDoltSyncCommand(ctx, ws.DoltRepoPath, "remote", "add", remote.Name, remote.URL); err != nil {
 				return remoteSyncState{}, err
 			}
 			changes.Added = append(changes.Added, remote.Name)
 			continue
 		}
 		if !sameRemoteURL(currentURL, remote.URL) {
-			if _, err := doltcli.Run(ctx, ws.DoltRepoPath, "remote", "remove", remote.Name); err != nil {
+			if _, err := runDoltSyncCommand(ctx, ws.DoltRepoPath, "remote", "remove", remote.Name); err != nil {
 				return remoteSyncState{}, err
 			}
-			if _, err := doltcli.Run(ctx, ws.DoltRepoPath, "remote", "add", remote.Name, remote.URL); err != nil {
+			if _, err := runDoltSyncCommand(ctx, ws.DoltRepoPath, "remote", "add", remote.Name, remote.URL); err != nil {
 				return remoteSyncState{}, err
 			}
 			changes.Updated = append(changes.Updated, remote.Name)
@@ -1981,7 +1982,7 @@ func syncDoltRemotesFromGit(ctx context.Context, ws workspace.Info) (remoteSyncS
 		if _, keep := gitByName[name]; keep {
 			continue
 		}
-		if _, err := doltcli.Run(ctx, ws.DoltRepoPath, "remote", "remove", name); err != nil {
+		if _, err := runDoltSyncCommand(ctx, ws.DoltRepoPath, "remote", "remove", name); err != nil {
 			return remoteSyncState{}, err
 		}
 		changes.Removed = append(changes.Removed, name)
@@ -2105,6 +2106,28 @@ func parseDoltRemoteVerbose(output string) []map[string]string {
 		remotes = append(remotes, entry)
 	}
 	return remotes
+}
+
+func runDoltSyncCommand(ctx context.Context, repoPath string, commandArgs ...string) (string, error) {
+	return runWithManifestReadOnlyRetry(ctx, func(ctx context.Context) (string, error) {
+		return doltcli.Run(ctx, repoPath, commandArgs...)
+	})
+}
+
+func runWithManifestReadOnlyRetry(ctx context.Context, run func(context.Context) (string, error)) (string, error) {
+	var output string
+	var err error
+	// [LAW:dataflow-not-control-flow] Sync mutation commands always pass through the same retry pipeline; retry behavior depends on error data, not callsite branching.
+	for attempt := 1; attempt <= syncManifestReadOnlyRetryAttempts; attempt++ {
+		output, err = run(ctx)
+		if err == nil {
+			return output, nil
+		}
+		if commandErrorReason(err) != "manifest_read_only" || attempt == syncManifestReadOnlyRetryAttempts {
+			return output, err
+		}
+	}
+	return output, err
 }
 
 func runDoctor(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
