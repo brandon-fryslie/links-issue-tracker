@@ -80,18 +80,39 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 	if err != nil {
 		return err
 	}
+	operationTimeout, err := resolveOperationTimeout()
+	if err != nil {
+		return err
+	}
+	timeoutCtx, cancel := context.WithTimeout(ctx, operationTimeout)
+	defer cancel()
 	stdout = outputModeWriter{Writer: stdout, mode: resolvedOutputMode}
-	root := newRootCommand(ctx, stdout, stderr)
+	root := newRootCommand(timeoutCtx, stdout, stderr)
 	root.SetArgs(normalizedArgs)
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	root.SilenceErrors = true
 	root.SilenceUsage = true
-	err = root.ExecuteContext(ctx)
-	if errors.Is(err, flag.ErrHelp) {
-		return nil
+	done := make(chan error, 1)
+	go func() {
+		done <- root.ExecuteContext(timeoutCtx)
+	}()
+	select {
+	case err := <-done:
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	case <-timeoutCtx.Done():
+		if !errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) {
+			return timeoutCtx.Err()
+		}
+		telemetryPath, telemetryErr := writeOperationTimeoutTelemetry(normalizedArgs, operationTimeout)
+		if telemetryErr != nil {
+			return fmt.Errorf("operation timed out after %s and telemetry capture failed: %w", operationTimeout, telemetryErr)
+		}
+		return fmt.Errorf("operation timed out after %s; killed execution and wrote telemetry to %s", operationTimeout, telemetryPath)
 	}
-	return err
 }
 
 func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *cobra.Command {
@@ -1134,6 +1155,22 @@ func runTransition(ctx context.Context, stdout io.Writer, ap *app.App, args []st
 	return printValue(stdout, issue, *jsonOut, printIssueSummary)
 }
 
+func writeQueuedMutationResponse(stdout io.Writer, jsonOut bool, mutationErr error) (bool, error) {
+	var queued store.MutationQueuedError
+	if !errors.As(mutationErr, &queued) {
+		return false, nil
+	}
+	payload := map[string]string{
+		"status":       "queued",
+		"operation_id": queued.OperationID,
+		"operation":    queued.Operation,
+	}
+	if shouldWriteJSON(stdout, jsonOut) {
+		return true, writeJSON(stdout, payload)
+	}
+	_, err := fmt.Fprintf(stdout, "queued %s %s\n", queued.OperationID, queued.Operation)
+	return true, err
+}
 func runComment(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
 	if len(args) == 0 || args[0] != "add" {
 		return errors.New("usage: lit comment add <id> --body <text>")
@@ -2383,12 +2420,22 @@ func runBulk(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 					CreatedBy: *by,
 				})
 				if err != nil {
+					var queued store.MutationQueuedError
+					if errors.As(err, &queued) {
+						results[issueID] = "queued:" + queued.OperationID
+						continue
+					}
 					results[issueID] = err.Error()
 					continue
 				}
 			case "rm":
 				_, err := ap.Store.RemoveLabel(ctx, issueID, *label)
 				if err != nil {
+					var queued store.MutationQueuedError
+					if errors.As(err, &queued) {
+						results[issueID] = "queued:" + queued.OperationID
+						continue
+					}
 					results[issueID] = err.Error()
 					continue
 				}
@@ -2432,6 +2479,11 @@ func runBulk(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 				CreatedBy: *by,
 			})
 			if err != nil {
+				var queued store.MutationQueuedError
+				if errors.As(err, &queued) {
+					results[issueID] = "queued:" + queued.OperationID
+					continue
+				}
 				results[issueID] = err.Error()
 				continue
 			}
@@ -2905,7 +2957,10 @@ func restoreFromExportPath(ctx context.Context, ap *app.App, path string, force 
 		return err
 	}
 	if err := ap.Store.ReplaceFromExport(ctx, targetExport); err != nil {
-		return err
+		var queued store.MutationQueuedError
+		if !errors.As(err, &queued) {
+			return err
+		}
 	}
 	if _, err := syncfile.WriteAtomic(syncBasePath(ap), targetExport); err != nil {
 		return err
@@ -2914,10 +2969,15 @@ func restoreFromExportPath(ctx context.Context, ap *app.App, path string, force 
 	if err != nil {
 		return err
 	}
-	return ap.Store.RecordSyncState(ctx, store.SyncState{
+	err = ap.Store.RecordSyncState(ctx, store.SyncState{
 		Path:        restorePath,
 		ContentHash: hash,
 	})
+	var queued store.MutationQueuedError
+	if errors.As(err, &queued) {
+		return nil
+	}
+	return err
 }
 
 func hashExport(export model.Export) (string, error) {

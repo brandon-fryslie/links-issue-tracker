@@ -39,9 +39,15 @@ const (
 )
 
 type Store struct {
-	db             *sql.DB
-	workspaceID    string
-	commitLockPath string
+	db              *sql.DB
+	workspaceID     string
+	commitLockPath  string
+	queuePath       string
+	queueOffsetPath string
+	queueLockPath   string
+	telemetryDir    string
+	queueResultsMu  sync.Mutex
+	queueResults    map[string]mutationQueueResult
 }
 
 type retryOperation func(context.Context) error
@@ -198,9 +204,14 @@ func Open(ctx context.Context, doltRootDir string, workspaceID string) (*Store, 
 		return nil, fmt.Errorf("open dolt: %w", err)
 	}
 	s := &Store{
-		db:             db,
-		workspaceID:    workspaceID,
-		commitLockPath: filepath.Join(filepath.Clean(doltRootDir), ".links-commit.lock"),
+		db:              db,
+		workspaceID:     workspaceID,
+		commitLockPath:  filepath.Join(filepath.Clean(doltRootDir), ".links-commit.lock"),
+		queuePath:       filepath.Join(filepath.Clean(doltRootDir), ".links-mutation-queue.jsonl"),
+		queueOffsetPath: filepath.Join(filepath.Clean(doltRootDir), ".links-mutation-queue.offset"),
+		queueLockPath:   filepath.Join(filepath.Clean(doltRootDir), ".links-mutation-queue.lock"),
+		telemetryDir:    filepath.Join(filepath.Clean(doltRootDir), "telemetry"),
+		queueResults:    map[string]mutationQueueResult{},
 	}
 	// [LAW:single-enforcer] Store-level commit lock is the single writer gate for all startup and runtime mutations.
 	if err := s.withCommitLock(ctx, s.migrate); err != nil {
@@ -444,6 +455,9 @@ func normalizeConstraintClause(clause string) string {
 	return strings.ToLower(replacer.Replace(clause))
 }
 func (s *Store) GetSyncState(ctx context.Context) (SyncState, error) {
+	if err := s.syncQueueBeforeRead(ctx); err != nil {
+		return SyncState{}, err
+	}
 	state := SyncState{}
 	var err error
 	state.Path, err = s.getMeta(ctx, nil, "last_sync_path")
@@ -458,6 +472,10 @@ func (s *Store) GetSyncState(ctx context.Context) (SyncState, error) {
 }
 
 func (s *Store) RecordSyncState(ctx context.Context, state SyncState) error {
+	if !mutationQueueBypass(ctx) {
+		_, err := enqueueMutationAndApply[struct{}](ctx, s, mutationOperationRecordSyncState, state)
+		return err
+	}
 	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
 	if err != nil {
 		return err
@@ -486,6 +504,9 @@ func (s *Store) RecordSyncState(ctx context.Context, state SyncState) error {
 }
 
 func (s *Store) CreateIssue(ctx context.Context, in CreateIssueInput) (model.Issue, error) {
+	if !mutationQueueBypass(ctx) {
+		return enqueueMutationAndApply[model.Issue](ctx, s, mutationOperationCreateIssue, in)
+	}
 	var issue model.Issue
 	err := retryTransientManifestReadOnly(ctx, func(ctx context.Context) error {
 		created, createErr := s.createIssueOnce(ctx, in)
@@ -564,6 +585,9 @@ func (s *Store) createIssueOnce(ctx context.Context, in CreateIssueInput) (model
 }
 
 func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]model.Issue, error) {
+	if err := s.syncQueueBeforeRead(ctx); err != nil {
+		return nil, err
+	}
 	query := `SELECT i.id, i.title, i.description, i.status, i.priority, i.issue_type, i.assignee, i.created_at, i.updated_at, i.closed_at, i.archived_at, i.deleted_at FROM issues i`
 	var where []string
 	var args []any
@@ -676,6 +700,9 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 }
 
 func (s *Store) GetIssueDetail(ctx context.Context, id string) (model.IssueDetail, error) {
+	if err := s.syncQueueBeforeRead(ctx); err != nil {
+		return model.IssueDetail{}, err
+	}
 	issue, err := s.GetIssue(ctx, id)
 	if err != nil {
 		return model.IssueDetail{}, err
@@ -772,6 +799,9 @@ func (s *Store) GetIssueDetail(ctx context.Context, id string) (model.IssueDetai
 }
 
 func (s *Store) GetIssue(ctx context.Context, id string) (model.Issue, error) {
+	if err := s.syncQueueBeforeRead(ctx); err != nil {
+		return model.Issue{}, err
+	}
 	row := s.db.QueryRowContext(ctx, `SELECT id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at, archived_at, deleted_at FROM issues WHERE id = ?`, id)
 	issue, err := scanIssue(row)
 	if err != nil {
@@ -788,6 +818,12 @@ func (s *Store) GetIssue(ctx context.Context, id string) (model.Issue, error) {
 }
 
 func (s *Store) UpdateIssue(ctx context.Context, id string, in UpdateIssueInput) (model.Issue, error) {
+	if !mutationQueueBypass(ctx) {
+		return enqueueMutationAndApply[model.Issue](ctx, s, mutationOperationUpdateIssue, updateIssueQueuePayload{
+			ID:    id,
+			Input: in,
+		})
+	}
 	issue, err := s.GetIssue(ctx, id)
 	if err != nil {
 		return model.Issue{}, err
@@ -863,6 +899,9 @@ func (s *Store) UpdateIssue(ctx context.Context, id string, in UpdateIssueInput)
 }
 
 func (s *Store) AddComment(ctx context.Context, in AddCommentInput) (model.Comment, error) {
+	if !mutationQueueBypass(ctx) {
+		return enqueueMutationAndApply[model.Comment](ctx, s, mutationOperationAddComment, in)
+	}
 	var comment model.Comment
 	err := retryTransientManifestReadOnly(ctx, func(ctx context.Context) error {
 		created, createErr := s.addCommentOnce(ctx, in)
@@ -914,6 +953,9 @@ func (s *Store) addCommentOnce(ctx context.Context, in AddCommentInput) (model.C
 }
 
 func (s *Store) AddRelation(ctx context.Context, in AddRelationInput) (model.Relation, error) {
+	if !mutationQueueBypass(ctx) {
+		return enqueueMutationAndApply[model.Relation](ctx, s, mutationOperationAddRelation, in)
+	}
 	if _, err := s.GetIssue(ctx, in.SrcID); err != nil {
 		return model.Relation{}, err
 	}
@@ -961,6 +1003,14 @@ func (s *Store) AddRelation(ctx context.Context, in AddRelationInput) (model.Rel
 }
 
 func (s *Store) RemoveRelation(ctx context.Context, srcID, dstID, relType string) error {
+	if !mutationQueueBypass(ctx) {
+		_, err := enqueueMutationAndApply[struct{}](ctx, s, mutationOperationRemoveRelation, removeRelationQueuePayload{
+			SrcID:   srcID,
+			DstID:   dstID,
+			RelType: relType,
+		})
+		return err
+	}
 	if relType == "related-to" {
 		ordered := []string{srcID, dstID}
 		sort.Strings(ordered)
@@ -994,6 +1044,9 @@ func (s *Store) RemoveRelation(ctx context.Context, srcID, dstID, relType string
 }
 
 func (s *Store) Export(ctx context.Context) (model.Export, error) {
+	if err := s.syncQueueBeforeRead(ctx); err != nil {
+		return model.Export{}, err
+	}
 	issues, err := s.ListIssues(ctx, ListIssuesFilter{Limit: 0, IncludeArchived: true, IncludeDeleted: true})
 	if err != nil {
 		return model.Export{}, err
@@ -1018,6 +1071,9 @@ func (s *Store) Export(ctx context.Context) (model.Export, error) {
 }
 
 func (s *Store) Doctor(ctx context.Context) (HealthReport, error) {
+	if err := s.syncQueueBeforeRead(ctx); err != nil {
+		return HealthReport{}, err
+	}
 	report := HealthReport{
 		Errors:   []string{},
 		Warnings: []string{},
@@ -1061,6 +1117,12 @@ func (s *Store) Doctor(ctx context.Context) (HealthReport, error) {
 }
 
 func (s *Store) Fsck(ctx context.Context, repair bool) (HealthReport, error) {
+	if repair && !mutationQueueBypass(ctx) {
+		return enqueueMutationAndApply[HealthReport](ctx, s, mutationOperationFsck, fsckQueuePayload{Repair: true})
+	}
+	if err := s.syncQueueBeforeRead(ctx); err != nil {
+		return HealthReport{}, err
+	}
 	if repair {
 		ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
 		if err != nil {
@@ -1092,6 +1154,10 @@ func (s *Store) Fsck(ctx context.Context, repair bool) (HealthReport, error) {
 }
 
 func (s *Store) ImportIssue(ctx context.Context, in ImportIssue) error {
+	if !mutationQueueBypass(ctx) {
+		_, err := enqueueMutationAndApply[struct{}](ctx, s, mutationOperationImportIssue, in)
+		return err
+	}
 	issueType, err := validateIssueType(in.IssueType)
 	if err != nil {
 		return err
@@ -1167,6 +1233,10 @@ func (s *Store) ImportIssue(ctx context.Context, in ImportIssue) error {
 }
 
 func (s *Store) ImportComment(ctx context.Context, in ImportComment) error {
+	if !mutationQueueBypass(ctx) {
+		_, err := enqueueMutationAndApply[struct{}](ctx, s, mutationOperationImportComment, in)
+		return err
+	}
 	if _, err := s.GetIssue(ctx, in.IssueID); err != nil {
 		return err
 	}
@@ -1211,6 +1281,10 @@ func (s *Store) ImportComment(ctx context.Context, in ImportComment) error {
 }
 
 func (s *Store) ImportRelation(ctx context.Context, in ImportRelation) error {
+	if !mutationQueueBypass(ctx) {
+		_, err := enqueueMutationAndApply[struct{}](ctx, s, mutationOperationImportRelation, in)
+		return err
+	}
 	if _, err := s.GetIssue(ctx, in.SrcID); err != nil {
 		return err
 	}
@@ -1260,6 +1334,10 @@ func (s *Store) ImportRelation(ctx context.Context, in ImportRelation) error {
 }
 
 func (s *Store) ImportLabel(ctx context.Context, in ImportLabel) error {
+	if !mutationQueueBypass(ctx) {
+		_, err := enqueueMutationAndApply[struct{}](ctx, s, mutationOperationImportLabel, in)
+		return err
+	}
 	if _, err := s.GetIssue(ctx, in.IssueID); err != nil {
 		return err
 	}
@@ -1299,6 +1377,9 @@ func (s *Store) ImportLabel(ctx context.Context, in ImportLabel) error {
 }
 
 func (s *Store) AddLabel(ctx context.Context, in AddLabelInput) ([]string, error) {
+	if !mutationQueueBypass(ctx) {
+		return enqueueMutationAndApply[[]string](ctx, s, mutationOperationAddLabel, in)
+	}
 	if _, err := s.GetIssue(ctx, in.IssueID); err != nil {
 		return nil, err
 	}
@@ -1336,6 +1417,12 @@ func (s *Store) AddLabel(ctx context.Context, in AddLabelInput) ([]string, error
 }
 
 func (s *Store) RemoveLabel(ctx context.Context, issueID, labelName string) ([]string, error) {
+	if !mutationQueueBypass(ctx) {
+		return enqueueMutationAndApply[[]string](ctx, s, mutationOperationRemoveLabel, removeLabelQueuePayload{
+			IssueID:   issueID,
+			LabelName: labelName,
+		})
+	}
 	if _, err := s.GetIssue(ctx, issueID); err != nil {
 		return nil, err
 	}
@@ -1371,6 +1458,14 @@ func (s *Store) RemoveLabel(ctx context.Context, issueID, labelName string) ([]s
 }
 
 func (s *Store) ReplaceLabels(ctx context.Context, issueID string, labels []string, createdBy string) error {
+	if !mutationQueueBypass(ctx) {
+		_, err := enqueueMutationAndApply[struct{}](ctx, s, mutationOperationReplaceLabels, replaceLabelsQueuePayload{
+			IssueID:   issueID,
+			Labels:    labels,
+			CreatedBy: createdBy,
+		})
+		return err
+	}
 	if _, err := s.GetIssue(ctx, issueID); err != nil {
 		return err
 	}
@@ -1401,6 +1496,9 @@ func (s *Store) ReplaceLabels(ctx context.Context, issueID string, labels []stri
 }
 
 func (s *Store) TransitionIssue(ctx context.Context, in TransitionIssueInput) (model.Issue, error) {
+	if !mutationQueueBypass(ctx) {
+		return enqueueMutationAndApply[model.Issue](ctx, s, mutationOperationTransitionIssue, in)
+	}
 	var issue model.Issue
 	err := retryTransientManifestReadOnly(ctx, func(ctx context.Context) error {
 		transitioned, transitionErr := s.transitionIssueOnce(ctx, in)
@@ -1630,6 +1728,9 @@ func waitWithContext(ctx context.Context, duration time.Duration) error {
 	}
 }
 func (s *Store) ListRelationsForIssue(ctx context.Context, issueID string, relType string) ([]model.Relation, error) {
+	if err := s.syncQueueBeforeRead(ctx); err != nil {
+		return nil, err
+	}
 	if _, err := s.GetIssue(ctx, issueID); err != nil {
 		return nil, err
 	}
@@ -1651,6 +1752,9 @@ func (s *Store) ListRelationsForIssue(ctx context.Context, issueID string, relTy
 }
 
 func (s *Store) SetParent(ctx context.Context, in SetParentInput) (model.Relation, error) {
+	if !mutationQueueBypass(ctx) {
+		return enqueueMutationAndApply[model.Relation](ctx, s, mutationOperationSetParent, in)
+	}
 	if strings.TrimSpace(in.ChildID) == "" || strings.TrimSpace(in.ParentID) == "" {
 		return model.Relation{}, errors.New("child and parent ids are required")
 	}
@@ -1699,6 +1803,10 @@ func (s *Store) SetParent(ctx context.Context, in SetParentInput) (model.Relatio
 }
 
 func (s *Store) ClearParent(ctx context.Context, childID string) error {
+	if !mutationQueueBypass(ctx) {
+		_, err := enqueueMutationAndApply[struct{}](ctx, s, mutationOperationClearParent, clearParentQueuePayload{ChildID: childID})
+		return err
+	}
 	if _, err := s.GetIssue(ctx, childID); err != nil {
 		return err
 	}
@@ -1730,6 +1838,9 @@ func (s *Store) ClearParent(ctx context.Context, childID string) error {
 }
 
 func (s *Store) ListChildren(ctx context.Context, parentID string) ([]model.Issue, error) {
+	if err := s.syncQueueBeforeRead(ctx); err != nil {
+		return nil, err
+	}
 	if _, err := s.GetIssue(ctx, parentID); err != nil {
 		return nil, err
 	}
@@ -1757,6 +1868,9 @@ func (s *Store) ListChildren(ctx context.Context, parentID string) ([]model.Issu
 }
 
 func (s *Store) ListLabels(ctx context.Context, issueID string) ([]string, error) {
+	if err := s.syncQueueBeforeRead(ctx); err != nil {
+		return nil, err
+	}
 	rows, err := s.db.QueryContext(ctx, `SELECT label FROM labels WHERE issue_id = ? ORDER BY label ASC`, issueID)
 	if err != nil {
 		return nil, fmt.Errorf("list labels: %w", err)
@@ -1774,6 +1888,10 @@ func (s *Store) ListLabels(ctx context.Context, issueID string) ([]string, error
 }
 
 func (s *Store) ReplaceFromExport(ctx context.Context, export model.Export) error {
+	if !mutationQueueBypass(ctx) {
+		_, err := enqueueMutationAndApply[struct{}](ctx, s, mutationOperationReplaceExport, export)
+		return err
+	}
 	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
 	if err != nil {
 		return err
