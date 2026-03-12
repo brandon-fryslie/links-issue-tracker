@@ -1801,6 +1801,11 @@ func firstNonEmptySyncBranch(candidates ...string) string {
 }
 
 func resolveSyncRemote(requestedRemote string, upstreamRemote string, gitRemotes []workspace.GitRemote) string {
+	validatedRequestedRemote := strings.TrimSpace(requestedRemote)
+	if validatedRequestedRemote != "" {
+		// [LAW:one-source-of-truth] Explicit CLI remote is canonical for sync pull/push remote targeting.
+		return validatedRequestedRemote
+	}
 	singleRemote := ""
 	if len(gitRemotes) == 1 {
 		singleRemote = strings.TrimSpace(gitRemotes[0].Name)
@@ -1810,7 +1815,7 @@ func resolveSyncRemote(requestedRemote string, upstreamRemote string, gitRemotes
 		validatedUpstreamRemote = ""
 	}
 	// [LAW:one-source-of-truth] Sync remote selection is derived once from ordered candidates and shared by pull/push.
-	return firstNonEmptySyncRemote(requestedRemote, validatedUpstreamRemote, singleRemote)
+	return firstNonEmptySyncRemote(validatedUpstreamRemote, singleRemote)
 }
 
 func firstNonEmptySyncRemote(candidates ...string) string {
