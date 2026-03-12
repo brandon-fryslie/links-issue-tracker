@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"strings"
 	"testing"
 	"time"
 )
@@ -25,8 +24,6 @@ func newMutationQueueTestStore(t *testing.T) *Store {
 }
 
 func TestSyncQueueBeforeReadReturnsApplyError(t *testing.T) {
-	t.Parallel()
-
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
 	if err != nil {
@@ -65,8 +62,6 @@ func TestSyncQueueBeforeReadReturnsApplyError(t *testing.T) {
 }
 
 func TestApplyMutationQueueLockedRetryableFailureDoesNotAdvanceOffset(t *testing.T) {
-	t.Parallel()
-
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
 	if err != nil {
@@ -121,8 +116,6 @@ func TestApplyMutationQueueLockedRetryableFailureDoesNotAdvanceOffset(t *testing
 }
 
 func TestApplyMutationQueueLockedNonRetryableFailureAdvancesOffset(t *testing.T) {
-	t.Parallel()
-
 	st := newMutationQueueTestStore(t)
 	entry := mutationQueueEntry{
 		ID:            "qop-non-retryable-apply-error",
@@ -153,8 +146,6 @@ func TestApplyMutationQueueLockedNonRetryableFailureAdvancesOffset(t *testing.T)
 }
 
 func TestRemoveStaleMutationQueueLockKeepsLiveOwner(t *testing.T) {
-	t.Parallel()
-
 	root := t.TempDir()
 	lockPath := filepath.Join(root, ".links-mutation-queue.lock")
 	if err := os.WriteFile(lockPath, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
@@ -173,8 +164,6 @@ func TestRemoveStaleMutationQueueLockKeepsLiveOwner(t *testing.T) {
 }
 
 func TestRemoveStaleMutationQueueLockRemovesDeadOwner(t *testing.T) {
-	t.Parallel()
-
 	root := t.TempDir()
 	lockPath := filepath.Join(root, ".links-mutation-queue.lock")
 	if err := os.WriteFile(lockPath, []byte("99999999\n"), 0o600); err != nil {
@@ -190,8 +179,6 @@ func TestRemoveStaleMutationQueueLockRemovesDeadOwner(t *testing.T) {
 }
 
 func TestReadOperationsApplyQueuedMutationsBeforeRead(t *testing.T) {
-	t.Parallel()
-
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
 	if err != nil {
@@ -230,14 +217,12 @@ func TestReadOperationsApplyQueuedMutationsBeforeRead(t *testing.T) {
 	}
 }
 
-func TestApplyMutationQueueCompactsConsumedQueue(t *testing.T) {
-	t.Parallel()
-
+func TestApplyMutationQueueDoesNotTruncateQueueFile(t *testing.T) {
 	st := newMutationQueueTestStore(t)
 	if err := os.MkdirAll(filepath.Dir(st.queuePath), 0o755); err != nil {
 		t.Fatalf("MkdirAll(queue dir) error = %v", err)
 	}
-	consumedPayload := strings.Repeat(" ", mutationQueueCompactionThresholdBytes) + "\n"
+	consumedPayload := "{}\n"
 	if err := os.WriteFile(st.queuePath, []byte(consumedPayload), 0o644); err != nil {
 		t.Fatalf("WriteFile(queue) error = %v", err)
 	}
@@ -249,14 +234,14 @@ func TestApplyMutationQueueCompactsConsumedQueue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Stat(queue) error = %v", err)
 	}
-	if info.Size() != 0 {
-		t.Fatalf("queue size = %d, want 0 after compaction", info.Size())
+	if info.Size() != int64(len(consumedPayload)) {
+		t.Fatalf("queue size = %d, want %d (no truncation)", info.Size(), len(consumedPayload))
 	}
 	offset, err := st.readMutationQueueOffset()
 	if err != nil {
 		t.Fatalf("readMutationQueueOffset() error = %v", err)
 	}
-	if offset != 0 {
-		t.Fatalf("queue offset = %d, want 0 after compaction", offset)
+	if offset != int64(len(consumedPayload)) {
+		t.Fatalf("queue offset = %d, want %d after apply", offset, len(consumedPayload))
 	}
 }

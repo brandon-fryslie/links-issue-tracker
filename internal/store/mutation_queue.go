@@ -25,8 +25,6 @@ const (
 	// [LAW:no-mode-explosion] Queue apply timeout is a single bounded policy for all queue-driven mutation attempts.
 	mutationQueueApplyTimeout = 300 * time.Millisecond
 	mutationQueueLockStaleAge = 30 * time.Second
-	// [LAW:no-mode-explosion] Queue compaction uses one canonical threshold instead of command-specific knobs.
-	mutationQueueCompactionThresholdBytes = 1 << 20
 )
 
 const (
@@ -394,9 +392,6 @@ func (s *Store) applyMutationQueueLocked(ctx context.Context) error {
 		}
 	}
 
-	if err := s.compactMutationQueueIfNeeded(currentOffset); err != nil {
-		return err
-	}
 	return nil
 }
 
@@ -412,50 +407,6 @@ func shouldRetryQueuedMutationError(err error) bool {
 		return true
 	}
 	return strings.Contains(strings.ToLower(err.Error()), "acquire commit lock: lock not acquired")
-}
-
-func (s *Store) compactMutationQueueIfNeeded(offset int64) error {
-	if offset < mutationQueueCompactionThresholdBytes {
-		return nil
-	}
-	info, err := os.Stat(s.queuePath)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("stat mutation queue for compaction: %w", err)
-	}
-	// [LAW:one-source-of-truth] Queue file size and consumed offset are the canonical compaction inputs.
-	if info.Size() != offset {
-		return nil
-	}
-	file, err := os.OpenFile(s.queuePath, os.O_WRONLY, 0o644)
-	if err != nil {
-		return fmt.Errorf("open mutation queue for compaction: %w", err)
-	}
-	defer file.Close()
-	verifiedInfo, err := file.Stat()
-	if err != nil {
-		return fmt.Errorf("stat open mutation queue for compaction: %w", err)
-	}
-	if verifiedInfo.Size() != offset {
-		return nil
-	}
-	if err := file.Truncate(0); err != nil {
-		return fmt.Errorf("truncate mutation queue during compaction: %w", err)
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return fmt.Errorf("seek mutation queue after compaction: %w", err)
-	}
-	if err := s.writeMutationQueueOffset(0); err != nil {
-		return err
-	}
-	_ = s.writeMutationQueueTelemetry(map[string]any{
-		"event":            "queue_compacted",
-		"compacted_bytes":  offset,
-		"new_queue_offset": 0,
-	})
-	return nil
 }
 
 func (s *Store) applyMutationQueueEntry(ctx context.Context, entry mutationQueueEntry) (any, error) {
