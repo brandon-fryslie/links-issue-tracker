@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -101,5 +102,23 @@ func TestHandleQueuedMutationErrorPassesThroughNonQueued(t *testing.T) {
 	}
 	if stdout.Len() != 0 {
 		t.Fatalf("stdout = %q, want empty output", stdout.String())
+	}
+}
+
+func TestRunDoesNotEmitManagedTimeoutTelemetryForParentDeadline(t *testing.T) {
+	t.Setenv(operationTimeoutEnvVar, "5s")
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-1*time.Second))
+	defer cancel()
+
+	var stdout bytes.Buffer
+	err := Run(ctx, &stdout, &stdout, []string{"quickstart"})
+	if err == nil {
+		t.Fatal("Run() error = nil, want context deadline failure")
+	}
+	if strings.Contains(err.Error(), "wrote telemetry to") {
+		t.Fatalf("Run() = %q, want parent deadline error without managed timeout telemetry", err.Error())
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Run() error = %v, want context.DeadlineExceeded", err)
 	}
 }

@@ -99,15 +99,21 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 	}()
 	select {
 	case err := <-done:
+		if err == nil {
+			return nil
+		}
 		if errors.Is(err, flag.ErrHelp) {
 			return nil
 		}
-		if errors.Is(err, context.DeadlineExceeded) {
+		// [LAW:single-enforcer] Timeout telemetry is emitted exactly when the managed operation timeout fires.
+		managedTimeoutFired := errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) && !errors.Is(ctx.Err(), context.DeadlineExceeded)
+		if errors.Is(err, context.DeadlineExceeded) && managedTimeoutFired {
 			return operationTimeoutError(normalizedArgs, operationTimeout)
 		}
 		return err
 	case <-timeoutCtx.Done():
-		if !errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) {
+		managedTimeoutFired := errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) && !errors.Is(ctx.Err(), context.DeadlineExceeded)
+		if !managedTimeoutFired {
 			return timeoutCtx.Err()
 		}
 		return operationTimeoutError(normalizedArgs, operationTimeout)
