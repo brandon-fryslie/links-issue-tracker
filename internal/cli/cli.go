@@ -1445,8 +1445,8 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		if err != nil {
 			return err
 		}
-			// [LAW:dataflow-not-control-flow] Sync push runs one deterministic path from resolved remote+branch state; retries are not encoded in control flow.
-			commandArgs := buildSyncPushCommandArgs(
+		// [LAW:dataflow-not-control-flow] Sync push runs one deterministic path from resolved remote+branch state; retries are not encoded in control flow.
+		commandArgs := buildSyncPushCommandArgs(
 			remoteName,
 			syncBranch,
 			*setUpstream,
