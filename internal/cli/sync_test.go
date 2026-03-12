@@ -302,11 +302,11 @@ func TestResolveSyncRemoteUsesRequestedRemoteFirst(t *testing.T) {
 	}
 }
 
-func TestResolveSyncRemoteReturnsEmptyWhenRequestedRemoteIsUnknown(t *testing.T) {
+func TestResolveSyncRemotePreservesUnknownRequestedRemote(t *testing.T) {
 	remotes := []workspace.GitRemote{{Name: "origin"}, {Name: "upstream"}}
 	got := resolveSyncRemote("fork", "upstream", remotes)
-	if got != "" {
-		t.Fatalf("resolveSyncRemote() = %q, want empty", got)
+	if got != "fork" {
+		t.Fatalf("resolveSyncRemote() = %q, want fork", got)
 	}
 }
 

@@ -1578,11 +1578,8 @@ func firstNonEmptySyncBranch(candidates ...string) string {
 func resolveSyncRemote(requestedRemote string, upstreamRemote string, gitRemotes []workspace.GitRemote) string {
 	validatedRequestedRemote := strings.TrimSpace(requestedRemote)
 	if validatedRequestedRemote != "" {
-		// [LAW:one-source-of-truth] Hook-triggered sync must target the explicit push remote when it exists.
-		if syncRemoteExists(validatedRequestedRemote, gitRemotes) {
-			return validatedRequestedRemote
-		}
-		return ""
+		// [LAW:one-source-of-truth] Explicit CLI remote is canonical for sync pull/push remote targeting.
+		return validatedRequestedRemote
 	}
 	singleRemote := ""
 	if len(gitRemotes) == 1 {
