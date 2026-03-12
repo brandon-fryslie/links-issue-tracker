@@ -17,7 +17,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"syscall"
 	"text/tabwriter"
 	"time"
 
@@ -42,12 +41,8 @@ const outputModeEnvVar = "LIT_OUTPUT"
 const debugSyncBranchEnvVar = "LINKS_DEBUG_DOLT_SYNC_BRANCH"
 
 const (
-	commandLockRetryDelay             = 50 * time.Millisecond
-	commandLockStaleAfter             = 10 * time.Minute
 	syncManifestReadOnlyRetryAttempts = 2
 )
-
-var commandLockPIDRunning = isCommandLockPIDRunning
 
 type outputMode string
 
@@ -80,52 +75,18 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 	if err != nil {
 		return err
 	}
-	operationTimeout, err := resolveOperationTimeout()
-	if err != nil {
-		return err
-	}
-	timeoutCtx, cancel := context.WithTimeout(ctx, operationTimeout)
-	defer cancel()
 	stdout = outputModeWriter{Writer: stdout, mode: resolvedOutputMode}
-	root := newRootCommand(timeoutCtx, stdout, stderr)
+	root := newRootCommand(ctx, stdout, stderr)
 	root.SetArgs(normalizedArgs)
 	root.SetOut(stdout)
 	root.SetErr(stderr)
 	root.SilenceErrors = true
 	root.SilenceUsage = true
-	done := make(chan error, 1)
-	go func() {
-		done <- root.ExecuteContext(timeoutCtx)
-	}()
-	select {
-	case err := <-done:
-		if err == nil {
-			return nil
-		}
-		if errors.Is(err, flag.ErrHelp) {
-			return nil
-		}
-		// [LAW:single-enforcer] Timeout telemetry is emitted exactly when the managed operation timeout fires.
-		managedTimeoutFired := errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) && !errors.Is(ctx.Err(), context.DeadlineExceeded)
-		if errors.Is(err, context.DeadlineExceeded) && managedTimeoutFired {
-			return operationTimeoutError(normalizedArgs, operationTimeout)
-		}
-		return err
-	case <-timeoutCtx.Done():
-		managedTimeoutFired := errors.Is(timeoutCtx.Err(), context.DeadlineExceeded) && !errors.Is(ctx.Err(), context.DeadlineExceeded)
-		if !managedTimeoutFired {
-			return timeoutCtx.Err()
-		}
-		return operationTimeoutError(normalizedArgs, operationTimeout)
+	err = root.ExecuteContext(ctx)
+	if errors.Is(err, flag.ErrHelp) {
+		return nil
 	}
-}
-
-func operationTimeoutError(args []string, timeout time.Duration) error {
-	telemetryPath, telemetryErr := writeOperationTimeoutTelemetry(args, timeout)
-	if telemetryErr != nil {
-		return fmt.Errorf("operation timed out after %s and telemetry capture failed: %w", timeout, telemetryErr)
-	}
-	return fmt.Errorf("operation timed out after %s; killed execution and wrote telemetry to %s", timeout, telemetryPath)
+	return err
 }
 
 func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *cobra.Command {
@@ -453,17 +414,15 @@ func runWithWorkspace(ctx context.Context, commandArgs []string, requireDoltRead
 			return err
 		}
 	}
-	return withWorkspaceCommandLock(ctx, ws, func() error {
-		if requireDoltReady {
-			if _, err := doltcli.RequireMinimumVersion(ctx, ws.RootDir, doltcli.MinSupportedVersion); err != nil {
-				return err
-			}
-			if err := store.EnsureDatabase(ctx, ws.DatabasePath, ws.WorkspaceID); err != nil {
-				return err
-			}
+	if requireDoltReady {
+		if _, err := doltcli.RequireMinimumVersion(ctx, ws.RootDir, doltcli.MinSupportedVersion); err != nil {
+			return err
 		}
-		return run(ws)
-	})
+		if err := store.EnsureDatabase(ctx, ws.DatabasePath, ws.WorkspaceID); err != nil {
+			return err
+		}
+	}
+	return run(ws)
 }
 
 func runWithApp(ctx context.Context, commandArgs []string, run func(context.Context, *app.App) error) error {
@@ -475,40 +434,22 @@ func runWithApp(ctx context.Context, commandArgs []string, run func(context.Cont
 	if err != nil {
 		return fmt.Errorf("get cwd: %w", err)
 	}
-	ws, err := workspace.Resolve(cwd)
+	_, err = workspace.Resolve(cwd)
 	if err != nil {
 		if errors.Is(err, workspace.ErrNotGitRepo) {
 			return fmt.Errorf("links requires running inside a git repository/worktree")
 		}
 		return err
 	}
-	return withWorkspaceCommandLock(ctx, ws, func() error {
-		ap, err := app.Open(ctx, cwd)
-		if err != nil {
-			if errors.Is(err, workspace.ErrNotGitRepo) {
-				return fmt.Errorf("links requires running inside a git repository/worktree")
-			}
-			return err
-		}
-		defer ap.Close()
-		// [LAW:single-enforcer] Command-level workspace mutation lock is acquired once at CLI dispatch to prevent overlapping write phases.
-		ctx, releaseMutationLock, err := ap.Store.AcquireMutationLock(ctx)
-		if err != nil {
-			return err
-		}
-		defer releaseMutationLock()
-		return run(ctx, ap)
-	})
-}
-
-func withWorkspaceCommandLock(ctx context.Context, ws workspace.Info, run func() error) error {
-	// [LAW:single-enforcer] The CLI workspace command lock is the single cross-command gate for access to the shared clone database.
-	releaseWorkspaceLock, err := acquireWorkspaceCommandLock(ctx, ws.DatabasePath)
+	ap, err := app.Open(ctx, cwd)
 	if err != nil {
+		if errors.Is(err, workspace.ErrNotGitRepo) {
+			return fmt.Errorf("links requires running inside a git repository/worktree")
+		}
 		return err
 	}
-	defer releaseWorkspaceLock()
-	return run()
+	defer ap.Close()
+	return run(ctx, ap)
 }
 
 func enforceBeadsPreflight(commandArgs []string) (workspace.Info, bool, error) {
@@ -644,145 +585,6 @@ func modeFromEnv() (outputMode, error) {
 		return outputModeAuto, nil
 	}
 	return parseOutputMode(raw)
-}
-
-func acquireWorkspaceCommandLock(ctx context.Context, databasePath string) (func(), error) {
-	lockDir := filepath.Clean(databasePath)
-	if err := os.MkdirAll(lockDir, 0o755); err != nil {
-		return nil, fmt.Errorf("acquire workspace command lock: create lock dir: %w", err)
-	}
-	lockPath := filepath.Join(lockDir, ".links-command.lock")
-	for {
-		release, lockErr := tryAcquireCommandLockFile(lockPath)
-		if lockErr == nil {
-			return release, nil
-		}
-		if !errors.Is(lockErr, os.ErrExist) {
-			return nil, fmt.Errorf("acquire workspace command lock: %w", lockErr)
-		}
-		if staleErr := removeStaleCommandLockFile(lockPath, commandLockStaleAfter); staleErr != nil {
-			return nil, fmt.Errorf("acquire workspace command lock: %w", staleErr)
-		}
-		if waitErr := waitForCommandLock(ctx, commandLockRetryDelay); waitErr != nil {
-			return nil, waitErr
-		}
-	}
-}
-
-func tryAcquireCommandLockFile(lockPath string) (func(), error) {
-	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := fmt.Fprintf(file, "%d\n", os.Getpid()); err != nil {
-		_ = file.Close()
-		_ = os.Remove(lockPath)
-		return nil, err
-	}
-	if closeErr := file.Close(); closeErr != nil {
-		_ = os.Remove(lockPath)
-		return nil, closeErr
-	}
-	return func() {
-		_ = os.Remove(lockPath)
-	}, nil
-}
-
-func removeStaleCommandLockFile(lockPath string, staleAfter time.Duration) error {
-	info, err := os.Stat(lockPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	isStaleByAge := time.Since(info.ModTime()) > staleAfter
-	isStaleByOwner, err := commandLockOwnedByDeadProcess(lockPath)
-	if err != nil {
-		return err
-	}
-	if !isStaleByAge && !isStaleByOwner {
-		return nil
-	}
-	if err := os.Remove(lockPath); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
-	return nil
-}
-
-func commandLockOwnedByDeadProcess(lockPath string) (bool, error) {
-	// [LAW:single-enforcer] Command-lock owner liveness classification is centralized here to avoid divergent stale-lock behavior.
-	pid, hasOwnerPID, err := readCommandLockOwnerPID(lockPath)
-	if err != nil {
-		return false, err
-	}
-	if !hasOwnerPID {
-		return false, nil
-	}
-	running, err := commandLockPIDRunning(pid)
-	if err != nil {
-		return false, err
-	}
-	return !running, nil
-}
-
-func readCommandLockOwnerPID(lockPath string) (int, bool, error) {
-	content, err := os.ReadFile(lockPath)
-	if errors.Is(err, os.ErrNotExist) {
-		return 0, false, nil
-	}
-	if err != nil {
-		return 0, false, err
-	}
-	pidText := strings.TrimSpace(string(content))
-	if pidText == "" {
-		return 0, false, nil
-	}
-	pid, err := strconv.Atoi(pidText)
-	if err != nil || pid <= 0 {
-		return 0, false, nil
-	}
-	return pid, true, nil
-}
-
-func isCommandLockPIDRunning(pid int) (bool, error) {
-	if pid <= 0 {
-		return false, nil
-	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		return false, nil
-	}
-	err = process.Signal(syscall.Signal(0))
-	if err == nil {
-		return true, nil
-	}
-	if errors.Is(err, os.ErrProcessDone) || errors.Is(err, syscall.ESRCH) {
-		return false, nil
-	}
-	if errors.Is(err, syscall.EPERM) {
-		return true, nil
-	}
-	// Unknown probe errors are treated as running to avoid removing an active lock.
-	return true, nil
-}
-
-func waitForCommandLock(ctx context.Context, delay time.Duration) error {
-	timer := time.NewTimer(delay)
-	defer func() {
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
-	}()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-timer.C:
-		return nil
-	}
 }
 
 func parseOutputMode(raw string) (outputMode, error) {

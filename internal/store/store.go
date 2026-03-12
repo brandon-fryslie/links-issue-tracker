@@ -2507,10 +2507,6 @@ func (s *Store) withCommitLock(ctx context.Context, operation retryOperation) er
 	return operation(lockedCtx)
 }
 
-func (s *Store) AcquireMutationLock(ctx context.Context) (context.Context, func(), error) {
-	return s.acquireCommitLock(ctx)
-}
-
 func (s *Store) acquireCommitLock(ctx context.Context) (context.Context, func(), error) {
 	if alreadyLocked, _ := ctx.Value(commitLockContextKey{}).(bool); alreadyLocked {
 		return ctx, func() {}, nil
