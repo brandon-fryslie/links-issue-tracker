@@ -19,22 +19,19 @@ func newMutationQueueTestStore(t *testing.T) *Store {
 		queueOffsetPath: filepath.Join(root, ".links-mutation-queue.offset"),
 		queueLockPath:   filepath.Join(root, ".links-mutation-queue.lock"),
 		telemetryDir:    filepath.Join(root, "telemetry"),
-		queueResults:    map[string]mutationQueueResult{},
 	}
 }
 
-func TestSyncQueueBeforeReadReturnsApplyError(t *testing.T) {
+func TestDrainMutationQueueAppliesPendingEntries(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
 	defer st.Close()
-	if err := os.WriteFile(st.commitLockPath, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
-		t.Fatalf("WriteFile(commit lock) error = %v", err)
-	}
+
 	payload, err := json.Marshal(CreateIssueInput{
-		Title:     "queued read apply error",
+		Title:     "queued issue",
 		IssueType: "task",
 		Priority:  2,
 	})
@@ -42,7 +39,7 @@ func TestSyncQueueBeforeReadReturnsApplyError(t *testing.T) {
 		t.Fatalf("json.Marshal(CreateIssueInput) error = %v", err)
 	}
 	entry := mutationQueueEntry{
-		ID:            "qop-read-apply-error",
+		ID:            "qop-drain-test",
 		Operation:     mutationOperationCreateIssue,
 		Payload:       payload,
 		EnqueuedAt:    time.Now().UTC(),
@@ -52,27 +49,35 @@ func TestSyncQueueBeforeReadReturnsApplyError(t *testing.T) {
 		t.Fatalf("appendMutationQueueEntry() error = %v", err)
 	}
 
-	err = st.syncQueueBeforeRead(ctx)
-	if err == nil {
-		t.Fatal("syncQueueBeforeRead() error = nil, want apply error")
+	if err := st.DrainMutationQueue(ctx); err != nil {
+		t.Fatalf("DrainMutationQueue() error = %v", err)
 	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("syncQueueBeforeRead() error = %v, want context.DeadlineExceeded", err)
+
+	issues, err := st.ListIssues(ctx, ListIssuesFilter{})
+	if err != nil {
+		t.Fatalf("ListIssues() error = %v", err)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("ListIssues() len = %d, want 1", len(issues))
+	}
+	if issues[0].Title != "queued issue" {
+		t.Fatalf("ListIssues()[0].Title = %q, want %q", issues[0].Title, "queued issue")
 	}
 }
 
-func TestApplyMutationQueueLockedRetryableFailureDoesNotAdvanceOffset(t *testing.T) {
+func TestDrainMutationQueueRetryableFailureDoesNotAdvanceOffset(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
 	defer st.Close()
+	// Hold the commit lock so the queued mutation will fail with a retryable error.
 	if err := os.WriteFile(st.commitLockPath, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600); err != nil {
 		t.Fatalf("WriteFile(commit lock) error = %v", err)
 	}
 	payload, err := json.Marshal(CreateIssueInput{
-		Title:     "queued retryable apply error",
+		Title:     "queued retryable",
 		IssueType: "task",
 		Priority:  2,
 	})
@@ -80,7 +85,7 @@ func TestApplyMutationQueueLockedRetryableFailureDoesNotAdvanceOffset(t *testing
 		t.Fatalf("json.Marshal(CreateIssueInput) error = %v", err)
 	}
 	entry := mutationQueueEntry{
-		ID:            "qop-retryable-apply-error",
+		ID:            "qop-retryable",
 		Operation:     mutationOperationCreateIssue,
 		Payload:       payload,
 		EnqueuedAt:    time.Now().UTC(),
@@ -90,35 +95,24 @@ func TestApplyMutationQueueLockedRetryableFailureDoesNotAdvanceOffset(t *testing
 		t.Fatalf("appendMutationQueueEntry() error = %v", err)
 	}
 
-	applyCtx, cancel := context.WithTimeout(context.WithValue(ctx, mutationQueueContextKey{}, true), mutationQueueApplyTimeout)
-	defer cancel()
-	err = st.applyMutationQueueLocked(applyCtx)
+	err = st.DrainMutationQueue(ctx)
 	if err == nil {
-		t.Fatal("applyMutationQueueLocked() error = nil, want apply failure")
+		t.Fatal("DrainMutationQueue() error = nil, want failure")
 	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("applyMutationQueueLocked() error = %v, want context.DeadlineExceeded", err)
-	}
+
 	offset, offsetErr := st.readMutationQueueOffset()
 	if offsetErr != nil {
 		t.Fatalf("readMutationQueueOffset() error = %v", offsetErr)
 	}
 	if offset != 0 {
-		t.Fatalf("queue offset = %d, want 0 on apply failure", offset)
-	}
-	result, ok := st.takeMutationQueueResult(entry.ID)
-	if !ok {
-		t.Fatalf("takeMutationQueueResult(%q) missing result", entry.ID)
-	}
-	if result.err == nil {
-		t.Fatalf("queue result error = nil, want apply error for %q", entry.ID)
+		t.Fatalf("queue offset = %d, want 0 (retryable failure should not advance)", offset)
 	}
 }
 
-func TestApplyMutationQueueLockedNonRetryableFailureAdvancesOffset(t *testing.T) {
+func TestDrainMutationQueueNonRetryableFailureAdvancesOffset(t *testing.T) {
 	st := newMutationQueueTestStore(t)
 	entry := mutationQueueEntry{
-		ID:            "qop-non-retryable-apply-error",
+		ID:            "qop-non-retryable",
 		Operation:     "unsupported_operation",
 		Payload:       json.RawMessage(`{}`),
 		EnqueuedAt:    time.Now().UTC(),
@@ -130,7 +124,7 @@ func TestApplyMutationQueueLockedNonRetryableFailureAdvancesOffset(t *testing.T)
 
 	err := st.applyMutationQueueLocked(context.Background())
 	if err != nil {
-		t.Fatalf("applyMutationQueueLocked() error = %v, want nil for non-retryable failures", err)
+		t.Fatalf("applyMutationQueueLocked() error = %v, want nil for non-retryable", err)
 	}
 	offset, offsetErr := st.readMutationQueueOffset()
 	if offsetErr != nil {
@@ -141,7 +135,7 @@ func TestApplyMutationQueueLockedNonRetryableFailureAdvancesOffset(t *testing.T)
 		t.Fatalf("Stat(queue) error = %v", statErr)
 	}
 	if offset != info.Size() {
-		t.Fatalf("queue offset = %d, want %d after consuming non-retryable entry", offset, info.Size())
+		t.Fatalf("queue offset = %d, want %d", offset, info.Size())
 	}
 }
 
@@ -178,46 +172,7 @@ func TestRemoveStaleMutationQueueLockRemovesDeadOwner(t *testing.T) {
 	}
 }
 
-func TestReadOperationsApplyQueuedMutationsBeforeRead(t *testing.T) {
-	ctx := context.Background()
-	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
-	}
-	defer st.Close()
-
-	payload, err := json.Marshal(CreateIssueInput{
-		Title:     "queued issue",
-		IssueType: "task",
-		Priority:  2,
-	})
-	if err != nil {
-		t.Fatalf("json.Marshal(CreateIssueInput) error = %v", err)
-	}
-	entry := mutationQueueEntry{
-		ID:            "qop-read-before-list",
-		Operation:     mutationOperationCreateIssue,
-		Payload:       payload,
-		EnqueuedAt:    time.Now().UTC(),
-		EnqueuedByPID: os.Getpid(),
-	}
-	if err := st.appendMutationQueueEntry(entry); err != nil {
-		t.Fatalf("appendMutationQueueEntry() error = %v", err)
-	}
-
-	issues, err := st.ListIssues(ctx, ListIssuesFilter{})
-	if err != nil {
-		t.Fatalf("ListIssues() error = %v", err)
-	}
-	if len(issues) != 1 {
-		t.Fatalf("ListIssues() len = %d, want 1 queued-applied issue", len(issues))
-	}
-	if issues[0].Title != "queued issue" {
-		t.Fatalf("ListIssues()[0].Title = %q, want queued issue", issues[0].Title)
-	}
-}
-
-func TestApplyMutationQueueDoesNotTruncateQueueFile(t *testing.T) {
+func TestDrainMutationQueueDoesNotTruncateQueueFile(t *testing.T) {
 	st := newMutationQueueTestStore(t)
 	if err := os.MkdirAll(filepath.Dir(st.queuePath), 0o755); err != nil {
 		t.Fatalf("MkdirAll(queue dir) error = %v", err)
@@ -242,6 +197,6 @@ func TestApplyMutationQueueDoesNotTruncateQueueFile(t *testing.T) {
 		t.Fatalf("readMutationQueueOffset() error = %v", err)
 	}
 	if offset != int64(len(consumedPayload)) {
-		t.Fatalf("queue offset = %d, want %d after apply", offset, len(consumedPayload))
+		t.Fatalf("queue offset = %d, want %d", offset, len(consumedPayload))
 	}
 }

@@ -449,6 +449,10 @@ func runWithApp(ctx context.Context, commandArgs []string, run func(context.Cont
 		return err
 	}
 	defer ap.Close()
+	// [LAW:single-enforcer] Drain any pending queued mutations once at the CLI boundary before command execution.
+	if err := ap.Store.DrainMutationQueue(ctx); err != nil {
+		return fmt.Errorf("drain mutation queue: %w", err)
+	}
 	return run(ctx, ap)
 }
 
@@ -628,7 +632,7 @@ func runNew(ctx context.Context, stdout io.Writer, ap *app.App, args []string) e
 		Title: *title, Description: *description, IssueType: *issueType, Priority: *priority, Assignee: *assignee, Labels: splitCSV(*labels),
 	})
 	if err != nil {
-		return handleQueuedMutationError(stdout, *jsonOut, err)
+		return err
 	}
 	return printValue(stdout, issue, *jsonOut, printIssueSummary)
 }
@@ -889,7 +893,7 @@ func runUpdate(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 				CreatedBy: *by,
 			})
 			if err != nil {
-				return handleQueuedMutationError(stdout, *jsonOut, err)
+				return err
 			}
 			issue = transitioned
 		}
@@ -923,7 +927,7 @@ func runUpdate(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 		}
 		updated, err := ap.Store.UpdateIssue(ctx, issueID, update)
 		if err != nil {
-			return handleQueuedMutationError(stdout, *jsonOut, err)
+			return err
 		}
 		issue = updated
 	}
@@ -965,42 +969,11 @@ func runTransition(ctx context.Context, stdout io.Writer, ap *app.App, args []st
 		CreatedBy: *by,
 	})
 	if err != nil {
-		return handleQueuedMutationError(stdout, *jsonOut, err)
+		return err
 	}
 	return printValue(stdout, issue, *jsonOut, printIssueSummary)
 }
 
-func writeQueuedMutationResponse(stdout io.Writer, jsonOut bool, mutationErr error) (bool, error) {
-	var queued store.MutationQueuedError
-	if !errors.As(mutationErr, &queued) {
-		return false, nil
-	}
-	payload := map[string]string{
-		"status":       "queued",
-		"operation_id": queued.OperationID,
-		"operation":    queued.Operation,
-	}
-	if shouldWriteJSON(stdout, jsonOut) {
-		return true, writeJSON(stdout, payload)
-	}
-	_, err := fmt.Fprintf(stdout, "queued %s %s\n", queued.OperationID, queued.Operation)
-	return true, err
-}
-
-func handleQueuedMutationError(stdout io.Writer, jsonOut bool, mutationErr error) error {
-	if mutationErr == nil {
-		return nil
-	}
-	// [LAW:single-enforcer] Queued-mutation response formatting is enforced once for all mutating CLI entrypoints.
-	wroteQueuedResponse, writeErr := writeQueuedMutationResponse(stdout, jsonOut, mutationErr)
-	if writeErr != nil {
-		return writeErr
-	}
-	if wroteQueuedResponse {
-		return nil
-	}
-	return mutationErr
-}
 
 func runComment(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
 	if len(args) == 0 || args[0] != "add" {
@@ -1023,7 +996,7 @@ func runComment(ctx context.Context, stdout io.Writer, ap *app.App, args []strin
 	}
 	comment, err := ap.Store.AddComment(ctx, store.AddCommentInput{IssueID: positional[0], Body: *body, CreatedBy: *by})
 	if err != nil {
-		return handleQueuedMutationError(stdout, *jsonOut, err)
+		return err
 	}
 	return printValue(stdout, comment, *jsonOut, func(w io.Writer, v any) error {
 		c := v.(model.Comment)
@@ -1055,7 +1028,7 @@ func runDep(ctx context.Context, stdout io.Writer, ap *app.App, args []string) e
 		}
 		rel, err := ap.Store.AddRelation(ctx, store.AddRelationInput{SrcID: positional[0], DstID: positional[1], Type: *relType, CreatedBy: *by})
 		if err != nil {
-			return handleQueuedMutationError(stdout, *jsonOut, err)
+			return err
 		}
 		return printValue(stdout, rel, *jsonOut, func(w io.Writer, v any) error {
 			r := v.(model.Relation)
@@ -1078,7 +1051,7 @@ func runDep(ctx context.Context, stdout io.Writer, ap *app.App, args []string) e
 			return errors.New("usage: lit dep rm <src-id> <dst-id> [--type ...]")
 		}
 		if err := ap.Store.RemoveRelation(ctx, positional[0], positional[1], *relType); err != nil {
-			return handleQueuedMutationError(stdout, *jsonOut, err)
+			return err
 		}
 		return printValue(stdout, map[string]string{"status": "ok"}, *jsonOut, func(w io.Writer, _ any) error {
 			_, err := fmt.Fprintln(w, "ok")
@@ -1139,7 +1112,7 @@ func runLabel(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 		}
 		labels, err := ap.Store.AddLabel(ctx, store.AddLabelInput{IssueID: positional[0], Name: positional[1], CreatedBy: *by})
 		if err != nil {
-			return handleQueuedMutationError(stdout, *jsonOut, err)
+			return err
 		}
 		return printValue(stdout, labels, *jsonOut, printLabels)
 	case "rm":
@@ -1158,7 +1131,7 @@ func runLabel(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 		}
 		labels, err := ap.Store.RemoveLabel(ctx, positional[0], positional[1])
 		if err != nil {
-			return handleQueuedMutationError(stdout, *jsonOut, err)
+			return err
 		}
 		return printValue(stdout, labels, *jsonOut, printLabels)
 	default:
@@ -1189,7 +1162,7 @@ func runParent(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 			CreatedBy: *by,
 		})
 		if err != nil {
-			return handleQueuedMutationError(stdout, *jsonOut, err)
+			return err
 		}
 		return printValue(stdout, rel, *jsonOut, func(w io.Writer, v any) error {
 			relation := v.(model.Relation)
@@ -1208,7 +1181,7 @@ func runParent(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 			return errors.New("usage: lit parent clear <child-id> [--json]")
 		}
 		if err := ap.Store.ClearParent(ctx, positional[0]); err != nil {
-			return handleQueuedMutationError(stdout, *jsonOut, err)
+			return err
 		}
 		return printValue(stdout, map[string]string{"status": "ok"}, *jsonOut, func(w io.Writer, _ any) error {
 			_, err := fmt.Fprintln(w, "ok")
@@ -2075,7 +2048,7 @@ func runFsck(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	}
 	report, err := ap.Store.Fsck(ctx, *repair)
 	if err != nil {
-		return handleQueuedMutationError(stdout, *jsonOut, err)
+		return err
 	}
 	if shouldWriteJSON(stdout, *jsonOut) {
 		if err := writeJSON(stdout, report); err != nil {
@@ -2256,22 +2229,12 @@ func runBulk(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 					CreatedBy: *by,
 				})
 				if err != nil {
-					var queued store.MutationQueuedError
-					if errors.As(err, &queued) {
-						results[issueID] = "queued:" + queued.OperationID
-						continue
-					}
 					results[issueID] = err.Error()
 					continue
 				}
 			case "rm":
 				_, err := ap.Store.RemoveLabel(ctx, issueID, *label)
 				if err != nil {
-					var queued store.MutationQueuedError
-					if errors.As(err, &queued) {
-						results[issueID] = "queued:" + queued.OperationID
-						continue
-					}
 					results[issueID] = err.Error()
 					continue
 				}
@@ -2315,11 +2278,6 @@ func runBulk(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 				CreatedBy: *by,
 			})
 			if err != nil {
-				var queued store.MutationQueuedError
-				if errors.As(err, &queued) {
-					results[issueID] = "queued:" + queued.OperationID
-					continue
-				}
 				results[issueID] = err.Error()
 				continue
 			}
@@ -2793,10 +2751,7 @@ func restoreFromExportPath(ctx context.Context, ap *app.App, path string, force 
 		return err
 	}
 	if err := ap.Store.ReplaceFromExport(ctx, targetExport); err != nil {
-		var queued store.MutationQueuedError
-		if !errors.As(err, &queued) {
-			return err
-		}
+		return err
 	}
 	if _, err := syncfile.WriteAtomic(syncBasePath(ap), targetExport); err != nil {
 		return err
@@ -2805,15 +2760,10 @@ func restoreFromExportPath(ctx context.Context, ap *app.App, path string, force 
 	if err != nil {
 		return err
 	}
-	err = ap.Store.RecordSyncState(ctx, store.SyncState{
+	return ap.Store.RecordSyncState(ctx, store.SyncState{
 		Path:        restorePath,
 		ContentHash: hash,
 	})
-	var queued store.MutationQueuedError
-	if errors.As(err, &queued) {
-		return nil
-	}
-	return err
 }
 
 func hashExport(export model.Export) (string, error) {

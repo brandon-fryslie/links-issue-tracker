@@ -14,14 +14,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/google/uuid"
-
 	"github.com/bmf/links-issue-tracker/internal/model"
 )
 
 const (
-	mutationQueueTriggerRead  = "read"
-	mutationQueueTriggerWrite = "write"
 	// [LAW:no-mode-explosion] Queue apply timeout is a single bounded policy for all queue-driven mutation attempts.
 	mutationQueueApplyTimeout = 300 * time.Millisecond
 	mutationQueueLockStaleAge = 30 * time.Second
@@ -48,28 +44,12 @@ const (
 	mutationOperationFsck            = "fsck"
 )
 
-type mutationQueueContextKey struct{}
-
-type mutationQueueResult struct {
-	value any
-	err   error
-}
-
 type mutationQueueEntry struct {
 	ID            string          `json:"id"`
 	Operation     string          `json:"operation"`
 	Payload       json.RawMessage `json:"payload"`
 	EnqueuedAt    time.Time       `json:"enqueued_at"`
 	EnqueuedByPID int             `json:"enqueued_by_pid"`
-}
-
-type MutationQueuedError struct {
-	OperationID string
-	Operation   string
-}
-
-func (e MutationQueuedError) Error() string {
-	return fmt.Sprintf("mutation queued for async apply: operation=%s operation_id=%s", e.Operation, e.OperationID)
 }
 
 type updateIssueQueuePayload struct {
@@ -102,70 +82,28 @@ type fsckQueuePayload struct {
 	Repair bool `json:"repair"`
 }
 
-func mutationQueueBypass(ctx context.Context) bool {
-	if ctx == nil {
-		return false
+// DrainMutationQueue applies any pending queued mutations left by prior processes.
+// [LAW:single-enforcer] This is the single entry point for queue drain, called once at the CLI boundary.
+func (s *Store) DrainMutationQueue(ctx context.Context) error {
+	release, acquired, err := tryAcquireNonBlockingMutationQueueLock(s.queueLockPath)
+	if err != nil {
+		return err
 	}
-	bypass, _ := ctx.Value(mutationQueueContextKey{}).(bool)
-	return bypass
-}
-
-func (s *Store) syncQueueBeforeRead(ctx context.Context) error {
-	if mutationQueueBypass(ctx) {
+	if !acquired {
 		return nil
 	}
-	if err := s.applyMutationQueue(ctx, mutationQueueTriggerRead); err != nil {
+	defer release()
+
+	applyCtx, cancel := context.WithTimeout(ctx, mutationQueueApplyTimeout)
+	defer cancel()
+	if err := s.applyMutationQueueLocked(applyCtx); err != nil {
 		_ = s.writeMutationQueueTelemetry(map[string]any{
-			"event": "queue_read_apply_error",
+			"event": "queue_drain_error",
 			"error": err.Error(),
 		})
 		return err
 	}
 	return nil
-}
-
-func enqueueMutationAndApply[T any](ctx context.Context, s *Store, operation string, payload any) (T, error) {
-	var zero T
-	encodedPayload, err := json.Marshal(payload)
-	if err != nil {
-		return zero, fmt.Errorf("encode queued mutation payload (%s): %w", operation, err)
-	}
-	entry := mutationQueueEntry{
-		ID:            "qop-" + uuid.NewString(),
-		Operation:     operation,
-		Payload:       encodedPayload,
-		EnqueuedAt:    time.Now().UTC(),
-		EnqueuedByPID: os.Getpid(),
-	}
-	if err := s.appendMutationQueueEntry(entry); err != nil {
-		return zero, err
-	}
-	applyErr := s.applyMutationQueue(ctx, mutationQueueTriggerWrite)
-	result, ok := s.takeMutationQueueResult(entry.ID)
-	if ok {
-		if result.err != nil {
-			return zero, result.err
-		}
-		if result.value == nil {
-			return zero, nil
-		}
-		if typed, typedOK := result.value.(T); typedOK {
-			return typed, nil
-		}
-		encodedResult, err := json.Marshal(result.value)
-		if err != nil {
-			return zero, fmt.Errorf("encode queued mutation result (%s): %w", operation, err)
-		}
-		var decoded T
-		if err := json.Unmarshal(encodedResult, &decoded); err != nil {
-			return zero, fmt.Errorf("decode queued mutation result (%s): %w", operation, err)
-		}
-		return decoded, nil
-	}
-	if applyErr != nil {
-		return zero, MutationQueuedError{OperationID: entry.ID, Operation: operation}
-	}
-	return zero, MutationQueuedError{OperationID: entry.ID, Operation: operation}
 }
 
 func (s *Store) appendMutationQueueEntry(entry mutationQueueEntry) error {
@@ -183,32 +121,6 @@ func (s *Store) appendMutationQueueEntry(entry mutationQueueEntry) error {
 	defer file.Close()
 	if _, err := file.Write(append(encodedEntry, '\n')); err != nil {
 		return fmt.Errorf("append mutation queue entry: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) applyMutationQueue(ctx context.Context, trigger string) error {
-	if mutationQueueBypass(ctx) {
-		return nil
-	}
-	release, acquired, err := tryAcquireNonBlockingMutationQueueLock(s.queueLockPath)
-	if err != nil {
-		return err
-	}
-	if !acquired {
-		return nil
-	}
-	defer release()
-
-	applyCtx, cancel := context.WithTimeout(context.WithValue(ctx, mutationQueueContextKey{}, true), mutationQueueApplyTimeout)
-	defer cancel()
-	if err := s.applyMutationQueueLocked(applyCtx); err != nil {
-		_ = s.writeMutationQueueTelemetry(map[string]any{
-			"event":   "queue_apply_error",
-			"trigger": trigger,
-			"error":   err.Error(),
-		})
-		return err
 	}
 	return nil
 }
@@ -331,10 +243,6 @@ func (s *Store) applyMutationQueueLocked(ctx context.Context) error {
 		line, readErr := reader.ReadBytes('\n')
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) {
-				if len(line) == 0 {
-					break
-				}
-				// Keep trailing partial line for the next pass.
 				break
 			}
 			return fmt.Errorf("read mutation queue: %w", readErr)
@@ -364,8 +272,7 @@ func (s *Store) applyMutationQueueLocked(ctx context.Context) error {
 			}
 			continue
 		}
-		value, applyErr := s.applyMutationQueueEntry(ctx, entry)
-		s.storeMutationQueueResult(entry.ID, mutationQueueResult{value: value, err: applyErr})
+		_, applyErr := s.applyMutationQueueEntry(ctx, entry)
 		if applyErr != nil {
 			retryable := shouldRetryQueuedMutationError(applyErr)
 			_ = s.writeMutationQueueTelemetry(map[string]any{
@@ -522,22 +429,6 @@ func (s *Store) applyMutationQueueEntry(ctx context.Context, entry mutationQueue
 	default:
 		return nil, fmt.Errorf("unsupported queued mutation operation %q", entry.Operation)
 	}
-}
-
-func (s *Store) storeMutationQueueResult(entryID string, result mutationQueueResult) {
-	s.queueResultsMu.Lock()
-	defer s.queueResultsMu.Unlock()
-	s.queueResults[entryID] = result
-}
-
-func (s *Store) takeMutationQueueResult(entryID string) (mutationQueueResult, bool) {
-	s.queueResultsMu.Lock()
-	defer s.queueResultsMu.Unlock()
-	result, ok := s.queueResults[entryID]
-	if ok {
-		delete(s.queueResults, entryID)
-	}
-	return result, ok
 }
 
 func (s *Store) readMutationQueueOffset() (int64, error) {
