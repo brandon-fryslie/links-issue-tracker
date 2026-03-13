@@ -434,13 +434,6 @@ func runWithApp(ctx context.Context, commandArgs []string, run func(context.Cont
 	if err != nil {
 		return fmt.Errorf("get cwd: %w", err)
 	}
-	_, err = workspace.Resolve(cwd)
-	if err != nil {
-		if errors.Is(err, workspace.ErrNotGitRepo) {
-			return fmt.Errorf("links requires running inside a git repository/worktree")
-		}
-		return err
-	}
 	ap, err := app.Open(ctx, cwd)
 	if err != nil {
 		if errors.Is(err, workspace.ErrNotGitRepo) {

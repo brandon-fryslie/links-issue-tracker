@@ -107,14 +107,14 @@ func (s *Store) DrainMutationQueue(ctx context.Context) error {
 }
 
 func (s *Store) appendMutationQueueEntry(entry mutationQueueEntry) error {
-	if err := os.MkdirAll(filepath.Dir(s.queuePath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.queuePath), 0o700); err != nil {
 		return fmt.Errorf("create queue dir: %w", err)
 	}
 	encodedEntry, err := json.Marshal(entry)
 	if err != nil {
 		return fmt.Errorf("encode queue entry: %w", err)
 	}
-	file, err := os.OpenFile(s.queuePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	file, err := os.OpenFile(s.queuePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 	if err != nil {
 		return fmt.Errorf("open mutation queue: %w", err)
 	}
@@ -210,14 +210,14 @@ func mutationQueueLockOwnerRunning(path string) (running bool, knownOwner bool, 
 }
 
 func (s *Store) applyMutationQueueLocked(ctx context.Context) error {
-	if err := os.MkdirAll(filepath.Dir(s.queuePath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.queuePath), 0o700); err != nil {
 		return fmt.Errorf("create queue dir: %w", err)
 	}
 	offset, err := s.readMutationQueueOffset()
 	if err != nil {
 		return err
 	}
-	file, err := os.OpenFile(s.queuePath, os.O_CREATE|os.O_RDONLY, 0o644)
+	file, err := os.OpenFile(s.queuePath, os.O_CREATE|os.O_RDONLY, 0o600)
 	if err != nil {
 		return fmt.Errorf("open mutation queue for read: %w", err)
 	}
@@ -453,7 +453,7 @@ func (s *Store) readMutationQueueOffset() (int64, error) {
 func (s *Store) writeMutationQueueOffset(offset int64) error {
 	tmpPath := fmt.Sprintf("%s.tmp.%d", s.queueOffsetPath, os.Getpid())
 	payload := []byte(strconv.FormatInt(offset, 10) + "\n")
-	if err := os.WriteFile(tmpPath, payload, 0o644); err != nil {
+	if err := os.WriteFile(tmpPath, payload, 0o600); err != nil {
 		return fmt.Errorf("write mutation queue offset temp: %w", err)
 	}
 	if err := os.Rename(tmpPath, s.queueOffsetPath); err != nil {
@@ -463,7 +463,7 @@ func (s *Store) writeMutationQueueOffset(offset int64) error {
 }
 
 func (s *Store) writeMutationQueueTelemetry(fields map[string]any) error {
-	if err := os.MkdirAll(s.telemetryDir, 0o755); err != nil {
+	if err := os.MkdirAll(s.telemetryDir, 0o700); err != nil {
 		return err
 	}
 	payload := map[string]any{
@@ -482,5 +482,5 @@ func (s *Store) writeMutationQueueTelemetry(fields map[string]any) error {
 	}
 	encoded = append(encoded, '\n')
 	fileName := fmt.Sprintf("mutation-queue-%s-%d.json", time.Now().UTC().Format("20060102T150405.000000000Z"), os.Getpid())
-	return os.WriteFile(filepath.Join(s.telemetryDir, fileName), encoded, 0o644)
+	return os.WriteFile(filepath.Join(s.telemetryDir, fileName), encoded, 0o600)
 }
