@@ -305,6 +305,15 @@ func runMigrationWithOptions(ctx context.Context, ws workspace.Info, applyChange
 		return report, nil
 	}
 
+	targets := scan.backupTargets()
+	if len(targets) > 0 {
+		backupPath, backupErr := createMigrationBackup(ws, targets)
+		if backupErr != nil {
+			return report, backupErr
+		}
+		report.BackupPath = backupPath
+	}
+
 	if hasBeadsDataPath {
 		// [LAW:one-source-of-truth] Reuse the canonical beads importer so migrate and beads import apply identical translation rules.
 		importSummary, importErr := importBeadsData(ctx, ws, beadsDataPath)
@@ -316,15 +325,6 @@ func runMigrationWithOptions(ctx context.Context, ws workspace.Info, applyChange
 		report.ImportRelations = importSummary.Relations
 		report.ImportComments = importSummary.Comments
 		report.ImportLabels = importSummary.Labels
-	}
-
-	targets := scan.backupTargets()
-	if len(targets) > 0 {
-		backupPath, backupErr := createMigrationBackup(ws, targets)
-		if backupErr != nil {
-			return report, backupErr
-		}
-		report.BackupPath = backupPath
 	}
 
 	if err := applyHookCleanup(scan.HookPlans, &report); err != nil {

@@ -80,6 +80,7 @@ _lnks() {
     'init:initialize links and auto-migrate beads'
     'ls:list issues'
     'show:show issue'
+    'update:update issue fields'
     'ready:list ready issues'
     'start:claim issue (open->in_progress)'
     'done:mark issue closed (in_progress->closed)'
