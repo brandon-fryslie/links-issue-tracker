@@ -75,7 +75,7 @@ func (e BeadsMigrationRequiredError) ErrorDetails() map[string]any {
 	return details
 }
 
-type migrateBeadsReport struct {
+type migrateReport struct {
 	Mode                string   `json:"mode"`
 	Applied             bool     `json:"applied"`
 	ResidueDetected     bool     `json:"residue_detected"`
@@ -222,7 +222,7 @@ func runMigrate(ctx context.Context, stdout io.Writer, ws workspace.Info, args [
 		return errors.New("usage: lnks migrate [--apply] [--json] [--skip-hooks] [--skip-agents]")
 	}
 
-	report, err := migrateBeadsWithOptions(
+	report, err := runMigrationWithOptions(
 		ctx,
 		ws,
 		*applyChanges,
@@ -233,7 +233,7 @@ func runMigrate(ctx context.Context, stdout io.Writer, ws workspace.Info, args [
 		return err
 	}
 	return printValue(stdout, report, *jsonOut, func(w io.Writer, v any) error {
-		r := v.(migrateBeadsReport)
+		r := v.(migrateReport)
 		_, printErr := fmt.Fprintf(
 			w,
 			"mode=%s scanned=%d beads_hooks=%d modified=%d removed=%d data_imported=%t agents_updated=%t lit_hook_installed=%t\n",
@@ -250,7 +250,7 @@ func runMigrate(ctx context.Context, stdout io.Writer, ws workspace.Info, args [
 	})
 }
 
-func migrateBeadsWithOptions(ctx context.Context, ws workspace.Info, applyChanges bool, options migrateApplyOptions, preScanned *beadsResidueScan) (migrateBeadsReport, error) {
+func runMigrationWithOptions(ctx context.Context, ws workspace.Info, applyChanges bool, options migrateApplyOptions, preScanned *beadsResidueScan) (migrateReport, error) {
 	mode := "dry-run"
 	if applyChanges {
 		mode = "apply"
@@ -263,11 +263,11 @@ func migrateBeadsWithOptions(ctx context.Context, ws workspace.Info, applyChange
 		var scanErr error
 		scan, scanErr = scanBeadsResidue(ws)
 		if scanErr != nil {
-			return migrateBeadsReport{}, scanErr
+			return migrateReport{}, scanErr
 		}
 	}
 
-	report := migrateBeadsReport{
+	report := migrateReport{
 		Mode:               mode,
 		Applied:            applyChanges,
 		ResidueDetected:    scan.HasResidue(),
@@ -455,7 +455,7 @@ func hasBeadsSignal(content []byte) bool {
 	return beadsSignalRegex.Match(content)
 }
 
-func applyHookCleanup(plans []hookCleanupPlan, report *migrateBeadsReport) error {
+func applyHookCleanup(plans []hookCleanupPlan, report *migrateReport) error {
 	for _, plan := range plans {
 		if !plan.Changed {
 			continue
@@ -479,7 +479,7 @@ func applyHookCleanup(plans []hookCleanupPlan, report *migrateBeadsReport) error
 	return nil
 }
 
-func applyAgentsCleanup(plan agentsCleanupPlan, report *migrateBeadsReport) error {
+func applyAgentsCleanup(plan agentsCleanupPlan, report *migrateReport) error {
 	if !plan.Found || !plan.Changed {
 		return nil
 	}
@@ -491,7 +491,7 @@ func applyAgentsCleanup(plan agentsCleanupPlan, report *migrateBeadsReport) erro
 	return nil
 }
 
-func applyArtifactCleanup(paths []string, report *migrateBeadsReport) error {
+func applyArtifactCleanup(paths []string, report *migrateReport) error {
 	for _, path := range paths {
 		if err := os.RemoveAll(path); err != nil {
 			return fmt.Errorf("remove beads artifact %s: %w", path, err)
@@ -500,7 +500,7 @@ func applyArtifactCleanup(paths []string, report *migrateBeadsReport) error {
 	return nil
 }
 
-func applyConfigCleanup(plans []configCleanupPlan, report *migrateBeadsReport) error {
+func applyConfigCleanup(plans []configCleanupPlan, report *migrateReport) error {
 	for _, plan := range plans {
 		if !plan.Changed {
 			continue
