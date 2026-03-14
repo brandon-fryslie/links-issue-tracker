@@ -161,13 +161,13 @@ func TestRunReadyMarksMissingRequiredFieldAsNotReady(t *testing.T) {
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(configDir) error = %v", err)
 	}
-	configContent := "[ready]\nrequired_fields = [\"prompt\"]\n"
+	configContent := "[ready]\nrequired_fields = [\"description\"]\n"
 	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(configContent), 0o644); err != nil {
 		t.Fatalf("WriteFile(config.toml) error = %v", err)
 	}
 
 	issue, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
-		Title:     "Needs prompt",
+		Title:     "Needs description",
 		IssueType: "task",
 		Priority:  1,
 		Assignee:  "alice",
@@ -195,12 +195,12 @@ func TestRunReadyMarksMissingRequiredFieldAsNotReady(t *testing.T) {
 	if got.NotReady[0].Issue.ID != issue.ID {
 		t.Fatalf("got.NotReady[0].Issue.ID = %q, want %q", got.NotReady[0].Issue.ID, issue.ID)
 	}
-	if got.NotReady[0].Reason != "Field prompt not set" {
-		t.Fatalf("got.NotReady[0].Reason = %q, want %q", got.NotReady[0].Reason, "Field prompt not set")
+	if got.NotReady[0].Reason != "Field description not set" {
+		t.Fatalf("got.NotReady[0].Reason = %q, want %q", got.NotReady[0].Reason, "Field description not set")
 	}
 }
 
-func TestRunReadyMarksInvalidRequiredFieldAsValidationFailed(t *testing.T) {
+func TestRunReadyMarksUnknownRequiredFieldAsNotFound(t *testing.T) {
 	ctx := context.Background()
 	ap := newTestCLIApp(t)
 
@@ -217,7 +217,6 @@ func TestRunReadyMarksInvalidRequiredFieldAsValidationFailed(t *testing.T) {
 		Title:     "Unknown field",
 		IssueType: "task",
 		Priority:  1,
-		Prompt:    "present",
 	})
 	if err != nil {
 		t.Fatalf("CreateIssue(issue) error = %v", err)
@@ -238,7 +237,7 @@ func TestRunReadyMarksInvalidRequiredFieldAsValidationFailed(t *testing.T) {
 	if got.NotReady[0].Issue.ID != issue.ID {
 		t.Fatalf("got.NotReady[0].Issue.ID = %q, want %q", got.NotReady[0].Issue.ID, issue.ID)
 	}
-	if got.NotReady[0].Reason != "Field made_up_field validation failed" {
+	if got.NotReady[0].Reason != "Field made_up_field not found" {
 		t.Fatalf("got.NotReady[0].Reason = %q", got.NotReady[0].Reason)
 	}
 }
@@ -251,21 +250,21 @@ func TestRunReadyTextOutputIncludesNotReadySectionAndReason(t *testing.T) {
 	if err := os.MkdirAll(configDir, 0o755); err != nil {
 		t.Fatalf("MkdirAll(configDir) error = %v", err)
 	}
-	configContent := "[ready]\nrequired_fields = [\"prompt\"]\n"
+	configContent := "[ready]\nrequired_fields = [\"description\"]\n"
 	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(configContent), 0o644); err != nil {
 		t.Fatalf("WriteFile(config.toml) error = %v", err)
 	}
 
 	if _, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
-		Title:     "Ready ticket",
-		IssueType: "task",
-		Priority:  1,
-		Prompt:    "ship it",
+		Title:       "Ready ticket",
+		IssueType:   "task",
+		Priority:    1,
+		Description: "ship it",
 	}); err != nil {
 		t.Fatalf("CreateIssue(ready) error = %v", err)
 	}
 	if _, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
-		Title:     "Missing prompt",
+		Title:     "Missing description",
 		IssueType: "task",
 		Priority:  2,
 	}); err != nil {
@@ -283,7 +282,29 @@ func TestRunReadyTextOutputIncludesNotReadySectionAndReason(t *testing.T) {
 	if !strings.Contains(text, "\nNot Ready\n") {
 		t.Fatalf("ready output missing Not Ready section header: %q", text)
 	}
-	if !strings.Contains(text, "Field prompt not set") {
+	if !strings.Contains(text, "Field description not set") {
 		t.Fatalf("ready output missing not-ready reason: %q", text)
+	}
+}
+
+func TestRunReadyReturnsConfigErrorForInvalidProjectConfig(t *testing.T) {
+	ctx := context.Background()
+	ap := newTestCLIApp(t)
+
+	configDir := filepath.Join(ap.Workspace.RootDir, ".lit")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(configDir) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte("[ready\nrequired_fields = [\"description\"]"), 0o644); err != nil {
+		t.Fatalf("WriteFile(config.toml) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err := runReady(ctx, &stdout, ap, []string{"--json"})
+	if err == nil {
+		t.Fatal("runReady expected config parse error")
+	}
+	if !strings.Contains(err.Error(), "parse config") {
+		t.Fatalf("runReady error = %q, want parse config context", err.Error())
 	}
 }

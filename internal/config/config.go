@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -55,7 +56,7 @@ func configDir() string {
 // Load reads config from ~/.config/links-issue-tracker/config.toml and
 // optionally from <workspace>/.lit/config.toml when a workspace root is given.
 // A missing file is not an error; defaults are returned.
-func Load(workspaceRoot ...string) Config {
+func Load(workspaceRoot ...string) (Config, error) {
 	v := viper.New()
 
 	v.SetDefault("logging.verbose", false)
@@ -66,21 +67,28 @@ func Load(workspaceRoot ...string) Config {
 	v.SetDefault("ready.required_fields", []string{})
 
 	// [LAW:single-enforcer] Global/project config precedence is resolved once at load time.
-	globalRequired := mergeConfigFile(v, globalConfigPath())
+	globalRequired, err := mergeConfigFile(v, globalConfigPath())
+	if err != nil {
+		return Config{}, err
+	}
 	projectRequired := []string{}
 	if root := strings.TrimSpace(first(workspaceRoot)); root != "" {
-		projectRequired = mergeConfigFile(v, projectConfigPath(root))
+		projectRequired, err = mergeConfigFile(v, projectConfigPath(root))
+		if err != nil {
+			return Config{}, err
+		}
 	}
 
 	var cfg Config
-	_ = v.Unmarshal(&cfg)
+	if err := v.Unmarshal(&cfg); err != nil {
+		return Config{}, fmt.Errorf("decode config: %w", err)
+	}
 	mergedRequired := append(globalRequired, projectRequired...)
 	if len(mergedRequired) == 0 {
 		mergedRequired = cfg.Ready.RequiredFields
 	}
-	// [LAW:one-source-of-truth] Required fields are normalized once into a single canonical list.
-	cfg.Ready.RequiredFields = normalizeRequiredFields(mergedRequired)
-	return cfg
+	cfg.Ready.RequiredFields = mergedRequired
+	return cfg, nil
 }
 
 func globalConfigPath() string {
@@ -101,41 +109,26 @@ func projectConfigPath(workspaceRoot string) string {
 	return filepath.Join(workspaceRoot, ".lit", "config.toml")
 }
 
-func mergeConfigFile(v *viper.Viper, path string) []string {
+func mergeConfigFile(v *viper.Viper, path string) ([]string, error) {
 	trimmedPath := strings.TrimSpace(path)
 	if trimmedPath == "" {
-		return nil
+		return nil, nil
 	}
 	fileConfig := viper.New()
 	fileConfig.SetConfigFile(trimmedPath)
 	if err := fileConfig.ReadInConfig(); err != nil {
 		var notFound viper.ConfigFileNotFoundError
 		if errors.As(err, &notFound) || os.IsNotExist(err) {
-			return nil
+			return nil, nil
 		}
-		return nil
+		return nil, fmt.Errorf("parse config %s: %w", trimmedPath, err)
 	}
-	_ = v.MergeConfigMap(fileConfig.AllSettings())
+	if err := v.MergeConfigMap(fileConfig.AllSettings()); err != nil {
+		return nil, fmt.Errorf("merge config %s: %w", trimmedPath, err)
+	}
 	required := fileConfig.GetStringSlice("ready.required_fields")
 	required = append(required, fileConfig.GetStringSlice("required_fields")...)
-	return required
-}
-
-func normalizeRequiredFields(fields []string) []string {
-	seen := make(map[string]struct{}, len(fields))
-	out := make([]string, 0, len(fields))
-	for _, field := range fields {
-		normalized := strings.ToLower(strings.TrimSpace(field))
-		if normalized == "" {
-			continue
-		}
-		if _, ok := seen[normalized]; ok {
-			continue
-		}
-		seen[normalized] = struct{}{}
-		out = append(out, normalized)
-	}
-	return out
+	return required, nil
 }
 
 func first(values []string) string {

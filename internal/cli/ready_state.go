@@ -2,10 +2,10 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
-	"strconv"
 	"strings"
 	"text/tabwriter"
 
@@ -26,9 +26,8 @@ type readyCommandOutput struct {
 func deriveReadySections(ctx context.Context, st *store.Store, issues []model.Issue, requiredFields []string) ([]model.Issue, []notReadyIssue, error) {
 	ready := make([]model.Issue, 0, len(issues))
 	notReady := make([]notReadyIssue, 0, len(issues))
-	normalizedRequired := normalizeReadyRequiredFields(requiredFields)
 	for _, issue := range issues {
-		reason, err := deriveNotReadyReason(ctx, st, issue, normalizedRequired)
+		reason, err := deriveNotReadyReason(ctx, st, issue, requiredFields)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -43,13 +42,17 @@ func deriveReadySections(ctx context.Context, st *store.Store, issues []model.Is
 
 func deriveNotReadyReason(ctx context.Context, st *store.Store, issue model.Issue, requiredFields []string) (string, error) {
 	reasons := make([]string, 0, len(requiredFields)+1)
+	fields, err := issueFieldValues(issue)
+	if err != nil {
+		return "", err
+	}
 	for _, field := range requiredFields {
-		value, ok := requiredFieldValue(issue, field)
+		value, ok := fields[field]
 		if !ok {
-			reasons = append(reasons, fmt.Sprintf("Field %s validation failed", field))
+			reasons = append(reasons, fmt.Sprintf("Field %s not found", field))
 			continue
 		}
-		if strings.TrimSpace(value) == "" {
+		if !isRequiredFieldSet(value) {
 			reasons = append(reasons, fmt.Sprintf("Field %s not set", field))
 		}
 	}
@@ -64,28 +67,30 @@ func deriveNotReadyReason(ctx context.Context, st *store.Store, issue model.Issu
 	return strings.Join(reasons, "; "), nil
 }
 
-func requiredFieldValue(issue model.Issue, field string) (string, bool) {
-	switch field {
-	case "id":
-		return issue.ID, true
-	case "title":
-		return issue.Title, true
-	case "description":
-		return issue.Description, true
-	case "prompt":
-		return issue.Prompt, true
-	case "status":
-		return issue.Status, true
-	case "priority":
-		return strconv.Itoa(issue.Priority), true
-	case "type", "issue_type":
-		return issue.IssueType, true
-	case "assignee":
-		return issue.Assignee, true
-	case "labels":
-		return strings.Join(issue.Labels, ","), true
+func issueFieldValues(issue model.Issue) (map[string]any, error) {
+	payload, err := json.Marshal(issue)
+	if err != nil {
+		return nil, fmt.Errorf("marshal issue fields: %w", err)
+	}
+	values := map[string]any{}
+	if err := json.Unmarshal(payload, &values); err != nil {
+		return nil, fmt.Errorf("unmarshal issue fields: %w", err)
+	}
+	return values, nil
+}
+
+func isRequiredFieldSet(value any) bool {
+	switch typed := value.(type) {
+	case nil:
+		return false
+	case string:
+		return strings.TrimSpace(typed) != ""
+	case []any:
+		return len(typed) > 0
+	case map[string]any:
+		return len(typed) > 0
 	default:
-		return "", false
+		return true
 	}
 }
 
@@ -185,21 +190,4 @@ func printNotReadyTable(w io.Writer, issues []notReadyIssue, columns []string) e
 		}
 	}
 	return tw.Flush()
-}
-
-func normalizeReadyRequiredFields(fields []string) []string {
-	seen := make(map[string]struct{}, len(fields))
-	out := make([]string, 0, len(fields))
-	for _, field := range fields {
-		normalized := strings.ToLower(strings.TrimSpace(field))
-		if normalized == "" {
-			continue
-		}
-		if _, ok := seen[normalized]; ok {
-			continue
-		}
-		seen[normalized] = struct{}{}
-		out = append(out, normalized)
-	}
-	return out
 }
