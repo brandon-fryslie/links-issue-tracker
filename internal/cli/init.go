@@ -13,13 +13,13 @@ import (
 )
 
 type initReport struct {
-	Status       string              `json:"status"`
-	WorkspaceID  string              `json:"workspace_id"`
-	DatabasePath string              `json:"database_path"`
-	Migrated     bool                `json:"migrated"`
-	Migration    *migrateBeadsReport `json:"migration,omitempty"`
-	Hooks        string              `json:"hooks"`
-	Agents       string              `json:"agents"`
+	Status       string         `json:"status"`
+	WorkspaceID  string         `json:"workspace_id"`
+	DatabasePath string         `json:"database_path"`
+	Migrated     bool           `json:"migrated"`
+	Migration    *migrateReport `json:"migration,omitempty"`
+	Hooks        string         `json:"hooks"`
+	Agents       string         `json:"agents"`
 }
 
 func runInit(ctx context.Context, stdout io.Writer, ws workspace.Info, args []string) error {
@@ -32,7 +32,7 @@ func runInit(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		return err
 	}
 	if fs.NArg() != 0 {
-		return errors.New("usage: lit init [--json] [--skip-hooks] [--skip-agents]")
+		return errors.New("usage: lnks init [--json] [--skip-hooks] [--skip-agents]")
 	}
 
 	if _, err := doltcli.RequireMinimumVersion(ctx, ws.RootDir, doltcli.MinSupportedVersion); err != nil {
@@ -58,7 +58,7 @@ func runInit(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 
 	if scan.HasResidue() {
 		// [LAW:single-enforcer] init reuses migration engine; cleanup policy is not reimplemented locally.
-		migration, migrateErr := migrateBeadsWithOptions(ws, true, migrateApplyOptions{InstallHooks: false, InstallAgents: false}, &scan)
+		migration, migrateErr := runMigrationWithOptions(ctx, ws, true, migrateApplyOptions{InstallHooks: false, InstallAgents: false}, &scan)
 		if migrateErr != nil {
 			return migrateErr
 		}
@@ -113,16 +113,10 @@ func shouldBypassBeadsPreflight(args []string) bool {
 		return true
 	}
 	switch args[0] {
-	case "help", "-h", "--help", "completion", "init":
+	case "help", "-h", "--help", "completion", "init", "migrate":
 		return true
 	default:
-		if args[0] != "migrate" {
-			return false
-		}
-		if len(args) < 2 {
-			return false
-		}
-		return args[1] == "beads"
+		return false
 	}
 }
 
@@ -134,7 +128,7 @@ func requireBeadsMigrationPreflight(ws workspace.Info, commandArgs []string) err
 	if !scan.HasResidue() {
 		return nil
 	}
-	blockedCommand := formatLitCommand(commandArgs)
+	blockedCommand := formatCommand(commandArgs)
 	// [LAW:one-source-of-truth] Startup preflight reuses the shared automation trace record instead of inventing a second trace format.
 	traceRef, traceErr := recordAutomationTrace(ws, automationTraceRecord{
 		Trigger:    "startup-preflight",
@@ -144,7 +138,7 @@ func requireBeadsMigrationPreflight(ws workspace.Info, commandArgs []string) err
 		Reason:     "beads residue detected during startup preflight",
 		Metadata: map[string]string{
 			"blocked_command":     blockedCommand,
-			"remediation_command": "lit migrate beads --apply --json",
+				"remediation_command": "lnks migrate --apply --json",
 			"residue_summary":     scan.Summary(),
 		},
 	})
@@ -152,7 +146,7 @@ func requireBeadsMigrationPreflight(ws workspace.Info, commandArgs []string) err
 		Summary:            scan.Summary(),
 		Trigger:            "startup-preflight",
 		BlockedCommand:     blockedCommand,
-		RemediationCommand: "lit migrate beads --apply --json",
+			RemediationCommand: "lnks migrate --apply --json",
 	}
 	if traceErr != nil {
 		preflightErr.TraceWriteError = traceErr.Error()
