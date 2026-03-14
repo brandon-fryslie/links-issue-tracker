@@ -20,9 +20,12 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"log"
+
 	"github.com/bmf/links-issue-tracker/internal/app"
 	"github.com/bmf/links-issue-tracker/internal/backup"
 	"github.com/bmf/links-issue-tracker/internal/beads"
+	"github.com/bmf/links-issue-tracker/internal/config"
 	"github.com/bmf/links-issue-tracker/internal/doltcli"
 	"github.com/bmf/links-issue-tracker/internal/merge"
 	"github.com/bmf/links-issue-tracker/internal/model"
@@ -31,51 +34,44 @@ import (
 	"github.com/bmf/links-issue-tracker/internal/syncfile"
 	"github.com/bmf/links-issue-tracker/internal/workspace"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
-	"golang.org/x/term"
 )
 
 var missingRemoteBranchPattern = regexp.MustCompile(`branch "([^"]+)" not found on remote`)
 
-const outputModeEnvVar = "LIT_OUTPUT"
 const debugSyncBranchEnvVar = "LINKS_DEBUG_DOLT_SYNC_BRANCH"
 
 const (
 	syncManifestReadOnlyRetryAttempts = 2
 )
 
-type outputMode string
-
-const (
-	outputModeAuto outputMode = "auto"
-	outputModeText outputMode = "text"
-	outputModeJSON outputMode = "json"
-)
-
-type outputModeWriter struct {
-	io.Writer
-	mode outputMode
-}
-
-func (w outputModeWriter) linksOutputMode() outputMode {
-	return w.mode
-}
-
-type outputModeProvider interface {
-	linksOutputMode() outputMode
-}
-
 const (
 	humanBootstrapHelp = "Human bootstrap command. Run once per repository/worktree setup before autonomous agent operations."
-	agentCommandHelp   = "Agent-facing operational command. Prefer deterministic machine-readable output (`--json` or `--output json`) in automation."
+	agentCommandHelp   = "Agent-facing operational command."
 )
 
+type contextKey string
+
+const configContextKey contextKey = "lit-config"
+
+func configFromContext(ctx context.Context) config.Config {
+	if cfg, ok := ctx.Value(configContextKey).(config.Config); ok {
+		return cfg
+	}
+	return config.Load()
+}
+
 func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string) error {
-	normalizedArgs, resolvedOutputMode, err := parseGlobalOutputMode(args, stdout)
+	normalizedArgs, err := parseGlobalFlags(args)
 	if err != nil {
 		return err
 	}
-	stdout = outputModeWriter{Writer: stdout, mode: resolvedOutputMode}
+
+	cfg := config.Load()
+	ctx = context.WithValue(ctx, configContextKey, cfg)
+
+	cleanup := setupLogging(cfg.Logging, stderr)
+	defer cleanup()
+
 	root := newRootCommand(ctx, stdout, stderr)
 	root.SetArgs(normalizedArgs)
 	root.SetOut(stdout)
@@ -89,20 +85,51 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 	return err
 }
 
+// setupLogging configures the default logger from config. Returns a cleanup function.
+func setupLogging(cfg config.LoggingConfig, stderr io.Writer) func() {
+	writers := []io.Writer{}
+	var logFile *os.File
+
+	if cfg.Verbose {
+		writers = append(writers, stderr)
+	}
+	if cfg.File != "" {
+		expanded := cfg.File
+		if strings.HasPrefix(expanded, "~/") {
+			if home, err := os.UserHomeDir(); err == nil {
+				expanded = filepath.Join(home, expanded[2:])
+			}
+		}
+		if dir := filepath.Dir(expanded); dir != "" {
+			_ = os.MkdirAll(dir, 0o755)
+		}
+		f, err := os.OpenFile(expanded, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err == nil {
+			logFile = f
+			writers = append(writers, f)
+		}
+	}
+
+	if len(writers) == 0 {
+		log.SetOutput(io.Discard)
+	} else {
+		log.SetOutput(io.MultiWriter(writers...))
+	}
+	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds)
+
+	return func() {
+		if logFile != nil {
+			logFile.Close()
+		}
+	}
+}
+
 func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *cobra.Command {
 	root := &cobra.Command{
 		Use:   "lit",
 		Short: "Worktree-native issue tracker",
-		Long: strings.Join([]string{
-			"Worktree-native issue tracker with Dolt-backed sync.",
-			"",
-			"Global output mode:",
-			"  default auto (TTY -> text, non-TTY -> json)",
-			"  --json shorthand for JSON compatibility",
-			"  --output auto|text|json to force mode",
-			"  LIT_OUTPUT environment default",
-		}, "\n"),
-		Args: cobra.ArbitraryArgs,
+		Long:  "Worktree-native issue tracker with Dolt-backed sync.\n\nUse --json on any command for JSON output.",
+		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) > 0 {
 				return fmt.Errorf("unknown command %q", args[0])
@@ -128,7 +155,7 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 		})
 	})
 	addGroupedPassthrough(root, "guidance", "quickstart", "Agent quickstart workflow", func(args []string) error {
-		return runWithPreflight(append([]string{"quickstart"}, args...), func() error {
+		return runWithPreflight(ctx, append([]string{"quickstart"}, args...), func() error {
 			return runQuickstart(stdout, args)
 		})
 	})
@@ -336,8 +363,8 @@ func newPassthroughCommand(name string, summary string, run func(args []string) 
 	}
 }
 
-func runWithPreflight(commandArgs []string, run func() error) error {
-	_, _, err := enforceBeadsPreflight(commandArgs)
+func runWithPreflight(ctx context.Context, commandArgs []string, run func() error) error {
+	_, _, err := enforceBeadsPreflight(ctx, commandArgs)
 	if err != nil {
 		return err
 	}
@@ -402,7 +429,7 @@ func validateBulkCommandPath(args []string) error {
 }
 
 func runWithWorkspace(ctx context.Context, commandArgs []string, requireDoltReady bool, run func(workspace.Info) error) error {
-	preflightWorkspace, hasPreflightWorkspace, err := enforceBeadsPreflight(commandArgs)
+	preflightWorkspace, hasPreflightWorkspace, err := enforceBeadsPreflight(ctx, commandArgs)
 	if err != nil {
 		return err
 	}
@@ -426,7 +453,7 @@ func runWithWorkspace(ctx context.Context, commandArgs []string, requireDoltRead
 }
 
 func runWithApp(ctx context.Context, commandArgs []string, run func(context.Context, *app.App) error) error {
-	_, _, err := enforceBeadsPreflight(commandArgs)
+	_, _, err := enforceBeadsPreflight(ctx, commandArgs)
 	if err != nil {
 		return err
 	}
@@ -449,7 +476,7 @@ func runWithApp(ctx context.Context, commandArgs []string, run func(context.Cont
 	return run(ctx, ap)
 }
 
-func enforceBeadsPreflight(commandArgs []string) (workspace.Info, bool, error) {
+func enforceBeadsPreflight(ctx context.Context, commandArgs []string) (workspace.Info, bool, error) {
 	if shouldBypassBeadsPreflight(commandArgs) {
 		return workspace.Info{}, false, nil
 	}
@@ -459,7 +486,12 @@ func enforceBeadsPreflight(commandArgs []string) (workspace.Info, bool, error) {
 	}
 	ws, resolveErr := workspace.Resolve(cwd)
 	if resolveErr == nil {
-		if err := requireBeadsMigrationPreflight(ws, commandArgs); err != nil {
+		cfg := configFromContext(ctx)
+		if cfg.Migration.AutoApply {
+			if err := autoMigrateBeads(ws); err != nil {
+				return workspace.Info{}, false, err
+			}
+		} else if err := requireBeadsMigrationPreflight(ws, commandArgs); err != nil {
 			return workspace.Info{}, false, err
 		}
 		return ws, true, nil
@@ -468,6 +500,20 @@ func enforceBeadsPreflight(commandArgs []string) (workspace.Info, bool, error) {
 		return workspace.Info{}, false, resolveErr
 	}
 	return workspace.Info{}, false, nil
+}
+
+// autoMigrateBeads silently applies beads migration when residue is detected.
+func autoMigrateBeads(ws workspace.Info) error {
+	scan, err := scanBeadsResidue(ws)
+	if err != nil {
+		return err
+	}
+	if !scan.HasResidue() {
+		return nil
+	}
+	log.Printf("auto-migrating beads residue: %s", scan.Summary())
+	_, err = migrateBeadsWithOptions(ws, true, migrateApplyOptions{InstallHooks: false, InstallAgents: false}, &scan)
+	return err
 }
 
 func resolveWorkspaceFromWD() (workspace.Info, error) {
@@ -485,18 +531,9 @@ func resolveWorkspaceFromWD() (workspace.Info, error) {
 	return ws, nil
 }
 
-func parseGlobalOutputMode(args []string, stdout io.Writer) ([]string, outputMode, error) {
-	// [LAW:single-enforcer] Global output precedence (--output/--json/env/auto) is enforced exactly once at CLI entry.
-	envMode, err := modeFromEnv()
-	if err != nil {
-		return nil, "", err
-	}
-	// [LAW:one-source-of-truth] Resolve output mode from collected flag values in one place so precedence cannot drift by parse order.
-	mode := envMode
-	hasJSONOverride := false
-	hasOutputOverride := false
-	jsonMode := outputModeJSON
-	outputOverrideMode := outputModeAuto
+// parseGlobalFlags strips the global --json flag from args before command dispatch.
+// [LAW:single-enforcer] Global --json is consumed exactly once at CLI entry.
+func parseGlobalFlags(args []string) ([]string, error) {
 	index := 0
 	for index < len(args) {
 		switch {
@@ -504,59 +541,21 @@ func parseGlobalOutputMode(args []string, stdout io.Writer) ([]string, outputMod
 			index++
 			goto done
 		case args[index] == "--json":
-			hasJSONOverride = true
-			jsonMode = outputModeJSON
+			// Consumed and discarded; per-command --json flags handle JSON output.
 			index++
 		case strings.HasPrefix(args[index], "--json="):
 			jsonValue := strings.TrimSpace(strings.TrimPrefix(args[index], "--json="))
-			parsed, parseErr := strconv.ParseBool(jsonValue)
-			if parseErr != nil {
-				return nil, "", fmt.Errorf("invalid --json value %q (expected true|false)", jsonValue)
+			if _, parseErr := strconv.ParseBool(jsonValue); parseErr != nil {
+				return nil, fmt.Errorf("invalid --json value %q (expected true|false)", jsonValue)
 			}
-			if parsed {
-				jsonMode = outputModeJSON
-			} else {
-				jsonMode = outputModeText
-			}
-			hasJSONOverride = true
 			index++
-		case args[index] == "--output":
-			if index+1 >= len(args) {
-				return nil, "", errors.New("usage: lit [--output auto|text|json] [--json] [command]")
-			}
-			parsedMode, parseErr := parseOutputMode(args[index+1])
-			if parseErr != nil {
-				return nil, "", parseErr
-			}
-			outputOverrideMode = parsedMode
-			hasOutputOverride = true
-			index += 2
 		default:
-			if strings.HasPrefix(args[index], "--output=") {
-				parsedMode, parseErr := parseOutputMode(strings.TrimPrefix(args[index], "--output="))
-				if parseErr != nil {
-					return nil, "", parseErr
-				}
-				outputOverrideMode = parsedMode
-				hasOutputOverride = true
-				index++
-				continue
-			}
 			goto done
 		}
 	}
 
 done:
-	if hasJSONOverride {
-		mode = jsonMode
-	}
-	if hasOutputOverride {
-		mode = outputOverrideMode
-	}
-	if mode == outputModeAuto {
-		mode = detectOutputMode(stdout)
-	}
-	return args[index:], mode, nil
+	return args[index:], nil
 }
 
 func parseFlagSet(fs *flag.FlagSet, args []string, helpOutput io.Writer) error {
@@ -572,47 +571,12 @@ func parseFlagSet(fs *flag.FlagSet, args []string, helpOutput io.Writer) error {
 	return nil
 }
 
-func modeFromEnv() (outputMode, error) {
-	config := viper.New()
-	if err := config.BindEnv("output", outputModeEnvVar); err != nil {
-		return "", fmt.Errorf("bind %s: %w", outputModeEnvVar, err)
-	}
-	raw := strings.TrimSpace(strings.ToLower(config.GetString("output")))
-	if raw == "" {
-		return outputModeAuto, nil
-	}
-	return parseOutputMode(raw)
-}
-
-func parseOutputMode(raw string) (outputMode, error) {
-	switch strings.TrimSpace(strings.ToLower(raw)) {
-	case string(outputModeAuto):
-		return outputModeAuto, nil
-	case string(outputModeText):
-		return outputModeText, nil
-	case string(outputModeJSON):
-		return outputModeJSON, nil
-	default:
-		return "", fmt.Errorf("unsupported output mode %q (expected auto|text|json)", raw)
-	}
-}
-
-func detectOutputMode(stdout io.Writer) outputMode {
-	file, ok := stdout.(*os.File)
-	if !ok {
-		return outputModeJSON
-	}
-	if term.IsTerminal(int(file.Fd())) {
-		return outputModeText
-	}
-	return outputModeJSON
-}
-
 func runNew(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
 	fs := flag.NewFlagSet("new", flag.ContinueOnError)
 	fs.SetOutput(io.Discard)
 	title := fs.String("title", "", "Issue title")
 	description := fs.String("description", "", "Issue description")
+	prompt := fs.String("prompt", "", "Implementation prompt for the agent")
 	issueType := fs.String("type", "task", "Issue type: task|feature|bug|chore|epic")
 	priority := fs.Int("priority", 2, "Priority 0..4 (lower is more important)")
 	assignee := fs.String("assignee", "", "Assignee")
@@ -622,7 +586,7 @@ func runNew(ctx context.Context, stdout io.Writer, ap *app.App, args []string) e
 		return err
 	}
 	issue, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
-		Title: *title, Description: *description, IssueType: *issueType, Priority: *priority, Assignee: *assignee, Labels: splitCSV(*labels),
+		Title: *title, Description: *description, Prompt: *prompt, IssueType: *issueType, Priority: *priority, Assignee: *assignee, Labels: splitCSV(*labels),
 	})
 	if err != nil {
 		return err
@@ -638,7 +602,7 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	assignee := fs.String("assignee", "", "Filter by assignee")
 	priorityMin := fs.Int("priority-min", -1, "Minimum priority 0..4")
 	priorityMax := fs.Int("priority-max", -1, "Maximum priority 0..4")
-	search := fs.String("search", "", "Search title and description text")
+	search := fs.String("search", "", "Search title, description, and prompt text")
 	ids := fs.String("ids", "", "Comma-separated issue IDs")
 	labels := fs.String("labels", "", "Comma-separated labels all of which must match")
 	hasComments := fs.Bool("has-comments", false, "Only include issues with comments")
@@ -721,7 +685,7 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	if err != nil {
 		return err
 	}
-	if shouldWriteJSON(stdout, *jsonOut) {
+	if *jsonOut {
 		return writeJSON(stdout, issues)
 	}
 	columns := parseColumns(*columnsExpr)
@@ -749,12 +713,13 @@ func runReady(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 	if fs.NArg() != 0 {
 		return errors.New("usage: lit ready [--assignee <user>] [--limit N] [--format lines|table] [--columns ...] [--json]")
 	}
+	cfg := config.Load(ap.Workspace.RootDir)
 	issues, err := ap.Store.ListIssues(ctx, store.ListIssuesFilter{
 		Status:          "open",
 		Assignee:        strings.TrimSpace(*assignee),
 		IncludeArchived: false,
 		IncludeDeleted:  false,
-		Limit:           *limit,
+		Limit:           0,
 		SortBy: []store.SortSpec{
 			{Field: "priority"},
 			{Field: "updated_at", Desc: true},
@@ -763,18 +728,19 @@ func runReady(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 	if err != nil {
 		return err
 	}
-	if shouldWriteJSON(stdout, *jsonOut) {
-		return writeJSON(stdout, issues)
+	ready, notReady, err := deriveReadySections(ctx, ap.Store, issues, cfg.Ready.RequiredFields)
+	if err != nil {
+		return err
+	}
+	ready, notReady = applyReadyLimit(ready, notReady, *limit)
+	if *jsonOut {
+		return writeJSON(stdout, readyCommandOutput{
+			Ready:    ready,
+			NotReady: notReady,
+		})
 	}
 	columns := parseColumns(*columnsExpr)
-	switch strings.ToLower(strings.TrimSpace(*format)) {
-	case "", "lines":
-		return printIssueLines(stdout, issues, columns)
-	case "table":
-		return printIssueTable(stdout, issues, columns)
-	default:
-		return fmt.Errorf("unsupported --format %q", *format)
-	}
+	return printReadySections(stdout, strings.ToLower(strings.TrimSpace(*format)), columns, ready, notReady)
 }
 
 func runShow(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
@@ -795,7 +761,7 @@ func runShow(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	if err != nil {
 		return err
 	}
-	if shouldWriteJSON(stdout, *jsonOut) {
+	if *jsonOut {
 		return writeJSON(stdout, detail)
 	}
 	return printIssueDetail(stdout, detail)
@@ -821,6 +787,7 @@ func runUpdate(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 	fs.SetOutput(io.Discard)
 	title := fs.String("title", "", "Issue title")
 	description := fs.String("description", "", "Issue description")
+	prompt := fs.String("prompt", "", "Implementation prompt for the agent")
 	issueType := fs.String("type", "", "Issue type: task|feature|bug|chore|epic")
 	priority := fs.Int("priority", 0, "Priority 0..4 (lower is more important)")
 	assignee := fs.String("assignee", "", "Assignee")
@@ -833,10 +800,10 @@ func runUpdate(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 		return err
 	}
 	if len(positional) != 1 {
-		return errors.New("usage: lit update <id> [--title <text>] [--description <text>] [--type <task|feature|bug|chore|epic>] [--priority <0..4>] [--assignee <user>] [--labels <csv>] [--status <open|in_progress|closed>] [--reason <text>] [--by <user>] [--json]")
+		return errors.New("usage: lit update <id> [--title <text>] [--description <text>] [--prompt <text>] [--type <task|feature|bug|chore|epic>] [--priority <0..4>] [--assignee <user>] [--labels <csv>] [--status <open|in_progress|closed>] [--reason <text>] [--by <user>] [--json]")
 	}
 	if fs.NArg() != 0 {
-		return errors.New("usage: lit update <id> [--title <text>] [--description <text>] [--type <task|feature|bug|chore|epic>] [--priority <0..4>] [--assignee <user>] [--labels <csv>] [--status <open|in_progress|closed>] [--reason <text>] [--by <user>] [--json]")
+		return errors.New("usage: lit update <id> [--title <text>] [--description <text>] [--prompt <text>] [--type <task|feature|bug|chore|epic>] [--priority <0..4>] [--assignee <user>] [--labels <csv>] [--status <open|in_progress|closed>] [--reason <text>] [--by <user>] [--json]")
 	}
 	visited := map[string]bool{}
 	fs.Visit(func(flag *flag.Flag) { visited[flag.Name] = true })
@@ -846,7 +813,7 @@ func runUpdate(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 	if visited["by"] && !visited["status"] {
 		return errors.New("--by requires --status")
 	}
-	mutatesFields := visited["title"] || visited["description"] || visited["type"] || visited["priority"] || visited["assignee"] || visited["labels"]
+	mutatesFields := visited["title"] || visited["description"] || visited["prompt"] || visited["type"] || visited["priority"] || visited["assignee"] || visited["labels"]
 	mutatesStatus := visited["status"]
 	if !mutatesFields && !mutatesStatus {
 		return errors.New("lit update requires at least one field flag")
@@ -901,6 +868,10 @@ func runUpdate(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 		if visited["description"] {
 			value := *description
 			update.Description = &value
+		}
+		if visited["prompt"] {
+			value := *prompt
+			update.Prompt = &value
 		}
 		if visited["type"] {
 			value := *issueType
@@ -966,7 +937,6 @@ func runTransition(ctx context.Context, stdout io.Writer, ap *app.App, args []st
 	}
 	return printValue(stdout, issue, *jsonOut, printIssueSummary)
 }
-
 
 func runComment(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
 	if len(args) == 0 || args[0] != "add" {
@@ -1200,7 +1170,7 @@ func runChildren(ctx context.Context, stdout io.Writer, ap *app.App, args []stri
 	if err != nil {
 		return err
 	}
-	if shouldWriteJSON(stdout, *jsonOut) {
+	if *jsonOut {
 		return writeJSON(stdout, children)
 	}
 	return printIssueLines(stdout, children, []string{"id", "state", "title"})
@@ -1287,7 +1257,7 @@ func runWorkspace(stdout io.Writer, ws workspace.Info, args []string) error {
 		"dolt_repo_path": ws.DoltRepoPath,
 		"traces_dir":     automationTraceDir(ws),
 	}
-	if shouldWriteJSON(stdout, *jsonOut) {
+	if *jsonOut {
 		return writeJSON(stdout, payload)
 	}
 	for _, key := range []string{"workspace_id", "git_common_dir", "storage_dir", "database_path", "dolt_repo_path", "traces_dir"} {
@@ -2025,7 +1995,7 @@ func runDoctor(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 	if err != nil {
 		return err
 	}
-	if shouldWriteJSON(stdout, *jsonOut) {
+	if *jsonOut {
 		if err := writeJSON(stdout, report); err != nil {
 			return err
 		}
@@ -2053,7 +2023,7 @@ func runFsck(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	if err != nil {
 		return err
 	}
-	if shouldWriteJSON(stdout, *jsonOut) {
+	if *jsonOut {
 		if err := writeJSON(stdout, report); err != nil {
 			return err
 		}
@@ -2354,11 +2324,11 @@ func runQuickstart(stdout io.Writer, args []string) error {
 	payload := map[string]any{
 		"summary": "Agent quickstart for links issue tracking",
 		"workflow": []string{
-			"Initialize and auto-migrate with `lit init --json`.",
-			"Discover workspace identity with `lit workspace --json`.",
-			"Migrate legacy Beads wiring explicitly with `lit migrate beads --apply --json` when needed.",
+			"Initialize and auto-migrate with `lit init`.",
+			"Discover workspace identity with `lit workspace`.",
+			"Migrate legacy Beads wiring explicitly with `lit migrate beads --apply` when needed.",
 			"Install git hook automation once with `lit hooks install`.",
-			"List ready work with `lit ready --json` (or `lit ls --query \"status:open\" --json`).",
+			"List ready work with `lit ready` (or `lit ls --query \"status:open\"`).",
 			"Create issues with `lit new ...`; use `--type epic` for epics.",
 			"Connect issues using `lit parent set` and `lit dep add --type related-to|blocks`.",
 			"Configure remotes with `git remote`; `lit sync` mirrors those remotes into Dolt automatically.",
@@ -2366,22 +2336,22 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"Snapshot and rollback using `lit backup create`, `lit backup restore`, or `lit recover`.",
 		},
 		"examples": []string{
-			"lit init --json",
-			"lit migrate beads --apply --json",
-			"lit hooks install --json",
-			"lit workspace --json",
-			"lit ready --json",
-			"lit update <issue-id> --status in_progress --json",
-			"lit start <issue-id> --reason \"claim\" --json",
-			"lit done <issue-id> --reason \"completed\" --json",
-			"lit ls --query \"status:open type:task\" --sort priority:asc,updated_at:desc --json",
-			"lit new --title \"Fix renderer race\" --type bug --priority 1 --labels renderer,urgent --json",
-			"lit parent set <issue-id> <parent-issue-id> --json",
-			"lit dep add <issue-id> <dependency-issue-id> --type related-to --json",
+			"lit init",
+			"lit migrate beads --apply",
+			"lit hooks install",
+			"lit workspace",
+			"lit ready",
+			"lit update <issue-id> --status in_progress",
+			"lit start <issue-id> --reason \"claim\"",
+			"lit done <issue-id> --reason \"completed\"",
+			"lit ls --query \"status:open type:task\" --sort priority:asc,updated_at:desc",
+			"lit new --title \"Fix renderer race\" --type bug --priority 1 --labels renderer,urgent",
+			"lit parent set <issue-id> <parent-issue-id>",
+			"lit dep add <issue-id> <dependency-issue-id> --type related-to",
 			"git remote add origin https://github.com/org/repo.git",
-			"lit sync remote ls --json",
-			"lit sync pull --json",
-			"lit sync push --json",
+			"lit sync remote ls",
+			"lit sync pull",
+			"lit sync push",
 		},
 		"exit_codes": map[string]int{
 			"ok":         ExitOK,
@@ -2399,22 +2369,22 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"links agent quickstart",
 			"",
 			"1) Discover context",
-			"   `lit init --json`",
-			"   `lit migrate beads --apply --json`  # for legacy Beads repos",
-			"   `lit hooks install --json`",
-			"   `lit workspace --json`",
+			"   `lit init`",
+			"   `lit migrate beads --apply`  # for legacy Beads repos",
+			"   `lit hooks install`",
+			"   `lit workspace`",
 			"",
 			"2) Find work",
-			"   `lit ready --json`",
-			"   `lit update <issue-id> --status in_progress --json`",
-			"   `lit start <issue-id> --reason \"claim\" --json`",
-			"   `lit ls --format lines --json`",
-			"   `lit ls --query \"status:open type:task\" --sort priority:asc,updated_at:desc --json`",
+			"   `lit ready`",
+			"   `lit update <issue-id> --status in_progress`",
+			"   `lit start <issue-id> --reason \"claim\"`",
+			"   `lit ls --format lines`",
+			"   `lit ls --query \"status:open type:task\" --sort priority:asc,updated_at:desc`",
 			"",
 			"3) Create and relate issues/epics",
-			"   `lit new --title \"...\" --type task|bug|feature|chore|epic --json`",
-			"   `lit parent set <child-id> <parent-id> --json`",
-			"   `lit dep add <src-id> <dst-id> --type blocks|related-to|parent-child --json`",
+			"   `lit new --title \"...\" --type task|bug|feature|chore|epic`",
+			"   `lit parent set <child-id> <parent-id>`",
+			"   `lit dep add <src-id> <dst-id> --type blocks|related-to|parent-child`",
 			"",
 			"4) Mutations",
 			"   Use command outputs directly for follow-up writes.",
@@ -2422,18 +2392,18 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"5) Dolt remote sync",
 			"   Configure remotes with git, then run sync commands.",
 			"   `git remote -v`",
-			"   `lit sync remote ls --json`",
-			"   `lit sync fetch --json`",
-			"   `lit sync pull --json`",
-			"   `lit sync push --json`",
+			"   `lit sync remote ls`",
+			"   `lit sync fetch`",
+			"   `lit sync pull`",
+			"   `lit sync push`",
 			"   If sync warning appears, agent should auto-retry silently before escalating.",
 			"",
 			"6) Integrity and recovery",
-			"   `lit doctor --json`",
-			"   `lit fsck --repair --json`",
-			"   `lit backup create --json`",
-			"   `lit backup restore --latest --json`",
-			"   `lit recover --latest-backup --json`",
+			"   `lit doctor`",
+			"   `lit fsck --repair`",
+			"   `lit backup create`",
+			"   `lit backup restore --latest`",
+			"   `lit recover --latest-backup`",
 			"",
 			fmt.Sprintf("Exit codes: ok=%d usage=%d validation=%d not_found=%d conflict=%d corruption=%d", ExitOK, ExitUsage, ExitValidation, ExitNotFound, ExitConflict, ExitCorruption),
 		}
@@ -2451,24 +2421,8 @@ func writeJSON(w io.Writer, v any) error {
 	return enc.Encode(v)
 }
 
-func shouldWriteJSON(w io.Writer, jsonOut bool) bool {
-	if jsonOut {
-		return true
-	}
-	// [LAW:one-source-of-truth] Writer-bound output mode is the canonical default signal for format selection.
-	return outputModeFromWriter(w) == outputModeJSON
-}
-
-func outputModeFromWriter(w io.Writer) outputMode {
-	provider, ok := w.(outputModeProvider)
-	if !ok {
-		return outputModeText
-	}
-	return provider.linksOutputMode()
-}
-
 func printValue(w io.Writer, v any, jsonOut bool, textFn func(io.Writer, any) error) error {
-	if shouldWriteJSON(w, jsonOut) {
+	if jsonOut {
 		return writeJSON(w, v)
 	}
 	return textFn(w, v)
@@ -2511,6 +2465,11 @@ func printIssueDetail(w io.Writer, detail model.IssueDetail) error {
 	}
 	if issue.Description != "" {
 		if _, err := fmt.Fprintf(w, "\ndescription:\n%s\n", issue.Description); err != nil {
+			return err
+		}
+	}
+	if issue.Prompt != "" {
+		if _, err := fmt.Fprintf(w, "\nprompt:\n%s\n", issue.Prompt); err != nil {
 			return err
 		}
 	}
@@ -2800,20 +2759,11 @@ func printUsage(w io.Writer) {
 Worktree-native issue tracker with Dolt-backed sync.
 
 Output:
-  --output auto|json|text     Output mode for commands that support structured output.
-  --json                      Shorthand for --output json.
-  Precedence: --output > --json > LIT_OUTPUT > auto
-  Auto behavior: TTY -> text, non-TTY -> json
+  --json         JSON output (default is plain text)
 
 Usage:
-  lit [--output auto|text|json] [--json] [command]
-  lit [--output auto|text|json] [--json] [command] [flags]
-
-Global Output Mode:
-  default        auto (TTY -> text, non-TTY -> json)
-  --json         Explicit shorthand for JSON output compatibility
-  --output MODE  Force output mode (auto|text|json)
-  LIT_OUTPUT     Environment default when flags are not provided
+  lit [command] [flags]
+  lit [command] [flags] [--json]
 
 Sync Branch:
   default        remote default branch (resolved from git remote HEAD)
@@ -2869,7 +2819,7 @@ Guidance & Tooling:
 Command Syntax:
   lit init [--json] [--skip-hooks] [--skip-agents]
   lit ready [--assignee <user>] [--limit N] [--format lines|table] [--columns ...] [--json]
-  lit update <id> [--title <text>] [--description <text>] [--type <task|feature|bug|chore|epic>] [--priority <0..4>] [--assignee <user>] [--labels <csv>] [--status <open|in_progress|closed>] [--reason <text>] [--by <user>] [--json]
+  lit update <id> [--title <text>] [--description <text>] [--prompt <text>] [--type <task|feature|bug|chore|epic>] [--priority <0..4>] [--assignee <user>] [--labels <csv>] [--status <open|in_progress|closed>] [--reason <text>] [--by <user>] [--json]
   lit start <id> --reason <text> [--by <user>] [--json]
   lit done <id> --reason <text> [--by <user>] [--json]
   lit hooks install [--json]
@@ -2883,13 +2833,13 @@ Command Syntax:
   lit sync push [--remote <name>] [--set-upstream] [--force] [--verbose] [--json]
 
 Examples:
-  lit init --json
-  lit ready --json
-  lit update <issue-id> --status in_progress --json
-  lit start <issue-id> --reason "claim" --json
-  lit done <issue-id> --reason "completed" --json
-  lit new --title "Fix renderer race" --type bug --priority 1 --json
-  lit ls --query "status:open type:task" --sort priority:asc,updated_at:desc --json
+  lit init
+  lit ready
+  lit update <issue-id> --status in_progress
+  lit start <issue-id> --reason "claim"
+  lit done <issue-id> --reason "completed"
+  lit new --title "Fix renderer race" --type bug --priority 1
+  lit ls --query "status:open type:task" --sort priority:asc,updated_at:desc
 
 Use "lit [command] --help" for more information about a command.
 `)
