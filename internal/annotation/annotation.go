@@ -3,35 +3,70 @@ package annotation
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 
 	"github.com/bmf/links-issue-tracker/internal/model"
 )
 
-// Kind identifies a category of annotation. The unexported key field prevents
-// construction outside this package — only the package-level vars are valid kinds.
-// [LAW:single-enforcer] New annotation types are defined here and nowhere else.
-type Kind struct {
+type kindDef struct {
 	key string
 }
 
+// Kind identifies a category of annotation.
+// The zero value is invalid; only the package registry produces valid kinds.
+// [LAW:single-enforcer] New annotation types and kind validity are enforced here.
+type Kind struct {
+	def *kindDef
+}
+
 // String returns the serialization key for this kind.
-func (k Kind) String() string { return k.key }
+func (k Kind) String() string {
+	if k.def == nil {
+		return ""
+	}
+	return k.def.key
+}
 
 // MarshalJSON serializes the kind as a JSON string.
 func (k Kind) MarshalJSON() ([]byte, error) {
-	return json.Marshal(k.key)
+	if k.def == nil {
+		return nil, fmt.Errorf("marshal annotation kind: invalid kind")
+	}
+	return json.Marshal(k.def.key)
 }
 
 // UnmarshalJSON deserializes a JSON string into a Kind.
 func (k *Kind) UnmarshalJSON(data []byte) error {
-	return json.Unmarshal(data, &k.key)
+	var key string
+	if err := json.Unmarshal(data, &key); err != nil {
+		return err
+	}
+	parsed, ok := parseKind(key)
+	if !ok {
+		return fmt.Errorf("unknown annotation kind %q", key)
+	}
+	*k = parsed
+	return nil
 }
 
-// Registry — closed set of annotation kinds.
 var (
-	MissingField = Kind{key: "missing_field"} // a required field is empty or unset
-	BlockedBy    = Kind{key: "blocked_by"}    // issue depends on an open ticket
+	missingFieldDef = &kindDef{key: "missing_field"}
+	blockedByDef    = &kindDef{key: "blocked_by"}
+
+	MissingField = Kind{def: missingFieldDef} // a required field is empty or unset
+	BlockedBy    = Kind{def: blockedByDef}    // issue depends on an open ticket
+
+	// [LAW:single-enforcer] The registry is the single authority for valid kinds.
+	kindRegistry = map[string]Kind{
+		missingFieldDef.key: MissingField,
+		blockedByDef.key:    BlockedBy,
+	}
 )
+
+func parseKind(key string) (Kind, bool) {
+	kind, ok := kindRegistry[key]
+	return kind, ok
+}
 
 // Annotation is a computed fact about an issue.
 type Annotation struct {
@@ -80,7 +115,7 @@ func Annotate(ctx context.Context, issues []model.Issue, annotators ...Annotator
 func HasAny(annotations []Annotation, kinds ...Kind) bool {
 	for _, a := range annotations {
 		for _, k := range kinds {
-			if a.Kind.key == k.key {
+			if a.Kind == k {
 				return true
 			}
 		}

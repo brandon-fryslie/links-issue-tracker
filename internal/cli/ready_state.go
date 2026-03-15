@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"reflect"
 	"sort"
 	"strings"
 	"text/tabwriter"
@@ -28,10 +29,7 @@ func isReadyBlocked(annotations []annotation.Annotation) bool {
 // newFieldAnnotator validates requiredFields against model.Issue JSON fields,
 // then returns an annotator that checks those fields on each issue.
 func newFieldAnnotator(requiredFields []string) (annotation.Annotator, error) {
-	validFields, err := issueFieldValues(model.Issue{})
-	if err != nil {
-		return nil, fmt.Errorf("compute valid issue fields: %w", err)
-	}
+	validFields := issueJSONFieldNames()
 	for _, field := range requiredFields {
 		if _, ok := validFields[field]; !ok {
 			return nil, fmt.Errorf("required field %q does not exist on issue", field)
@@ -73,6 +71,40 @@ func newBlockerAnnotator(st *store.Store) annotation.Annotator {
 			}
 		}
 		return annotations, nil
+	}
+}
+
+func issueJSONFieldNames() map[string]struct{} {
+	// [LAW:one-source-of-truth] model.Issue JSON tags are the canonical ready-field schema.
+	issueType := reflect.TypeOf(model.Issue{})
+	fields := make(map[string]struct{}, issueType.NumField())
+	for i := 0; i < issueType.NumField(); i++ {
+		field := issueType.Field(i)
+		if !field.IsExported() {
+			continue
+		}
+		name := issueJSONFieldName(field)
+		if name == "" {
+			continue
+		}
+		fields[name] = struct{}{}
+	}
+	return fields
+}
+
+func issueJSONFieldName(field reflect.StructField) string {
+	tag, ok := field.Tag.Lookup("json")
+	if !ok {
+		return field.Name
+	}
+	name, _, _ := strings.Cut(tag, ",")
+	switch name {
+	case "":
+		return field.Name
+	case "-":
+		return ""
+	default:
+		return name
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/bmf/links-issue-tracker/internal/annotation"
 	"github.com/bmf/links-issue-tracker/internal/app"
+	"github.com/bmf/links-issue-tracker/internal/model"
 	"github.com/bmf/links-issue-tracker/internal/store"
 	"github.com/bmf/links-issue-tracker/internal/workspace"
 )
@@ -37,119 +39,179 @@ func newTestCLIApp(t *testing.T) *app.App {
 	}
 }
 
-func TestRunReadyAnnotatesBlockedIssues(t *testing.T) {
-	ctx := context.Background()
-	ap := newTestCLIApp(t)
+type readyTestHarness struct {
+	t   *testing.T
+	ctx context.Context
+	ap  *app.App
+}
 
-	openA, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
+func newReadyTestHarness(t *testing.T) readyTestHarness {
+	t.Helper()
+	return readyTestHarness{
+		t:   t,
+		ctx: context.Background(),
+		ap:  newTestCLIApp(t),
+	}
+}
+
+func (h readyTestHarness) writeProjectConfig(content string) {
+	h.t.Helper()
+	configDir := filepath.Join(h.ap.Workspace.RootDir, ".lit")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		h.t.Fatalf("MkdirAll(configDir) error = %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(content), 0o644); err != nil {
+		h.t.Fatalf("WriteFile(config.toml) error = %v", err)
+	}
+}
+
+func (h readyTestHarness) writeReadyConfig(requiredFields ...string) {
+	h.t.Helper()
+	encodedFields, err := json.Marshal(requiredFields)
+	if err != nil {
+		h.t.Fatalf("json.Marshal(requiredFields) error = %v", err)
+	}
+	h.writeProjectConfig(fmt.Sprintf("[ready]\nrequired_fields = %s\n", encodedFields))
+}
+
+func (h readyTestHarness) createIssue(input store.CreateIssueInput) model.Issue {
+	h.t.Helper()
+	issue, err := h.ap.Store.CreateIssue(h.ctx, input)
+	if err != nil {
+		h.t.Fatalf("CreateIssue(%q) error = %v", input.Title, err)
+	}
+	return issue
+}
+
+func (h readyTestHarness) closeIssue(issueID, reason string) {
+	h.t.Helper()
+	if _, err := h.ap.Store.TransitionIssue(h.ctx, store.TransitionIssueInput{
+		IssueID:   issueID,
+		Action:    "close",
+		Reason:    reason,
+		CreatedBy: "tester",
+	}); err != nil {
+		h.t.Fatalf("TransitionIssue(close) error = %v", err)
+	}
+}
+
+func (h readyTestHarness) addBlocks(srcID, dstID string) {
+	h.t.Helper()
+	if _, err := h.ap.Store.AddRelation(h.ctx, store.AddRelationInput{
+		SrcID:     srcID,
+		DstID:     dstID,
+		Type:      "blocks",
+		CreatedBy: "agent",
+	}); err != nil {
+		h.t.Fatalf("AddRelation(blocks) error = %v", err)
+	}
+}
+
+func (h readyTestHarness) runReadyJSON(args ...string) []annotation.AnnotatedIssue {
+	h.t.Helper()
+	var stdout bytes.Buffer
+	allArgs := append(append([]string{}, args...), "--json")
+	if err := runReady(h.ctx, &stdout, h.ap, allArgs); err != nil {
+		h.t.Fatalf("runReady(%v) error = %v", allArgs, err)
+	}
+	var got []annotation.AnnotatedIssue
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		h.t.Fatalf("json.Unmarshal(ready output) error = %v", err)
+	}
+	return got
+}
+
+func (h readyTestHarness) runReadyText(args ...string) string {
+	h.t.Helper()
+	var stdout bytes.Buffer
+	if err := runReady(h.ctx, &stdout, h.ap, args); err != nil {
+		h.t.Fatalf("runReady(%v) error = %v", args, err)
+	}
+	return stdout.String()
+}
+
+func (h readyTestHarness) runReadyErr(args ...string) error {
+	h.t.Helper()
+	var stdout bytes.Buffer
+	return runReady(h.ctx, &stdout, h.ap, args)
+}
+
+func findAnnotation(annotations []annotation.Annotation, kind annotation.Kind) (annotation.Annotation, bool) {
+	for _, item := range annotations {
+		if item.Kind == kind {
+			return item, true
+		}
+	}
+	return annotation.Annotation{}, false
+}
+
+func TestRunReadyAnnotatesBlockedIssues(t *testing.T) {
+	h := newReadyTestHarness(t)
+
+	openA := h.createIssue(store.CreateIssueInput{
 		Title:     "Open issue A",
 		IssueType: "task",
 		Priority:  2,
 		Assignee:  "alice",
 	})
-	if err != nil {
-		t.Fatalf("CreateIssue(openA) error = %v", err)
-	}
-	openB, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
+	openB := h.createIssue(store.CreateIssueInput{
 		Title:     "Open issue B",
 		IssueType: "bug",
 		Priority:  1,
 		Assignee:  "bob",
 	})
-	if err != nil {
-		t.Fatalf("CreateIssue(openB) error = %v", err)
-	}
-	if _, err := ap.Store.AddRelation(ctx, store.AddRelationInput{
-		SrcID:     openB.ID,
-		DstID:     openA.ID,
-		Type:      "blocks",
-		CreatedBy: "agent",
-	}); err != nil {
-		t.Fatalf("AddRelation(blocks) error = %v", err)
-	}
+	h.addBlocks(openB.ID, openA.ID)
 
-	closed, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
+	closed := h.createIssue(store.CreateIssueInput{
 		Title:     "Already done",
 		IssueType: "task",
 		Priority:  0,
 	})
-	if err != nil {
-		t.Fatalf("CreateIssue(closed) error = %v", err)
-	}
-	if _, err := ap.Store.TransitionIssue(ctx, store.TransitionIssueInput{
-		IssueID:   closed.ID,
-		Action:    "close",
-		Reason:    "not ready work",
-		CreatedBy: "tester",
-	}); err != nil {
-		t.Fatalf("TransitionIssue(close) error = %v", err)
-	}
+	h.closeIssue(closed.ID, "not ready work")
 
-	var stdout bytes.Buffer
-	if err := runReady(ctx, &stdout, ap, []string{"--json"}); err != nil {
-		t.Fatalf("runReady(--json) error = %v", err)
-	}
-
-	var got []annotation.AnnotatedIssue
-	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
-		t.Fatalf("json.Unmarshal(ready output) error = %v", err)
-	}
+	got := h.runReadyJSON()
 
 	if len(got) != 2 {
 		t.Fatalf("len(got) = %d, want 2; got=%#v", len(got), got)
 	}
-	// First issue should not be blocked (sorted by readiness: unblocked first)
 	if isReadyBlocked(got[0].Annotations) {
 		t.Fatalf("got[0] should not be blocked, annotations=%#v", got[0].Annotations)
 	}
 	if got[0].ID != openA.ID {
 		t.Fatalf("got[0].ID = %q, want %q", got[0].ID, openA.ID)
 	}
-	// Second issue should be blocked
 	if !isReadyBlocked(got[1].Annotations) {
 		t.Fatalf("got[1] should be blocked, annotations=%#v", got[1].Annotations)
 	}
 	if got[1].ID != openB.ID {
 		t.Fatalf("got[1].ID = %q, want %q", got[1].ID, openB.ID)
 	}
-	if got[1].Annotations[0].Kind.String() != "blocked_by" {
-		t.Fatalf("got[1].Annotations[0].Kind = %q, want blocked_by", got[1].Annotations[0].Kind.String())
+	blocker, ok := findAnnotation(got[1].Annotations, annotation.BlockedBy)
+	if !ok {
+		t.Fatalf("got[1] missing blocked_by annotation: %#v", got[1].Annotations)
 	}
-	if got[1].Annotations[0].Message != openA.ID {
-		t.Fatalf("got[1].Annotations[0].Message = %q, want %q", got[1].Annotations[0].Message, openA.ID)
+	if blocker.Message != openA.ID {
+		t.Fatalf("blocked_by message = %q, want %q", blocker.Message, openA.ID)
 	}
 }
 
 func TestRunReadySupportsAssigneeAndLimit(t *testing.T) {
-	ctx := context.Background()
-	ap := newTestCLIApp(t)
+	h := newReadyTestHarness(t)
 
-	if _, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
+	h.createIssue(store.CreateIssueInput{
 		Title:     "Alice old",
 		IssueType: "task",
 		Priority:  1,
 		Assignee:  "alice",
-	}); err != nil {
-		t.Fatalf("CreateIssue(alice old) error = %v", err)
-	}
-	if _, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
+	})
+	h.createIssue(store.CreateIssueInput{
 		Title:     "Bob task",
 		IssueType: "task",
 		Priority:  0,
 		Assignee:  "bob",
-	}); err != nil {
-		t.Fatalf("CreateIssue(bob) error = %v", err)
-	}
+	})
 
-	var stdout bytes.Buffer
-	if err := runReady(ctx, &stdout, ap, []string{"--assignee", "alice", "--limit", "1", "--json"}); err != nil {
-		t.Fatalf("runReady(--assignee --limit --json) error = %v", err)
-	}
-
-	var got []annotation.AnnotatedIssue
-	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
-		t.Fatalf("json.Unmarshal(ready output) error = %v", err)
-	}
+	got := h.runReadyJSON("--assignee", "alice", "--limit", "1")
 
 	if len(got) != 1 {
 		t.Fatalf("len(got) = %d, want 1; got=%#v", len(got), got)
@@ -159,38 +221,18 @@ func TestRunReadySupportsAssigneeAndLimit(t *testing.T) {
 	}
 }
 
-func TestRunReadyAnnotatesMissingRequiredField(t *testing.T) {
-	ctx := context.Background()
-	ap := newTestCLIApp(t)
+func TestRunReadyAcceptsOmitemptyRequiredFieldAndAnnotatesMissing(t *testing.T) {
+	h := newReadyTestHarness(t)
+	h.writeReadyConfig("assignee")
 
-	configDir := filepath.Join(ap.Workspace.RootDir, ".lit")
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(configDir) error = %v", err)
-	}
-	configContent := "[ready]\nrequired_fields = [\"description\"]\n"
-	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(configContent), 0o644); err != nil {
-		t.Fatalf("WriteFile(config.toml) error = %v", err)
-	}
-
-	issue, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
-		Title:     "Needs description",
-		IssueType: "task",
-		Priority:  1,
-		Assignee:  "alice",
+	issue := h.createIssue(store.CreateIssueInput{
+		Title:       "Needs assignee",
+		IssueType:   "task",
+		Priority:    1,
+		Description: "still missing assignee",
 	})
-	if err != nil {
-		t.Fatalf("CreateIssue(issue) error = %v", err)
-	}
 
-	var stdout bytes.Buffer
-	if err := runReady(ctx, &stdout, ap, []string{"--json"}); err != nil {
-		t.Fatalf("runReady(--json) error = %v", err)
-	}
-
-	var got []annotation.AnnotatedIssue
-	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
-		t.Fatalf("json.Unmarshal(ready output) error = %v", err)
-	}
+	got := h.runReadyJSON()
 
 	if len(got) != 1 {
 		t.Fatalf("len(got) = %d, want 1", len(got))
@@ -201,32 +243,20 @@ func TestRunReadyAnnotatesMissingRequiredField(t *testing.T) {
 	if !isReadyBlocked(got[0].Annotations) {
 		t.Fatal("issue with missing required field should be blocked")
 	}
-	if len(got[0].Annotations) != 1 {
-		t.Fatalf("len(got[0].Annotations) = %d, want 1", len(got[0].Annotations))
+	missingField, ok := findAnnotation(got[0].Annotations, annotation.MissingField)
+	if !ok {
+		t.Fatalf("got[0] missing missing_field annotation: %#v", got[0].Annotations)
 	}
-	if got[0].Annotations[0].Kind.String() != "missing_field" {
-		t.Fatalf("got[0].Annotations[0].Kind = %q, want missing_field", got[0].Annotations[0].Kind.String())
-	}
-	if got[0].Annotations[0].Message != "description" {
-		t.Fatalf("got[0].Annotations[0].Message = %q, want description", got[0].Annotations[0].Message)
+	if missingField.Message != "assignee" {
+		t.Fatalf("missing_field message = %q, want assignee", missingField.Message)
 	}
 }
 
 func TestRunReadyErrorsOnInvalidRequiredField(t *testing.T) {
-	ctx := context.Background()
-	ap := newTestCLIApp(t)
+	h := newReadyTestHarness(t)
+	h.writeReadyConfig("made_up_field")
 
-	configDir := filepath.Join(ap.Workspace.RootDir, ".lit")
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(configDir) error = %v", err)
-	}
-	configContent := "[ready]\nrequired_fields = [\"made_up_field\"]\n"
-	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(configContent), 0o644); err != nil {
-		t.Fatalf("WriteFile(config.toml) error = %v", err)
-	}
-
-	var stdout bytes.Buffer
-	err := runReady(ctx, &stdout, ap, []string{"--json"})
+	err := h.runReadyErr("--json")
 	if err == nil {
 		t.Fatal("runReady expected error for invalid required field")
 	}
@@ -239,39 +269,22 @@ func TestRunReadyErrorsOnInvalidRequiredField(t *testing.T) {
 }
 
 func TestRunReadyTextOutputIncludesNotReadySectionAndReason(t *testing.T) {
-	ctx := context.Background()
-	ap := newTestCLIApp(t)
+	h := newReadyTestHarness(t)
+	h.writeReadyConfig("description")
 
-	configDir := filepath.Join(ap.Workspace.RootDir, ".lit")
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(configDir) error = %v", err)
-	}
-	configContent := "[ready]\nrequired_fields = [\"description\"]\n"
-	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(configContent), 0o644); err != nil {
-		t.Fatalf("WriteFile(config.toml) error = %v", err)
-	}
-
-	if _, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
+	h.createIssue(store.CreateIssueInput{
 		Title:       "Ready ticket",
 		IssueType:   "task",
 		Priority:    1,
 		Description: "ship it",
-	}); err != nil {
-		t.Fatalf("CreateIssue(ready) error = %v", err)
-	}
-	if _, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
+	})
+	h.createIssue(store.CreateIssueInput{
 		Title:     "Missing description",
 		IssueType: "task",
 		Priority:  2,
-	}); err != nil {
-		t.Fatalf("CreateIssue(not ready) error = %v", err)
-	}
+	})
 
-	var stdout bytes.Buffer
-	if err := runReady(ctx, &stdout, ap, nil); err != nil {
-		t.Fatalf("runReady() error = %v", err)
-	}
-	text := stdout.String()
+	text := h.runReadyText()
 	if !strings.Contains(text, "Ready\n") {
 		t.Fatalf("ready output missing Ready section header: %q", text)
 	}
@@ -284,19 +297,10 @@ func TestRunReadyTextOutputIncludesNotReadySectionAndReason(t *testing.T) {
 }
 
 func TestRunReadyReturnsConfigErrorForInvalidProjectConfig(t *testing.T) {
-	ctx := context.Background()
-	ap := newTestCLIApp(t)
+	h := newReadyTestHarness(t)
+	h.writeProjectConfig("[ready\nrequired_fields = [\"description\"]")
 
-	configDir := filepath.Join(ap.Workspace.RootDir, ".lit")
-	if err := os.MkdirAll(configDir, 0o755); err != nil {
-		t.Fatalf("MkdirAll(configDir) error = %v", err)
-	}
-	if err := os.WriteFile(filepath.Join(configDir, "config.toml"), []byte("[ready\nrequired_fields = [\"description\"]"), 0o644); err != nil {
-		t.Fatalf("WriteFile(config.toml) error = %v", err)
-	}
-
-	var stdout bytes.Buffer
-	err := runReady(ctx, &stdout, ap, []string{"--json"})
+	err := h.runReadyErr("--json")
 	if err == nil {
 		t.Fatal("runReady expected config parse error")
 	}

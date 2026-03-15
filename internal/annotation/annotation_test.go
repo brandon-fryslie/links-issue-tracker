@@ -31,8 +31,26 @@ func TestKindJSONRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(data, &recovered); err != nil {
 		t.Fatalf("json.Unmarshal() error = %v", err)
 	}
-	if recovered.String() != original.String() {
-		t.Fatalf("round-trip kind = %q, want %q", recovered.String(), original.String())
+	if recovered != original {
+		t.Fatalf("round-trip kind = %#v, want %#v", recovered, original)
+	}
+}
+
+func TestKindMarshalJSONRejectsInvalidKind(t *testing.T) {
+	var invalid Kind
+	if _, err := json.Marshal(invalid); err == nil {
+		t.Fatal("json.Marshal(invalid Kind) expected error")
+	}
+}
+
+func TestKindUnmarshalJSONRejectsUnknownKind(t *testing.T) {
+	var recovered Kind
+	err := json.Unmarshal([]byte(`"unknown_kind"`), &recovered)
+	if err == nil {
+		t.Fatal("json.Unmarshal(unknown kind) expected error")
+	}
+	if err.Error() != `unknown annotation kind "unknown_kind"` {
+		t.Fatalf("json.Unmarshal(unknown kind) error = %q", err.Error())
 	}
 }
 
