@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bmf/links-issue-tracker/internal/annotation"
 	"github.com/bmf/links-issue-tracker/internal/app"
 	"github.com/bmf/links-issue-tracker/internal/store"
 	"github.com/bmf/links-issue-tracker/internal/workspace"
@@ -36,7 +37,7 @@ func newTestCLIApp(t *testing.T) *app.App {
 	}
 }
 
-func TestRunReadyReturnsReadyAndNotReadyIssues(t *testing.T) {
+func TestRunReadyAnnotatesBlockedIssues(t *testing.T) {
 	ctx := context.Background()
 	ap := newTestCLIApp(t)
 
@@ -89,25 +90,33 @@ func TestRunReadyReturnsReadyAndNotReadyIssues(t *testing.T) {
 		t.Fatalf("runReady(--json) error = %v", err)
 	}
 
-	var got readyCommandOutput
+	var got []annotation.AnnotatedIssue
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("json.Unmarshal(ready output) error = %v", err)
 	}
 
-	if len(got.Ready) != 1 {
-		t.Fatalf("len(got.Ready) = %d, want 1; got=%#v", len(got.Ready), got.Ready)
+	if len(got) != 2 {
+		t.Fatalf("len(got) = %d, want 2; got=%#v", len(got), got)
 	}
-	if got.Ready[0].ID != openA.ID {
-		t.Fatalf("got.Ready[0].ID = %q, want %q", got.Ready[0].ID, openA.ID)
+	// First issue should not be blocked (sorted by readiness: unblocked first)
+	if isReadyBlocked(got[0].Annotations) {
+		t.Fatalf("got[0] should not be blocked, annotations=%#v", got[0].Annotations)
 	}
-	if len(got.NotReady) != 1 {
-		t.Fatalf("len(got.NotReady) = %d, want 1; got=%#v", len(got.NotReady), got.NotReady)
+	if got[0].ID != openA.ID {
+		t.Fatalf("got[0].ID = %q, want %q", got[0].ID, openA.ID)
 	}
-	if got.NotReady[0].Issue.ID != openB.ID {
-		t.Fatalf("got.NotReady[0].Issue.ID = %q, want %q", got.NotReady[0].Issue.ID, openB.ID)
+	// Second issue should be blocked
+	if !isReadyBlocked(got[1].Annotations) {
+		t.Fatalf("got[1] should be blocked, annotations=%#v", got[1].Annotations)
 	}
-	if got.NotReady[0].Reason != "Blocked by ticket "+openA.ID {
-		t.Fatalf("got.NotReady[0].Reason = %q", got.NotReady[0].Reason)
+	if got[1].ID != openB.ID {
+		t.Fatalf("got[1].ID = %q, want %q", got[1].ID, openB.ID)
+	}
+	if got[1].Annotations[0].Kind.String() != "blocked_by" {
+		t.Fatalf("got[1].Annotations[0].Kind = %q, want blocked_by", got[1].Annotations[0].Kind.String())
+	}
+	if got[1].Annotations[0].Message != openA.ID {
+		t.Fatalf("got[1].Annotations[0].Message = %q, want %q", got[1].Annotations[0].Message, openA.ID)
 	}
 }
 
@@ -137,23 +146,20 @@ func TestRunReadySupportsAssigneeAndLimit(t *testing.T) {
 		t.Fatalf("runReady(--assignee --limit --json) error = %v", err)
 	}
 
-	var got readyCommandOutput
+	var got []annotation.AnnotatedIssue
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("json.Unmarshal(ready output) error = %v", err)
 	}
 
-	if len(got.Ready) != 1 {
-		t.Fatalf("len(got.Ready) = %d, want 1; got=%#v", len(got.Ready), got.Ready)
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1; got=%#v", len(got), got)
 	}
-	if got.Ready[0].Assignee != "alice" {
-		t.Fatalf("got.Ready[0].Assignee = %q, want alice", got.Ready[0].Assignee)
-	}
-	if len(got.NotReady) != 0 {
-		t.Fatalf("len(got.NotReady) = %d, want 0", len(got.NotReady))
+	if got[0].Assignee != "alice" {
+		t.Fatalf("got[0].Assignee = %q, want alice", got[0].Assignee)
 	}
 }
 
-func TestRunReadyMarksMissingRequiredFieldAsNotReady(t *testing.T) {
+func TestRunReadyAnnotatesMissingRequiredField(t *testing.T) {
 	ctx := context.Background()
 	ap := newTestCLIApp(t)
 
@@ -181,26 +187,32 @@ func TestRunReadyMarksMissingRequiredFieldAsNotReady(t *testing.T) {
 		t.Fatalf("runReady(--json) error = %v", err)
 	}
 
-	var got readyCommandOutput
+	var got []annotation.AnnotatedIssue
 	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
 		t.Fatalf("json.Unmarshal(ready output) error = %v", err)
 	}
 
-	if len(got.Ready) != 0 {
-		t.Fatalf("len(got.Ready) = %d, want 0", len(got.Ready))
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
 	}
-	if len(got.NotReady) != 1 {
-		t.Fatalf("len(got.NotReady) = %d, want 1", len(got.NotReady))
+	if got[0].ID != issue.ID {
+		t.Fatalf("got[0].ID = %q, want %q", got[0].ID, issue.ID)
 	}
-	if got.NotReady[0].Issue.ID != issue.ID {
-		t.Fatalf("got.NotReady[0].Issue.ID = %q, want %q", got.NotReady[0].Issue.ID, issue.ID)
+	if !isReadyBlocked(got[0].Annotations) {
+		t.Fatal("issue with missing required field should be blocked")
 	}
-	if got.NotReady[0].Reason != "Field description not set" {
-		t.Fatalf("got.NotReady[0].Reason = %q, want %q", got.NotReady[0].Reason, "Field description not set")
+	if len(got[0].Annotations) != 1 {
+		t.Fatalf("len(got[0].Annotations) = %d, want 1", len(got[0].Annotations))
+	}
+	if got[0].Annotations[0].Kind.String() != "missing_field" {
+		t.Fatalf("got[0].Annotations[0].Kind = %q, want missing_field", got[0].Annotations[0].Kind.String())
+	}
+	if got[0].Annotations[0].Message != "description" {
+		t.Fatalf("got[0].Annotations[0].Message = %q, want description", got[0].Annotations[0].Message)
 	}
 }
 
-func TestRunReadyMarksUnknownRequiredFieldAsNotFound(t *testing.T) {
+func TestRunReadyErrorsOnInvalidRequiredField(t *testing.T) {
 	ctx := context.Background()
 	ap := newTestCLIApp(t)
 
@@ -213,32 +225,16 @@ func TestRunReadyMarksUnknownRequiredFieldAsNotFound(t *testing.T) {
 		t.Fatalf("WriteFile(config.toml) error = %v", err)
 	}
 
-	issue, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
-		Title:     "Unknown field",
-		IssueType: "task",
-		Priority:  1,
-	})
-	if err != nil {
-		t.Fatalf("CreateIssue(issue) error = %v", err)
-	}
-
 	var stdout bytes.Buffer
-	if err := runReady(ctx, &stdout, ap, []string{"--json"}); err != nil {
-		t.Fatalf("runReady(--json) error = %v", err)
+	err := runReady(ctx, &stdout, ap, []string{"--json"})
+	if err == nil {
+		t.Fatal("runReady expected error for invalid required field")
 	}
-
-	var got readyCommandOutput
-	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
-		t.Fatalf("json.Unmarshal(ready output) error = %v", err)
+	if !strings.Contains(err.Error(), "made_up_field") {
+		t.Fatalf("error = %q, want mention of made_up_field", err.Error())
 	}
-	if len(got.NotReady) != 1 {
-		t.Fatalf("len(got.NotReady) = %d, want 1", len(got.NotReady))
-	}
-	if got.NotReady[0].Issue.ID != issue.ID {
-		t.Fatalf("got.NotReady[0].Issue.ID = %q, want %q", got.NotReady[0].Issue.ID, issue.ID)
-	}
-	if got.NotReady[0].Reason != "Field made_up_field not found" {
-		t.Fatalf("got.NotReady[0].Reason = %q", got.NotReady[0].Reason)
+	if !strings.Contains(err.Error(), "does not exist") {
+		t.Fatalf("error = %q, want 'does not exist' context", err.Error())
 	}
 }
 
