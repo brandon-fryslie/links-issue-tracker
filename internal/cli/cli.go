@@ -22,7 +22,6 @@ import (
 
 	"github.com/bmf/links-issue-tracker/internal/app"
 	"github.com/bmf/links-issue-tracker/internal/backup"
-	"github.com/bmf/links-issue-tracker/internal/beads"
 	"github.com/bmf/links-issue-tracker/internal/config"
 	"github.com/bmf/links-issue-tracker/internal/doltcli"
 	"github.com/bmf/links-issue-tracker/internal/merge"
@@ -43,6 +42,21 @@ const debugSyncBranchEnvVar = "LINKS_DEBUG_DOLT_SYNC_BRANCH"
 
 const (
 	syncManifestReadOnlyRetryAttempts = 2
+)
+
+type workspaceBootstrapPolicy struct {
+	requireDoltVersion bool
+	ensureDatabase     bool
+}
+
+var (
+	workspaceBootstrapNone = workspaceBootstrapPolicy{}
+	// [LAW:single-enforcer] Sync validates the Dolt toolchain at the CLI boundary without entering the writable embedded-store bootstrap path.
+	workspaceBootstrapSync = workspaceBootstrapPolicy{requireDoltVersion: true}
+	// [LAW:single-enforcer] Writable workspace bootstrap remains the single path that ensures the embedded database exists before store mutations.
+	workspaceBootstrapWritable = workspaceBootstrapPolicy{requireDoltVersion: true, ensureDatabase: true}
+	requireMinimumDoltVersion  = doltcli.RequireMinimumVersion
+	ensureWorkspaceDatabase    = store.EnsureDatabase
 )
 
 type outputMode string
@@ -124,7 +138,7 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 	)
 
 	addGroupedPassthrough(root, "bootstrap", "init", "Initialize links", func(args []string) error {
-		return runWithWorkspace(ctx, append([]string{"init"}, args...), false, func(ws workspace.Info) error {
+		return runWithWorkspace(ctx, append([]string{"init"}, args...), workspaceBootstrapNone, func(ws workspace.Info) error {
 			return runInit(ctx, stdout, ws, args)
 		})
 	})
@@ -140,12 +154,12 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 		if err := validateHooksCommandPath(args); err != nil {
 			return err
 		}
-		return runWithWorkspace(ctx, append([]string{"hooks"}, args...), false, func(ws workspace.Info) error {
+		return runWithWorkspace(ctx, append([]string{"hooks"}, args...), workspaceBootstrapNone, func(ws workspace.Info) error {
 			return runHooks(stdout, ws, args)
 		})
 	})
 	addGroupedPassthrough(root, "maintenance", "migrate", "Migrate from Beads to links", func(args []string) error {
-		return runWithWorkspace(ctx, append([]string{"migrate"}, args...), false, func(ws workspace.Info) error {
+		return runWithWorkspace(ctx, append([]string{"migrate"}, args...), workspaceBootstrapNone, func(ws workspace.Info) error {
 			return runMigrate(ctx, stdout, ws, args)
 		})
 	})
@@ -153,7 +167,7 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 		if err := validateSyncCommandPath(args); err != nil {
 			return err
 		}
-		return runWithWorkspace(ctx, append([]string{"sync"}, args...), true, func(ws workspace.Info) error {
+		return runWithWorkspace(ctx, append([]string{"sync"}, args...), workspaceBootstrapSync, func(ws workspace.Info) error {
 			return runSync(ctx, stdout, ws, args)
 		})
 	})
@@ -265,7 +279,7 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 		})
 	})
 	addGroupedPassthrough(root, "maintenance", "workspace", "Show workspace metadata", func(args []string) error {
-		return runWithWorkspace(ctx, append([]string{"workspace"}, args...), false, func(ws workspace.Info) error {
+		return runWithWorkspace(ctx, append([]string{"workspace"}, args...), workspaceBootstrapNone, func(ws workspace.Info) error {
 			return runWorkspace(stdout, ws, args)
 		})
 	})
@@ -383,7 +397,7 @@ func validateBulkCommandPath(args []string) error {
 	return validateNestedCommandPath(args, "usage: lnks bulk <label|close|archive|import> ...", "label", "close", "archive", "import")
 }
 
-func runWithWorkspace(ctx context.Context, commandArgs []string, requireDoltReady bool, run func(workspace.Info) error) error {
+func runWithWorkspace(ctx context.Context, commandArgs []string, bootstrap workspaceBootstrapPolicy, run func(workspace.Info) error) error {
 	preflightWorkspace, hasPreflightWorkspace, err := enforceBeadsPreflight(commandArgs)
 	if err != nil {
 		return err
@@ -396,11 +410,13 @@ func runWithWorkspace(ctx context.Context, commandArgs []string, requireDoltRead
 			return err
 		}
 	}
-	if requireDoltReady {
-		if _, err := doltcli.RequireMinimumVersion(ctx, ws.RootDir, doltcli.MinSupportedVersion); err != nil {
+	if bootstrap.requireDoltVersion {
+		if _, err := requireMinimumDoltVersion(ctx, ws.RootDir, doltcli.MinSupportedVersion); err != nil {
 			return err
 		}
-		if err := store.EnsureDatabase(ctx, ws.DatabasePath, ws.WorkspaceID); err != nil {
+	}
+	if bootstrap.ensureDatabase {
+		if err := ensureWorkspaceDatabase(ctx, ws.DatabasePath, ws.WorkspaceID); err != nil {
 			return err
 		}
 	}

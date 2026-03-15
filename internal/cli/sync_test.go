@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/bmf/links-issue-tracker/internal/doltcli"
 	"github.com/bmf/links-issue-tracker/internal/workspace"
 )
 
@@ -409,5 +410,69 @@ func TestRunWithManifestReadOnlyRetryDoesNotRetryOtherErrors(t *testing.T) {
 	}
 	if attempts != 1 {
 		t.Fatalf("attempts = %d, want 1", attempts)
+	}
+}
+
+func TestRunWithWorkspaceSyncBootstrapSkipsDatabaseEnsure(t *testing.T) {
+	originalRequire := requireMinimumDoltVersion
+	originalEnsure := ensureWorkspaceDatabase
+	t.Cleanup(func() {
+		requireMinimumDoltVersion = originalRequire
+		ensureWorkspaceDatabase = originalEnsure
+	})
+
+	requireCalls := 0
+	ensureCalls := 0
+	requireMinimumDoltVersion = func(context.Context, string, string) (doltcli.Version, error) {
+		requireCalls++
+		return doltcli.Version{}, nil
+	}
+	ensureWorkspaceDatabase = func(context.Context, string, string) error {
+		ensureCalls++
+		return nil
+	}
+
+	if err := runWithWorkspace(context.Background(), []string{"sync", "pull"}, workspaceBootstrapSync, func(workspace.Info) error {
+		return nil
+	}); err != nil {
+		t.Fatalf("runWithWorkspace() error = %v", err)
+	}
+	if requireCalls != 1 {
+		t.Fatalf("requireCalls = %d, want 1", requireCalls)
+	}
+	if ensureCalls != 0 {
+		t.Fatalf("ensureCalls = %d, want 0", ensureCalls)
+	}
+}
+
+func TestRunWithWorkspaceWritableBootstrapEnsuresDatabase(t *testing.T) {
+	originalRequire := requireMinimumDoltVersion
+	originalEnsure := ensureWorkspaceDatabase
+	t.Cleanup(func() {
+		requireMinimumDoltVersion = originalRequire
+		ensureWorkspaceDatabase = originalEnsure
+	})
+
+	requireCalls := 0
+	ensureCalls := 0
+	requireMinimumDoltVersion = func(context.Context, string, string) (doltcli.Version, error) {
+		requireCalls++
+		return doltcli.Version{}, nil
+	}
+	ensureWorkspaceDatabase = func(context.Context, string, string) error {
+		ensureCalls++
+		return nil
+	}
+
+	if err := runWithWorkspace(context.Background(), []string{"sync", "pull"}, workspaceBootstrapWritable, func(workspace.Info) error {
+		return nil
+	}); err != nil {
+		t.Fatalf("runWithWorkspace() error = %v", err)
+	}
+	if requireCalls != 1 {
+		t.Fatalf("requireCalls = %d, want 1", requireCalls)
+	}
+	if ensureCalls != 1 {
+		t.Fatalf("ensureCalls = %d, want 1", ensureCalls)
 	}
 }
