@@ -54,6 +54,10 @@ func OpenSync(ctx context.Context, doltRootDir string, workspaceID string) (*Sto
 	if err := requireEmbeddedSyncSupport(); err != nil {
 		return nil, err
 	}
+	// [LAW:single-enforcer] Sync bootstrap reuses the Store database initializer so first-run sync and regular store opens share one creation boundary.
+	if err := EnsureDatabase(ctx, doltRootDir, workspaceID); err != nil {
+		return nil, err
+	}
 	return openStoreConnection(doltRootDir, workspaceID)
 }
 
@@ -79,52 +83,74 @@ func (s *Store) SyncListRemotes(ctx context.Context) ([]SyncRemote, error) {
 }
 
 func (s *Store) SyncAddRemote(ctx context.Context, name string, url string) error {
+	// [LAW:single-enforcer] Sync input normalization is enforced once at the Store boundary so every caller shares the same contract.
+	trimmedName, err := requireSyncArg("remote name", name)
+	if err != nil {
+		return err
+	}
+	trimmedURL, err := requireSyncArg("remote url", url)
+	if err != nil {
+		return err
+	}
 	return s.runSyncMutation(ctx, func(ctx context.Context) error {
-		_, err := callIntProcedure(ctx, s.db, "DOLT_REMOTE", "add", name, url)
+		_, err := callIntProcedure(ctx, s.db, "DOLT_REMOTE", "add", trimmedName, trimmedURL)
 		if err != nil {
-			return fmt.Errorf("add dolt remote %q: %w", strings.TrimSpace(name), err)
+			return fmt.Errorf("add dolt remote %q: %w", trimmedName, err)
 		}
 		return nil
 	})
 }
 
 func (s *Store) SyncRemoveRemote(ctx context.Context, name string) error {
+	trimmedName, err := requireSyncArg("remote name", name)
+	if err != nil {
+		return err
+	}
 	return s.runSyncMutation(ctx, func(ctx context.Context) error {
-		_, err := callIntProcedure(ctx, s.db, "DOLT_REMOTE", "remove", name)
+		_, err := callIntProcedure(ctx, s.db, "DOLT_REMOTE", "remove", trimmedName)
 		if err != nil {
-			return fmt.Errorf("remove dolt remote %q: %w", strings.TrimSpace(name), err)
+			return fmt.Errorf("remove dolt remote %q: %w", trimmedName, err)
 		}
 		return nil
 	})
 }
 
 func (s *Store) SyncFetch(ctx context.Context, remote string, prune bool) error {
-	args := []string{strings.TrimSpace(remote)}
+	trimmedRemote, err := requireSyncArg("remote", remote)
+	if err != nil {
+		return err
+	}
+	args := []string{trimmedRemote}
 	if prune {
 		args = append([]string{"--prune"}, args...)
 	}
 	return s.runSyncMutation(ctx, func(ctx context.Context) error {
 		_, err := callIntProcedure(ctx, s.db, "DOLT_FETCH", args...)
 		if err != nil {
-			return fmt.Errorf("fetch remote %q: %w", strings.TrimSpace(remote), err)
+			return fmt.Errorf("fetch remote %q: %w", trimmedRemote, err)
 		}
 		return nil
 	})
 }
 
 func (s *Store) SyncPull(ctx context.Context, remote string, branch string) (SyncPullResult, error) {
-	args := []string{strings.TrimSpace(remote)}
-	if strings.TrimSpace(branch) != "" {
-		args = append(args, strings.TrimSpace(branch))
+	trimmedRemote, err := requireSyncArg("remote", remote)
+	if err != nil {
+		return SyncPullResult{}, err
+	}
+	trimmedBranch := strings.TrimSpace(branch)
+	args := []string{trimmedRemote}
+	if trimmedBranch != "" {
+		args = append(args, trimmedBranch)
 	}
 
 	var result SyncPullResult
-	err := s.runSyncMutation(ctx, func(ctx context.Context) error {
+	err = s.runSyncMutation(ctx, func(ctx context.Context) error {
 		query := buildProcedureCall("DOLT_PULL", len(args))
 		var message sql.NullString
 		err := s.db.QueryRowContext(ctx, query, stringArgsToAny(args)...).Scan(&result.FastForward, &result.Conflicts, &message)
 		if err != nil {
-			return fmt.Errorf("pull remote %q: %w", strings.TrimSpace(remote), err)
+			return fmt.Errorf("pull remote %q: %w", trimmedRemote, err)
 		}
 		result.Message = nullStringValue(message)
 		return nil
@@ -136,6 +162,11 @@ func (s *Store) SyncPull(ctx context.Context, remote string, branch string) (Syn
 }
 
 func (s *Store) SyncPush(ctx context.Context, remote string, branch string, setUpstream bool, force bool) (SyncPushResult, error) {
+	trimmedRemote, err := requireSyncArg("remote", remote)
+	if err != nil {
+		return SyncPushResult{}, err
+	}
+	trimmedBranch := strings.TrimSpace(branch)
 	args := []string{}
 	if setUpstream {
 		args = append(args, "--set-upstream")
@@ -143,18 +174,18 @@ func (s *Store) SyncPush(ctx context.Context, remote string, branch string, setU
 	if force {
 		args = append(args, "--force")
 	}
-	args = append(args, strings.TrimSpace(remote))
-	if strings.TrimSpace(branch) != "" {
-		args = append(args, fmt.Sprintf("HEAD:%s", strings.TrimSpace(branch)))
+	args = append(args, trimmedRemote)
+	if trimmedBranch != "" {
+		args = append(args, fmt.Sprintf("HEAD:%s", trimmedBranch))
 	}
 
 	var result SyncPushResult
-	err := s.runSyncMutation(ctx, func(ctx context.Context) error {
+	err = s.runSyncMutation(ctx, func(ctx context.Context) error {
 		query := buildProcedureCall("DOLT_PUSH", len(args))
 		var message sql.NullString
 		err := s.db.QueryRowContext(ctx, query, stringArgsToAny(args)...).Scan(&result.Status, &message)
 		if err != nil {
-			return fmt.Errorf("push remote %q: %w", strings.TrimSpace(remote), err)
+			return fmt.Errorf("push remote %q: %w", trimmedRemote, err)
 		}
 		result.Message = nullStringValue(message)
 		return nil
@@ -241,6 +272,14 @@ func nullStringValue(value sql.NullString) string {
 		return ""
 	}
 	return strings.TrimSpace(value.String)
+}
+
+func requireSyncArg(field string, value string) (string, error) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return "", fmt.Errorf("%s is required", field)
+	}
+	return trimmed, nil
 }
 
 func requireEmbeddedSyncSupport() error {

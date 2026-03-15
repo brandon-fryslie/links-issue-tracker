@@ -1256,7 +1256,7 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 					w,
 					"git=%d dolt=%d added=%d updated=%d removed=%d\n",
 					len(p["git_remotes"].([]workspace.GitRemote)),
-					len(p["dolt_remotes"].([]map[string]string)),
+					len(p["dolt_remotes"].([]store.SyncRemote)),
 					len(syncState.changes.Added),
 					len(syncState.changes.Updated),
 					len(syncState.changes.Removed),

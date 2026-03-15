@@ -45,6 +45,28 @@ func TestOpenSyncDoesNotCreateStartupCommitWhenSchemaIsCurrent(t *testing.T) {
 	}
 }
 
+func TestOpenSyncCreatesDatabaseWhenMissing(t *testing.T) {
+	ctx := context.Background()
+	doltRoot := filepath.Join(t.TempDir(), "dolt")
+
+	syncStore, err := OpenSync(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("OpenSync() error = %v", err)
+	}
+	if err := syncStore.Close(); err != nil {
+		t.Fatalf("Close() sync error = %v", err)
+	}
+
+	repoPath := filepath.Join(doltRoot, "links")
+	status, err := doltcli.Run(ctx, repoPath, "status")
+	if err != nil {
+		t.Fatalf("dolt status after sync open error = %v", err)
+	}
+	if !strings.Contains(status, "On branch main") {
+		t.Fatalf("unexpected dolt status output after sync open: %q", status)
+	}
+}
+
 func TestSyncRemoteLifecycle(t *testing.T) {
 	ctx := context.Background()
 	doltRoot := filepath.Join(t.TempDir(), "dolt")
@@ -88,6 +110,66 @@ func TestSyncRemoteLifecycle(t *testing.T) {
 	}
 	if len(remotes) != 0 {
 		t.Fatalf("remotes after remove = %#v, want empty", remotes)
+	}
+}
+
+func TestSyncRemoteValidation(t *testing.T) {
+	ctx := context.Background()
+	doltRoot := filepath.Join(t.TempDir(), "dolt")
+
+	syncStore, err := OpenSync(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("OpenSync() error = %v", err)
+	}
+	defer syncStore.Close()
+
+	testCases := []struct {
+		name    string
+		run     func() error
+		wantErr string
+	}{
+		{
+			name:    "add remote requires name",
+			run:     func() error { return syncStore.SyncAddRemote(ctx, "   ", "https://example.com/repo.git") },
+			wantErr: "remote name is required",
+		},
+		{
+			name:    "add remote requires url",
+			run:     func() error { return syncStore.SyncAddRemote(ctx, "origin", "   ") },
+			wantErr: "remote url is required",
+		},
+		{
+			name:    "remove remote requires name",
+			run:     func() error { return syncStore.SyncRemoveRemote(ctx, "   ") },
+			wantErr: "remote name is required",
+		},
+		{
+			name:    "fetch requires remote",
+			run:     func() error { return syncStore.SyncFetch(ctx, "   ", false) },
+			wantErr: "remote is required",
+		},
+		{
+			name: "pull requires remote",
+			run: func() error {
+				_, err := syncStore.SyncPull(ctx, "   ", "main")
+				return err
+			},
+			wantErr: "remote is required",
+		},
+		{
+			name: "push requires remote",
+			run: func() error {
+				_, err := syncStore.SyncPush(ctx, "   ", "main", false, false)
+				return err
+			},
+			wantErr: "remote is required",
+		},
+	}
+
+	for _, tc := range testCases {
+		if err := tc.run(); err == nil || !strings.Contains(err.Error(), tc.wantErr) {
+			t.Fatalf("%s error = %v, want %q", tc.name, err, tc.wantErr)
+		}
 	}
 }
 
