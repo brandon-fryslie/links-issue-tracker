@@ -62,7 +62,7 @@ type outputModeProvider interface {
 
 const (
 	humanBootstrapHelp = "Human bootstrap command. Run once per repository/worktree setup before autonomous agent operations."
-	agentCommandHelp   = "Agent-facing operational command. Prefer deterministic machine-readable output (`--json` or `--output json`) in automation."
+	agentCommandHelp   = "Agent-facing operational command."
 )
 
 func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string) error {
@@ -2242,11 +2242,11 @@ func runQuickstart(stdout io.Writer, args []string) error {
 	payload := map[string]any{
 		"summary": "Agent quickstart for links issue tracking",
 		"workflow": []string{
-			"Initialize and auto-migrate with `lnks init --json`.",
-			"Discover workspace identity with `lnks workspace --json`.",
-			"Migrate legacy Beads data/wiring explicitly with `lnks migrate --apply --json` when needed.",
+			"Initialize and auto-migrate with `lnks init`.",
+			"Discover workspace identity with `lnks workspace`.",
+			"Migrate legacy Beads data/wiring explicitly with `lnks migrate --apply` when needed.",
 			"Install git hook automation once with `lnks hooks install`.",
-			"List ready work with `lnks ready --json` (or `lnks ls --query \"status:open\" --json`).",
+			"List ready work with `lnks ready` (or `lnks ls --query \"status:open\"`).",
 			"Create issues with `lnks new ...`; use `--type epic` for epics.",
 			"Connect issues using `lnks parent set` and `lnks dep add --type related-to|blocks`.",
 			"Configure remotes with `git remote`; `lnks sync` mirrors those remotes into Dolt automatically.",
@@ -2254,22 +2254,22 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"Snapshot and rollback using `lnks backup create`, `lnks backup restore`, or `lnks recover`.",
 		},
 		"examples": []string{
-			"lnks init --json",
-			"lnks migrate --apply --json",
-			"lnks hooks install --json",
-			"lnks workspace --json",
-			"lnks ready --json",
-			"lnks update <issue-id> --status in_progress --json",
-			"lnks start <issue-id> --reason \"claim\" --json",
-			"lnks done <issue-id> --reason \"completed\" --json",
-			"lnks ls --query \"status:open type:task\" --sort priority:asc,updated_at:desc --json",
-			"lnks new --title \"Fix renderer race\" --type bug --priority 1 --labels renderer,urgent --json",
-			"lnks parent set <issue-id> <parent-issue-id> --json",
-			"lnks dep add <issue-id> <dependency-issue-id> --type related-to --json",
+			"lnks init",
+			"lnks migrate --apply",
+			"lnks hooks install",
+			"lnks workspace",
+			"lnks ready",
+			"lnks update <issue-id> --status in_progress",
+			"lnks start <issue-id> --reason \"claim\"",
+			"lnks done <issue-id> --reason \"completed\"",
+			"lnks ls --query \"status:open type:task\" --sort priority:asc,updated_at:desc",
+			"lnks new --title \"Fix renderer race\" --type bug --priority 1 --labels renderer,urgent",
+			"lnks parent set <issue-id> <parent-issue-id>",
+			"lnks dep add <issue-id> <dependency-issue-id> --type related-to",
 			"git remote add origin https://github.com/org/repo.git",
-			"lnks sync remote ls --json",
-			"lnks sync pull --json",
-			"lnks sync push --json",
+			"lnks sync remote ls",
+			"lnks sync pull",
+			"lnks sync push",
 		},
 		"exit_codes": map[string]int{
 			"ok":         ExitOK,
@@ -2287,22 +2287,22 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"links agent quickstart",
 			"",
 			"1) Discover context",
-			"   `lnks init --json`",
-			"   `lnks migrate --apply --json`  # for legacy Beads repos",
-			"   `lnks hooks install --json`",
-			"   `lnks workspace --json`",
+			"   `lnks init`",
+			"   `lnks migrate --apply`  # for legacy Beads repos",
+			"   `lnks hooks install`",
+			"   `lnks workspace`",
 			"",
 			"2) Find work",
-			"   `lnks ready --json`",
-			"   `lnks update <issue-id> --status in_progress --json`",
-			"   `lnks start <issue-id> --reason \"claim\" --json`",
-			"   `lnks ls --format lines --json`",
-			"   `lnks ls --query \"status:open type:task\" --sort priority:asc,updated_at:desc --json`",
+			"   `lnks ready`",
+			"   `lnks update <issue-id> --status in_progress`",
+			"   `lnks start <issue-id> --reason \"claim\"`",
+			"   `lnks ls --format lines`",
+			"   `lnks ls --query \"status:open type:task\" --sort priority:asc,updated_at:desc`",
 			"",
 			"3) Create and relate issues/epics",
-			"   `lnks new --title \"...\" --type task|bug|feature|chore|epic --json`",
-			"   `lnks parent set <child-id> <parent-id> --json`",
-			"   `lnks dep add <src-id> <dst-id> --type blocks|related-to|parent-child --json`",
+			"   `lnks new --title \"...\" --type task|bug|feature|chore|epic`",
+			"   `lnks parent set <child-id> <parent-id>`",
+			"   `lnks dep add <src-id> <dst-id> --type blocks|related-to|parent-child`",
 			"",
 			"4) Mutations",
 			"   Use command outputs directly for follow-up writes.",
@@ -2310,10 +2310,10 @@ func runQuickstart(stdout io.Writer, args []string) error {
 			"5) Dolt remote sync",
 			"   Configure remotes with git, then run sync commands.",
 			"   `git remote -v`",
-			"   `lnks sync remote ls --json`",
-			"   `lnks sync fetch --json`",
-			"   `lnks sync pull --json`",
-			"   `lnks sync push --json`",
+			"   `lnks sync remote ls`",
+			"   `lnks sync fetch`",
+			"   `lnks sync pull`",
+			"   `lnks sync push`",
 			"   If sync warning appears, agent should auto-retry silently before escalating.",
 			"",
 			"6) Integrity and recovery",
@@ -2770,13 +2770,13 @@ Command Syntax:
   lnks sync push [--remote <name>] [--set-upstream] [--force] [--verbose] [--json]
 
 Examples:
-  lnks init --json
-  lnks ready --json
-  lnks update <issue-id> --status in_progress --json
-  lnks start <issue-id> --reason "claim" --json
-  lnks done <issue-id> --reason "completed" --json
-  lnks new --title "Fix renderer race" --type bug --priority 1 --json
-  lnks ls --query "status:open type:task" --sort priority:asc,updated_at:desc --json
+  lnks init
+  lnks ready
+  lnks update <issue-id> --status in_progress
+  lnks start <issue-id> --reason "claim"
+  lnks done <issue-id> --reason "completed"
+  lnks new --title "Fix renderer race" --type bug --priority 1
+  lnks ls --query "status:open type:task" --sort priority:asc,updated_at:desc
 
 Use "lnks [command] --help" for more information about a command.
 `)
