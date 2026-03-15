@@ -23,7 +23,6 @@ import (
 	"github.com/bmf/links-issue-tracker/internal/app"
 	"github.com/bmf/links-issue-tracker/internal/backup"
 	"github.com/bmf/links-issue-tracker/internal/config"
-	"github.com/bmf/links-issue-tracker/internal/doltcli"
 	"github.com/bmf/links-issue-tracker/internal/merge"
 	"github.com/bmf/links-issue-tracker/internal/model"
 	"github.com/bmf/links-issue-tracker/internal/query"
@@ -39,25 +38,6 @@ var missingRemoteBranchPattern = regexp.MustCompile(`branch "([^"]+)" not found 
 
 const outputModeEnvVar = "LNKS_OUTPUT"
 const debugSyncBranchEnvVar = "LINKS_DEBUG_DOLT_SYNC_BRANCH"
-
-const (
-	syncManifestReadOnlyRetryAttempts = 2
-)
-
-type workspaceBootstrapPolicy struct {
-	requireDoltVersion bool
-	ensureDatabase     bool
-}
-
-var (
-	workspaceBootstrapNone = workspaceBootstrapPolicy{}
-	// [LAW:single-enforcer] Sync validates the Dolt toolchain at the CLI boundary without entering the writable embedded-store bootstrap path.
-	workspaceBootstrapSync = workspaceBootstrapPolicy{requireDoltVersion: true}
-	// [LAW:single-enforcer] Writable workspace bootstrap remains the single path that ensures the embedded database exists before store mutations.
-	workspaceBootstrapWritable = workspaceBootstrapPolicy{requireDoltVersion: true, ensureDatabase: true}
-	requireMinimumDoltVersion  = doltcli.RequireMinimumVersion
-	ensureWorkspaceDatabase    = store.EnsureDatabase
-)
 
 type outputMode string
 
@@ -138,7 +118,7 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 	)
 
 	addGroupedPassthrough(root, "bootstrap", "init", "Initialize links", func(args []string) error {
-		return runWithWorkspace(ctx, append([]string{"init"}, args...), workspaceBootstrapNone, func(ws workspace.Info) error {
+		return runWithWorkspace(append([]string{"init"}, args...), func(ws workspace.Info) error {
 			return runInit(ctx, stdout, ws, args)
 		})
 	})
@@ -154,12 +134,12 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 		if err := validateHooksCommandPath(args); err != nil {
 			return err
 		}
-		return runWithWorkspace(ctx, append([]string{"hooks"}, args...), workspaceBootstrapNone, func(ws workspace.Info) error {
+		return runWithWorkspace(append([]string{"hooks"}, args...), func(ws workspace.Info) error {
 			return runHooks(stdout, ws, args)
 		})
 	})
 	addGroupedPassthrough(root, "maintenance", "migrate", "Migrate from Beads to links", func(args []string) error {
-		return runWithWorkspace(ctx, append([]string{"migrate"}, args...), workspaceBootstrapNone, func(ws workspace.Info) error {
+		return runWithWorkspace(append([]string{"migrate"}, args...), func(ws workspace.Info) error {
 			return runMigrate(ctx, stdout, ws, args)
 		})
 	})
@@ -167,7 +147,7 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 		if err := validateSyncCommandPath(args); err != nil {
 			return err
 		}
-		return runWithWorkspace(ctx, append([]string{"sync"}, args...), workspaceBootstrapSync, func(ws workspace.Info) error {
+		return runWithWorkspace(append([]string{"sync"}, args...), func(ws workspace.Info) error {
 			return runSync(ctx, stdout, ws, args)
 		})
 	})
@@ -279,7 +259,7 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 		})
 	})
 	addGroupedPassthrough(root, "maintenance", "workspace", "Show workspace metadata", func(args []string) error {
-		return runWithWorkspace(ctx, append([]string{"workspace"}, args...), workspaceBootstrapNone, func(ws workspace.Info) error {
+		return runWithWorkspace(append([]string{"workspace"}, args...), func(ws workspace.Info) error {
 			return runWorkspace(stdout, ws, args)
 		})
 	})
@@ -397,7 +377,7 @@ func validateBulkCommandPath(args []string) error {
 	return validateNestedCommandPath(args, "usage: lnks bulk <label|close|archive|import> ...", "label", "close", "archive", "import")
 }
 
-func runWithWorkspace(ctx context.Context, commandArgs []string, bootstrap workspaceBootstrapPolicy, run func(workspace.Info) error) error {
+func runWithWorkspace(commandArgs []string, run func(workspace.Info) error) error {
 	preflightWorkspace, hasPreflightWorkspace, err := enforceBeadsPreflight(commandArgs)
 	if err != nil {
 		return err
@@ -407,16 +387,6 @@ func runWithWorkspace(ctx context.Context, commandArgs []string, bootstrap works
 	if !hasPreflightWorkspace {
 		ws, err = resolveWorkspaceFromWD()
 		if err != nil {
-			return err
-		}
-	}
-	if bootstrap.requireDoltVersion {
-		if _, err := requireMinimumDoltVersion(ctx, ws.RootDir, doltcli.MinSupportedVersion); err != nil {
-			return err
-		}
-	}
-	if bootstrap.ensureDatabase {
-		if err := ensureWorkspaceDatabase(ctx, ws.DatabasePath, ws.WorkspaceID); err != nil {
 			return err
 		}
 	}
@@ -1252,10 +1222,12 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 	if len(args) == 0 {
 		return errors.New("usage: lnks sync <status|remote|fetch|pull|push> ...")
 	}
-	syncState, err := syncDoltRemotesFromGit(ctx, ws)
+	syncStore, err := store.OpenSync(ctx, ws.DatabasePath, ws.WorkspaceID)
 	if err != nil {
 		return err
 	}
+	defer syncStore.Close()
+
 	switch args[0] {
 	case "remote":
 		if len(args) < 2 {
@@ -1267,6 +1239,10 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 			fs.SetOutput(io.Discard)
 			jsonOut := fs.Bool("json", false, "Output JSON")
 			if err := parseFlagSet(fs, args[2:], stdout); err != nil {
+				return err
+			}
+			syncState, err := readSyncRemoteState(ctx, syncStore, ws)
+			if err != nil {
 				return err
 			}
 			payload := map[string]any{
@@ -1300,27 +1276,22 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		if err := parseFlagSet(fs, args[1:], stdout); err != nil {
 			return err
 		}
-		commandArgs := []string{"fetch", strings.TrimSpace(*remote)}
-		if *prune {
-			commandArgs = append(commandArgs, "--prune")
+		if _, err := syncDoltRemotesFromGit(ctx, syncStore, ws); err != nil {
+			return err
 		}
-		output, err := runDoltSyncCommand(ctx, ws.DoltRepoPath, commandArgs...)
-		if err != nil {
+		remoteName := strings.TrimSpace(*remote)
+		if err := syncStore.SyncFetch(ctx, remoteName, *prune); err != nil {
 			return err
 		}
 		payload := map[string]any{
 			"status": "ok",
-			"remote": strings.TrimSpace(*remote),
-			"raw":    output,
+			"remote": remoteName,
+			"prune":  *prune,
 		}
 		return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
 			p := v.(map[string]any)
 			if !*verbose {
 				_, err := fmt.Fprintln(w, "fetched")
-				return err
-			}
-			if strings.TrimSpace(p["raw"].(string)) != "" {
-				_, err := fmt.Fprintln(w, strings.TrimSpace(p["raw"].(string)))
 				return err
 			}
 			_, err := fmt.Fprintf(w, "fetched %s\n", p["remote"])
@@ -1333,6 +1304,10 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		verbose := fs.Bool("verbose", false, "Include detailed remote output")
 		jsonOut := fs.Bool("json", false, "Output JSON")
 		if err := parseFlagSet(fs, args[1:], stdout); err != nil {
+			return err
+		}
+		syncState, err := syncDoltRemotesFromGit(ctx, syncStore, ws)
+		if err != nil {
 			return err
 		}
 		remoteName, remoteErr := resolveSyncRemote(
@@ -1358,9 +1333,8 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		if err != nil {
 			return err
 		}
-		commandArgs := buildSyncPullCommandArgs(remoteName, resolvedBranch)
-		output, err := runDoltSyncCommand(ctx, ws.DoltRepoPath, commandArgs...)
-		payload, handledErr := buildSyncPullPayload(remoteName, resolvedBranch, output, err)
+		result, err := syncStore.SyncPull(ctx, remoteName, resolvedBranch)
+		payload, handledErr := buildSyncPullPayload(remoteName, resolvedBranch, result.Message, err)
 		if handledErr != nil {
 			return handledErr
 		}
@@ -1376,6 +1350,10 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		verbose := fs.Bool("verbose", false, "Include detailed remote output")
 		jsonOut := fs.Bool("json", false, "Output JSON")
 		if err := parseFlagSet(fs, args[1:], stdout); err != nil {
+			return err
+		}
+		syncState, err := syncDoltRemotesFromGit(ctx, syncStore, ws)
+		if err != nil {
 			return err
 		}
 		remoteName, remoteErr := resolveSyncRemote(
@@ -1401,18 +1379,14 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		if err != nil {
 			return err
 		}
-		// [LAW:dataflow-not-control-flow] Sync push runs one deterministic path from resolved remote+branch state; retries are not encoded in control flow.
-		commandArgs := buildSyncPushCommandArgs(
-			remoteName,
-			syncBranch,
-			*setUpstream,
-			*force,
-		)
-		output, err := runDoltSyncCommand(ctx, ws.DoltRepoPath, commandArgs...)
+		// [LAW:dataflow-not-control-flow] Sync push runs one deterministic embedded mutation path from resolved remote+branch state.
+		result, err := syncStore.SyncPush(ctx, remoteName, syncBranch, *setUpstream, *force)
 		traceMetadata := map[string]string{
-			"remote":       remoteName,
-			"sync_branch":  syncBranch,
-			"dolt_command": strings.Join(append([]string{"dolt"}, commandArgs...), " "),
+			"remote":      remoteName,
+			"sync_branch": syncBranch,
+		}
+		if strings.TrimSpace(result.Message) != "" {
+			traceMetadata["message"] = strings.TrimSpace(result.Message)
 		}
 		traceStatus := "ok"
 		traceReason := "managed automation requested sync push"
@@ -1441,10 +1415,11 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 			return err
 		}
 		payload := map[string]any{
-			"status": "ok",
-			"remote": remoteName,
-			"branch": syncBranch,
-			"raw":    output,
+			"status":      "ok",
+			"remote":      remoteName,
+			"branch":      syncBranch,
+			"raw":         result.Message,
+			"push_status": result.Status,
 		}
 		if traceRef != nil {
 			payload["trace_ref"] = traceRef.Path
@@ -1462,33 +1437,27 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		if err := parseFlagSet(fs, args[1:], stdout); err != nil {
 			return err
 		}
-		version, err := doltcli.InstalledVersion(ctx, ws.DoltRepoPath)
+		syncState, err := readSyncRemoteState(ctx, syncStore, ws)
 		if err != nil {
 			return err
 		}
-		branch, err := doltcli.Run(ctx, ws.DoltRepoPath, "branch", "--show-current")
+		report, err := syncStore.SyncStatus(ctx)
 		if err != nil {
 			return err
 		}
-		remotesOutput, err := doltcli.Run(ctx, ws.DoltRepoPath, "remote", "-v")
-		if err != nil {
-			return err
-		}
-		statusOutput, err := doltcli.Run(ctx, ws.DoltRepoPath, "status")
-		if err != nil {
-			return err
-		}
-		logOutput, err := doltcli.Run(ctx, ws.DoltRepoPath, "log", "-n", "1", "--oneline")
-		if err != nil {
-			return err
+		head := strings.TrimSpace(report.HeadCommit)
+		if strings.TrimSpace(report.HeadMessage) != "" {
+			head = strings.TrimSpace(report.HeadCommit + " " + report.HeadMessage)
 		}
 		payload := map[string]any{
-			"dolt_version": version.String(),
-			"branch":       strings.TrimSpace(branch),
-			"head":         strings.TrimSpace(logOutput),
-			"status":       strings.TrimSpace(statusOutput),
+			"dolt_version": report.DoltVersion,
+			"branch":       report.Branch,
+			"head":         head,
+			"head_commit":  report.HeadCommit,
+			"head_message": report.HeadMessage,
+			"status":       report.Status,
 			"git_remotes":  syncState.gitRemotes,
-			"dolt_remotes": parseDoltRemoteVerbose(remotesOutput),
+			"dolt_remotes": syncState.doltRemotes,
 			"changes":      syncState.changes,
 		}
 		return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
@@ -1500,7 +1469,7 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 				p["branch"],
 				p["head"],
 				len(p["git_remotes"].([]workspace.GitRemote)),
-				len(p["dolt_remotes"].([]map[string]string)),
+				len(p["dolt_remotes"].([]store.SyncRemote)),
 				len(syncState.changes.Added),
 				len(syncState.changes.Updated),
 				len(syncState.changes.Removed),
@@ -1510,15 +1479,6 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 	default:
 		return errors.New("usage: lnks sync <status|remote|fetch|pull|push> ...")
 	}
-}
-
-func buildSyncPullCommandArgs(remote string, branch string) []string {
-	commandArgs := []string{"pull", remote}
-	normalizedBranch := strings.TrimSpace(branch)
-	if normalizedBranch == "" {
-		return commandArgs
-	}
-	return append(commandArgs, normalizedBranch)
 }
 
 func firstNonEmptySyncBranch(candidates ...string) string {
@@ -1621,9 +1581,6 @@ func buildSyncPullPayload(remote string, requestedBranch string, output string, 
 func detectMissingRemoteBranch(message string, requestedBranch string) (string, bool) {
 	// [LAW:single-enforcer] Remote-branch-missing classification is centralized here to avoid drift across callsites.
 	normalized := strings.ToLower(strings.TrimSpace(message))
-	if !strings.HasPrefix(normalized, "dolt pull ") {
-		return "", false
-	}
 	if !strings.Contains(normalized, "not found on remote") {
 		return "", false
 	}
@@ -1721,24 +1678,6 @@ func printSyncPushPayload(w io.Writer, v any, verbose bool) error {
 	return err
 }
 
-func buildSyncPushCommandArgs(remote string, syncBranch string, setUpstream bool, force bool) []string {
-	// [LAW:one-source-of-truth] Sync pushes always target one canonical remote branch instead of caller-selected branch variants.
-	commandArgs := []string{"push"}
-	if setUpstream {
-		commandArgs = append(commandArgs, "-u")
-	}
-	if force {
-		commandArgs = append(commandArgs, "--force")
-	}
-	commandArgs = append(commandArgs, remote)
-	normalizedSyncBranch := strings.TrimSpace(syncBranch)
-	if normalizedSyncBranch == "" {
-		return commandArgs
-	}
-	refspec := fmt.Sprintf("HEAD:%s", normalizedSyncBranch)
-	return append(commandArgs, refspec)
-}
-
 type errorDetailer interface {
 	ErrorDetails() map[string]any
 }
@@ -1751,70 +1690,102 @@ type remoteSyncChanges struct {
 
 type remoteSyncState struct {
 	gitRemotes  []workspace.GitRemote
-	doltRemotes []map[string]string
+	doltRemotes []store.SyncRemote
 	changes     remoteSyncChanges
 }
 
-func syncDoltRemotesFromGit(ctx context.Context, ws workspace.Info) (remoteSyncState, error) {
+func readSyncRemoteState(ctx context.Context, syncStore *store.Store, ws workspace.Info) (remoteSyncState, error) {
 	gitRemotes, err := workspace.GitRemotes(ws.RootDir)
 	if err != nil {
 		return remoteSyncState{}, fmt.Errorf("read git remotes: %w", err)
 	}
-	doltOutput, err := doltcli.Run(ctx, ws.DoltRepoPath, "remote", "-v")
+	doltRemotes, err := syncStore.SyncListRemotes(ctx)
 	if err != nil {
 		return remoteSyncState{}, err
 	}
-	doltRemotes := parseDoltRemoteVerbose(doltOutput)
+	return remoteSyncState{
+		gitRemotes:  gitRemotes,
+		doltRemotes: doltRemotes,
+		changes:     buildRemoteSyncChanges(gitRemotes, doltRemotes),
+	}, nil
+}
+
+func syncDoltRemotesFromGit(ctx context.Context, syncStore *store.Store, ws workspace.Info) (remoteSyncState, error) {
+	state, err := readSyncRemoteState(ctx, syncStore, ws)
+	if err != nil {
+		return remoteSyncState{}, err
+	}
+	gitRemotes := state.gitRemotes
+	doltRemotes := state.doltRemotes
 	gitByName := mapGitRemotesByName(gitRemotes)
 	doltByName := mapRemotesByName(doltRemotes)
-
-	changes := remoteSyncChanges{
-		Added:   []string{},
-		Updated: []string{},
-		Removed: []string{},
-	}
+	changes := buildRemoteSyncChanges(gitRemotes, doltRemotes)
 
 	for _, remote := range gitRemotes {
+		desiredURL := syncRemoteURL(remote.URL)
 		currentURL, exists := doltByName[remote.Name]
 		if !exists {
-			if _, err := runDoltSyncCommand(ctx, ws.DoltRepoPath, "remote", "add", remote.Name, remote.URL); err != nil {
+			if err := syncStore.SyncAddRemote(ctx, remote.Name, desiredURL); err != nil {
 				return remoteSyncState{}, err
 			}
-			changes.Added = append(changes.Added, remote.Name)
 			continue
 		}
-		if !sameRemoteURL(currentURL, remote.URL) {
-			if _, err := runDoltSyncCommand(ctx, ws.DoltRepoPath, "remote", "remove", remote.Name); err != nil {
+		if strings.TrimSpace(currentURL) != desiredURL {
+			if err := syncStore.SyncRemoveRemote(ctx, remote.Name); err != nil {
 				return remoteSyncState{}, err
 			}
-			if _, err := runDoltSyncCommand(ctx, ws.DoltRepoPath, "remote", "add", remote.Name, remote.URL); err != nil {
+			if err := syncStore.SyncAddRemote(ctx, remote.Name, desiredURL); err != nil {
 				return remoteSyncState{}, err
 			}
-			changes.Updated = append(changes.Updated, remote.Name)
 		}
 	}
 	for name := range doltByName {
 		if _, keep := gitByName[name]; keep {
 			continue
 		}
-		if _, err := runDoltSyncCommand(ctx, ws.DoltRepoPath, "remote", "remove", name); err != nil {
+		if err := syncStore.SyncRemoveRemote(ctx, name); err != nil {
 			return remoteSyncState{}, err
 		}
-		changes.Removed = append(changes.Removed, name)
 	}
-	sort.Strings(changes.Added)
-	sort.Strings(changes.Updated)
-	sort.Strings(changes.Removed)
-
-	finalOutput, err := doltcli.Run(ctx, ws.DoltRepoPath, "remote", "-v")
+	finalRemotes, err := syncStore.SyncListRemotes(ctx)
 	if err != nil {
 		return remoteSyncState{}, err
 	}
 	return remoteSyncState{
 		gitRemotes:  gitRemotes,
-		doltRemotes: parseDoltRemoteVerbose(finalOutput),
+		doltRemotes: finalRemotes,
 		changes:     changes,
 	}, nil
+}
+
+func buildRemoteSyncChanges(gitRemotes []workspace.GitRemote, doltRemotes []store.SyncRemote) remoteSyncChanges {
+	gitByName := mapGitRemotesByName(gitRemotes)
+	doltByName := mapRemotesByName(doltRemotes)
+	changes := remoteSyncChanges{
+		Added:   []string{},
+		Updated: []string{},
+		Removed: []string{},
+	}
+	for _, remote := range gitRemotes {
+		desiredURL := syncRemoteURL(remote.URL)
+		currentURL, exists := doltByName[remote.Name]
+		if !exists {
+			changes.Added = append(changes.Added, remote.Name)
+			continue
+		}
+		if strings.TrimSpace(currentURL) != desiredURL {
+			changes.Updated = append(changes.Updated, remote.Name)
+		}
+	}
+	for name := range doltByName {
+		if _, keep := gitByName[name]; !keep {
+			changes.Removed = append(changes.Removed, name)
+		}
+	}
+	sort.Strings(changes.Added)
+	sort.Strings(changes.Updated)
+	sort.Strings(changes.Removed)
+	return changes
 }
 
 func mapGitRemotesByName(remotes []workspace.GitRemote) map[string]string {
@@ -1825,29 +1796,43 @@ func mapGitRemotesByName(remotes []workspace.GitRemote) map[string]string {
 	return out
 }
 
-func mapRemotesByName(remotes []map[string]string) map[string]string {
+func mapRemotesByName(remotes []store.SyncRemote) map[string]string {
 	out := make(map[string]string, len(remotes))
 	for _, remote := range remotes {
-		name := strings.TrimSpace(remote["name"])
-		url := strings.TrimSpace(remote["url"])
-		scope := strings.TrimSpace(remote["scope"])
+		name := strings.TrimSpace(remote.Name)
+		url := strings.TrimSpace(remote.URL)
 		if name == "" || url == "" {
 			continue
 		}
-		// [LAW:one-source-of-truth] Remote URL projection always prefers fetch scope as the canonical source.
-		if scope == "fetch" {
-			out[name] = url
-			continue
-		}
-		if _, exists := out[name]; !exists {
-			out[name] = url
-		}
+		out[name] = url
 	}
 	return out
 }
 
 func sameRemoteURL(left, right string) bool {
 	return normalizeRemoteURL(left) == normalizeRemoteURL(right)
+}
+
+func syncRemoteURL(input string) string {
+	trimmed := strings.TrimSpace(input)
+	if trimmed == "" {
+		return ""
+	}
+	if strings.HasPrefix(trimmed, "git+") {
+		return trimmed
+	}
+	if !strings.HasSuffix(strings.ToLower(trimmed), ".git") {
+		return trimmed
+	}
+	if strings.Contains(trimmed, "://") {
+		// [LAW:one-source-of-truth] Git-backed Dolt remotes use one explicit `git+...` transport form instead of relying on procedure-side URL inference.
+		return "git+" + trimmed
+	}
+	normalized := normalizeSCPLikeRemoteURL(trimmed)
+	if normalized != trimmed {
+		return "git+" + normalized
+	}
+	return trimmed
 }
 
 func normalizeRemoteURL(input string) string {
@@ -1915,53 +1900,6 @@ func normalizeRemotePath(input string) string {
 		cleaned = "/" + cleaned
 	}
 	return cleaned
-}
-
-func parseDoltRemoteVerbose(output string) []map[string]string {
-	lines := strings.Split(strings.TrimSpace(output), "\n")
-	remotes := make([]map[string]string, 0, len(lines))
-	for _, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		if trimmed == "" {
-			continue
-		}
-		fields := strings.Fields(trimmed)
-		if len(fields) < 2 {
-			remotes = append(remotes, map[string]string{"raw": trimmed})
-			continue
-		}
-		entry := map[string]string{
-			"name": fields[0],
-			"url":  fields[1],
-		}
-		if len(fields) >= 3 {
-			entry["scope"] = strings.Trim(fields[2], "()")
-		}
-		remotes = append(remotes, entry)
-	}
-	return remotes
-}
-
-func runDoltSyncCommand(ctx context.Context, repoPath string, commandArgs ...string) (string, error) {
-	return runWithManifestReadOnlyRetry(ctx, func(ctx context.Context) (string, error) {
-		return doltcli.Run(ctx, repoPath, commandArgs...)
-	})
-}
-
-func runWithManifestReadOnlyRetry(ctx context.Context, run func(context.Context) (string, error)) (string, error) {
-	var output string
-	var err error
-	// [LAW:dataflow-not-control-flow] Sync mutation commands always pass through the same retry pipeline; retry behavior depends on error data, not callsite branching.
-	for attempt := 1; attempt <= syncManifestReadOnlyRetryAttempts; attempt++ {
-		output, err = run(ctx)
-		if err == nil {
-			return output, nil
-		}
-		if commandErrorReason(err) != "manifest_read_only" || attempt == syncManifestReadOnlyRetryAttempts {
-			return output, err
-		}
-	}
-	return output, err
 }
 
 func runDoctor(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
