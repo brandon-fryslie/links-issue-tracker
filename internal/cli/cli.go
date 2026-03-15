@@ -53,6 +53,18 @@ type outputModeWriter struct {
 	mode outputMode
 }
 
+type appAccessMode string
+
+const (
+	appAccessRead  appAccessMode = "read"
+	appAccessWrite appAccessMode = "write"
+)
+
+type appBootstrapPolicy struct {
+	accessMode appAccessMode
+	drainQueue bool
+}
+
 func (w outputModeWriter) linksOutputMode() outputMode {
 	return w.mode
 }
@@ -403,7 +415,16 @@ func runWithApp(ctx context.Context, commandArgs []string, run func(context.Cont
 	if err != nil {
 		return fmt.Errorf("get cwd: %w", err)
 	}
-	ap, err := app.Open(ctx, cwd)
+	// [LAW:dataflow-not-control-flow] CLI startup behavior is derived once from canonical command args, not duplicated across callsites.
+	// [LAW:single-enforcer] App bootstrap policy is resolved at the CLI boundary so read commands share one non-mutating startup contract.
+	policy := resolveAppBootstrapPolicy(commandArgs)
+	var ap *app.App
+	switch policy.accessMode {
+	case appAccessRead:
+		ap, err = app.OpenForRead(ctx, cwd)
+	default:
+		ap, err = app.Open(ctx, cwd)
+	}
 	if err != nil {
 		if errors.Is(err, workspace.ErrNotGitRepo) {
 			return fmt.Errorf("links requires running inside a git repository/worktree")
@@ -411,11 +432,56 @@ func runWithApp(ctx context.Context, commandArgs []string, run func(context.Cont
 		return err
 	}
 	defer ap.Close()
-	// [LAW:single-enforcer] Drain any pending queued mutations once at the CLI boundary before command execution.
-	if err := ap.Store.DrainMutationQueue(ctx); err != nil {
-		return fmt.Errorf("drain mutation queue: %w", err)
+	if policy.drainQueue {
+		// [LAW:single-enforcer] Pending queued mutations are drained only on writable bootstrap so read commands never trigger startup writes.
+		if err := ap.Store.DrainMutationQueue(ctx); err != nil {
+			return fmt.Errorf("drain mutation queue: %w", err)
+		}
 	}
 	return run(ctx, ap)
+}
+
+func resolveAppBootstrapPolicy(commandArgs []string) appBootstrapPolicy {
+	if len(commandArgs) == 0 {
+		return appBootstrapPolicy{accessMode: appAccessWrite, drainQueue: true}
+	}
+
+	command := commandArgs[0]
+	switch command {
+	case "ready", "ls", "show", "children", "export", "doctor":
+		return appBootstrapPolicy{accessMode: appAccessRead, drainQueue: false}
+	case "dep":
+		if len(commandArgs) > 1 && commandArgs[1] == "ls" {
+			return appBootstrapPolicy{accessMode: appAccessRead, drainQueue: false}
+		}
+	case "backup":
+		if len(commandArgs) > 1 {
+			switch commandArgs[1] {
+			case "create", "list":
+				return appBootstrapPolicy{accessMode: appAccessRead, drainQueue: false}
+			}
+		}
+	case "fsck":
+		if !hasTruthyBoolFlag(commandArgs[1:], "repair") {
+			return appBootstrapPolicy{accessMode: appAccessRead, drainQueue: false}
+		}
+	}
+
+	return appBootstrapPolicy{accessMode: appAccessWrite, drainQueue: true}
+}
+
+func hasTruthyBoolFlag(args []string, name string) bool {
+	longFlag := "--" + name
+	for _, arg := range args {
+		switch {
+		case arg == longFlag:
+			return true
+		case strings.HasPrefix(arg, longFlag+"="):
+			value := strings.TrimSpace(strings.TrimPrefix(arg, longFlag+"="))
+			return value == "" || value == "true" || value == "1"
+		}
+	}
+	return false
 }
 
 func enforceBeadsPreflight(commandArgs []string) (workspace.Info, bool, error) {

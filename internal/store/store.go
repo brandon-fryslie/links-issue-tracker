@@ -188,11 +188,8 @@ type HealthReport struct {
 }
 
 func Open(ctx context.Context, doltRootDir string, workspaceID string) (*Store, error) {
-	if strings.TrimSpace(doltRootDir) == "" {
-		return nil, errors.New("dolt root dir is required")
-	}
-	if strings.TrimSpace(workspaceID) == "" {
-		return nil, errors.New("workspace id is required")
+	if err := validateOpenArgs(doltRootDir, workspaceID); err != nil {
+		return nil, err
 	}
 	if err := EnsureDatabase(ctx, doltRootDir, workspaceID); err != nil {
 		return nil, err
@@ -209,14 +206,29 @@ func Open(ctx context.Context, doltRootDir string, workspaceID string) (*Store, 
 	return s, nil
 }
 
+func OpenForRead(ctx context.Context, doltRootDir string, workspaceID string) (*Store, error) {
+	if err := validateOpenArgs(doltRootDir, workspaceID); err != nil {
+		return nil, err
+	}
+	// [LAW:single-enforcer] Startup writes remain owned by writable Open so read paths never auto-create or migrate at this boundary.
+	return openStoreConnection(doltRootDir, workspaceID)
+}
+
 func EnsureDatabase(ctx context.Context, doltRootDir string, workspaceID string) error {
+	if err := validateOpenArgs(doltRootDir, workspaceID); err != nil {
+		return err
+	}
+	return ensureDoltDatabase(ctx, doltRootDir, workspaceID)
+}
+
+func validateOpenArgs(doltRootDir string, workspaceID string) error {
 	if strings.TrimSpace(doltRootDir) == "" {
 		return errors.New("dolt root dir is required")
 	}
 	if strings.TrimSpace(workspaceID) == "" {
 		return errors.New("workspace id is required")
 	}
-	return ensureDoltDatabase(ctx, doltRootDir, workspaceID)
+	return nil
 }
 
 func (s *Store) Close() error {
