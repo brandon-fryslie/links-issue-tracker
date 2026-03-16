@@ -22,6 +22,11 @@ type agentsInstallResult struct {
 	Changed bool
 }
 
+func renderLinksAgentsFile() string {
+	// [LAW:one-source-of-truth] Full-file refresh derives AGENTS.md from the canonical managed section renderer.
+	return "# AGENTS\n\n" + renderLinksAgentsSection()
+}
+
 func renderLinksAgentsSection() string {
 	return strings.TrimSpace(`
 <!-- BEGIN LINKS INTEGRATION -->
@@ -30,7 +35,7 @@ func renderLinksAgentsSection() string {
 This repository is configured for agent-native issue tracking with `+"`lnks`"+`.
 
 Session bootstrap (every session / after compaction):
-1. Run `+"`lnks quickstart`"+`.
+1. Run `+"`lnks quickstart --refresh`"+`.
 2. Run `+"`lnks workspace`"+`.
 3. If remotes are configured, run `+"`lnks sync pull`"+` (uses upstream remote when configured, otherwise the single configured remote; debug override: `+"`LINKS_DEBUG_DOLT_SYNC_BRANCH`"+`).
 
@@ -78,6 +83,28 @@ func ensureLinksAgentsSection(rootDir string) (agentsInstallResult, error) {
 		return agentsInstallResult{Path: agentsPath, Created: false, Changed: false}, nil
 	}
 	if err := os.WriteFile(agentsPath, []byte(updated), 0o644); err != nil {
+		return agentsInstallResult{}, fmt.Errorf("write AGENTS.md: %w", err)
+	}
+	return agentsInstallResult{Path: agentsPath, Created: false, Changed: true}, nil
+}
+
+func rewriteLinksAgentsFile(rootDir string) (agentsInstallResult, error) {
+	agentsPath := filepath.Join(rootDir, "AGENTS.md")
+	rendered := renderLinksAgentsFile()
+	content, err := os.ReadFile(agentsPath)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			return agentsInstallResult{}, fmt.Errorf("read AGENTS.md: %w", err)
+		}
+		if writeErr := os.WriteFile(agentsPath, []byte(rendered), 0o644); writeErr != nil {
+			return agentsInstallResult{}, fmt.Errorf("write AGENTS.md: %w", writeErr)
+		}
+		return agentsInstallResult{Path: agentsPath, Created: true, Changed: true}, nil
+	}
+	if string(content) == rendered {
+		return agentsInstallResult{Path: agentsPath, Created: false, Changed: false}, nil
+	}
+	if err := os.WriteFile(agentsPath, []byte(rendered), 0o644); err != nil {
 		return agentsInstallResult{}, fmt.Errorf("write AGENTS.md: %w", err)
 	}
 	return agentsInstallResult{Path: agentsPath, Created: false, Changed: true}, nil

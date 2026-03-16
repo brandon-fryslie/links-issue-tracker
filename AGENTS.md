@@ -6,7 +6,7 @@
 This repository is configured for agent-native issue tracking with `lnks`.
 
 Session bootstrap (every session / after compaction):
-1. Run `lnks quickstart`.
+1. Run `lnks quickstart --refresh`.
 2. Run `lnks workspace`.
 3. If remotes are configured, run `lnks sync pull` (uses upstream remote when configured, otherwise the single configured remote; debug override: `LINKS_DEBUG_DOLT_SYNC_BRANCH`).
 
