@@ -185,9 +185,6 @@ type HealthReport struct {
 }
 
 func Open(ctx context.Context, doltRootDir string, workspaceID string) (*Store, error) {
-	if err := validateOpenArgs(doltRootDir, workspaceID); err != nil {
-		return nil, err
-	}
 	if err := EnsureDatabase(ctx, doltRootDir, workspaceID); err != nil {
 		return nil, err
 	}

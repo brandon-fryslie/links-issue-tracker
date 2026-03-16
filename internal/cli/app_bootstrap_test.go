@@ -14,48 +14,33 @@ import (
 	"github.com/bmf/links-issue-tracker/internal/workspace"
 )
 
-func TestResolveAppAccessMode(t *testing.T) {
+func TestResolveFsckAccessMode(t *testing.T) {
 	testCases := []struct {
 		name string
 		args []string
 		want appAccessMode
 	}{
 		{
-			name: "ls is read only",
-			args: []string{"ls"},
-			want: appAccessRead,
-		},
-		{
-			name: "dep ls is read only",
-			args: []string{"dep", "ls", "lit-123"},
-			want: appAccessRead,
-		},
-		{
-			name: "backup create is read only",
-			args: []string{"backup", "create"},
-			want: appAccessRead,
-		},
-		{
-			name: "fsck without repair is read only",
-			args: []string{"fsck"},
+			name: "default is read only",
+			args: []string{},
 			want: appAccessRead,
 		},
 		{
 			name: "fsck repair is writable",
-			args: []string{"fsck", "--repair"},
+			args: []string{"--repair"},
 			want: appAccessWrite,
 		},
 		{
-			name: "new is writable",
-			args: []string{"new", "--title", "test"},
+			name: "invalid flag falls back to writable",
+			args: []string{"--repair=nope"},
 			want: appAccessWrite,
 		},
 	}
 
 	for _, tc := range testCases {
-		got := resolveAppAccessMode(tc.args)
+		got := resolveFsckAccessMode(tc.args)
 		if got != tc.want {
-			t.Fatalf("%s policy = %#v, want %#v", tc.name, got, tc.want)
+			t.Fatalf("%s access mode = %q, want %q", tc.name, got, tc.want)
 		}
 	}
 }

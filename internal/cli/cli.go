@@ -160,67 +160,67 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 		})
 	})
 	addGroupedPassthrough(root, "operations", "new", "Create an issue", func(args []string) error {
-		return runWithApp(ctx, append([]string{"new"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessWrite, append([]string{"new"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runNew(commandCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "operations", "ready", "List open work", func(args []string) error {
-		return runWithApp(ctx, append([]string{"ready"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessRead, append([]string{"ready"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runReady(commandCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "operations", "ls", "List issues", func(args []string) error {
-		return runWithApp(ctx, append([]string{"ls"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessRead, append([]string{"ls"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runList(commandCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "operations", "show", "Show issue details", func(args []string) error {
-		return runWithApp(ctx, append([]string{"show"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessRead, append([]string{"show"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runShow(commandCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "operations", "update", "Update issue fields", func(args []string) error {
-		return runWithApp(ctx, append([]string{"update"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessWrite, append([]string{"update"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runUpdate(commandCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "operations", "start", "Claim issue work", func(args []string) error {
-		return runWithApp(ctx, append([]string{"start"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessWrite, append([]string{"start"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runTransition(commandCtx, stdout, ap, args, "start")
 		})
 	})
 	addGroupedPassthrough(root, "operations", "done", "Mark claimed work complete", func(args []string) error {
-		return runWithApp(ctx, append([]string{"done"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessWrite, append([]string{"done"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runTransition(commandCtx, stdout, ap, args, "done")
 		})
 	})
 	addGroupedPassthrough(root, "operations", "close", "Close issue(s)", func(args []string) error {
-		return runWithApp(ctx, append([]string{"close"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessWrite, append([]string{"close"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runTransition(commandCtx, stdout, ap, args, "close")
 		})
 	})
 	addGroupedPassthrough(root, "operations", "open", "Reopen issue(s)", func(args []string) error {
-		return runWithApp(ctx, append([]string{"open"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessWrite, append([]string{"open"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runTransition(commandCtx, stdout, ap, args, "reopen")
 		})
 	})
 	addGroupedPassthrough(root, "operations", "archive", "Archive issue(s)", func(args []string) error {
-		return runWithApp(ctx, append([]string{"archive"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessWrite, append([]string{"archive"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runTransition(commandCtx, stdout, ap, args, "archive")
 		})
 	})
 	addGroupedPassthrough(root, "operations", "delete", "Delete issue(s)", func(args []string) error {
-		return runWithApp(ctx, append([]string{"delete"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessWrite, append([]string{"delete"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runTransition(commandCtx, stdout, ap, args, "delete")
 		})
 	})
 	addGroupedPassthrough(root, "operations", "unarchive", "Unarchive issue(s)", func(args []string) error {
-		return runWithApp(ctx, append([]string{"unarchive"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessWrite, append([]string{"unarchive"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runTransition(commandCtx, stdout, ap, args, "unarchive")
 		})
 	})
 	addGroupedPassthrough(root, "operations", "restore", "Restore deleted issue(s)", func(args []string) error {
-		return runWithApp(ctx, append([]string{"restore"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessWrite, append([]string{"restore"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runTransition(commandCtx, stdout, ap, args, "restore")
 		})
 	})
@@ -228,7 +228,7 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 		if err := validateCommentCommandPath(args); err != nil {
 			return err
 		}
-		return runWithApp(ctx, append([]string{"comment"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessWrite, append([]string{"comment"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runComment(commandCtx, stdout, ap, args)
 		})
 	})
@@ -236,7 +236,7 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 		if err := validateLabelCommandPath(args); err != nil {
 			return err
 		}
-		return runWithApp(ctx, append([]string{"label"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessWrite, append([]string{"label"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runLabel(commandCtx, stdout, ap, args)
 		})
 	})
@@ -244,12 +244,12 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 		if err := validateParentCommandPath(args); err != nil {
 			return err
 		}
-		return runWithApp(ctx, append([]string{"parent"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessWrite, append([]string{"parent"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runParent(commandCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "structure", "children", "List child issues", func(args []string) error {
-		return runWithApp(ctx, append([]string{"children"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessRead, append([]string{"children"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runChildren(commandCtx, stdout, ap, args)
 		})
 	})
@@ -257,12 +257,16 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 		if err := validateDepCommandPath(args); err != nil {
 			return err
 		}
-		return runWithApp(ctx, append([]string{"dep"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		accessMode := appAccessWrite
+		if len(args) > 0 && args[0] == "ls" {
+			accessMode = appAccessRead
+		}
+		return runWithApp(ctx, accessMode, append([]string{"dep"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runDep(commandCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "data", "export", "Export workspace snapshot", func(args []string) error {
-		return runWithApp(ctx, append([]string{"export"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessRead, append([]string{"export"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runExport(commandCtx, stdout, ap, args)
 		})
 	})
@@ -272,12 +276,12 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 		})
 	})
 	addGroupedPassthrough(root, "maintenance", "doctor", "Health check", func(args []string) error {
-		return runWithApp(ctx, append([]string{"doctor"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessRead, append([]string{"doctor"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runDoctor(commandCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "maintenance", "fsck", "Integrity check and optional repair", func(args []string) error {
-		return runWithApp(ctx, append([]string{"fsck"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, resolveFsckAccessMode(args), append([]string{"fsck"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runFsck(commandCtx, stdout, ap, args)
 		})
 	})
@@ -285,12 +289,16 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 		if err := validateBackupCommandPath(args); err != nil {
 			return err
 		}
-		return runWithApp(ctx, append([]string{"backup"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		accessMode := appAccessWrite
+		if len(args) > 0 && (args[0] == "create" || args[0] == "list") {
+			accessMode = appAccessRead
+		}
+		return runWithApp(ctx, accessMode, append([]string{"backup"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runBackup(commandCtx, stdout, ap, args)
 		})
 	})
 	addGroupedPassthrough(root, "data", "recover", "Recover from backup or sync", func(args []string) error {
-		return runWithApp(ctx, append([]string{"recover"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessWrite, append([]string{"recover"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runRecover(commandCtx, stdout, ap, args)
 		})
 	})
@@ -298,7 +306,7 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 		if err := validateBulkCommandPath(args); err != nil {
 			return err
 		}
-		return runWithApp(ctx, append([]string{"bulk"}, args...), func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(ctx, appAccessWrite, append([]string{"bulk"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runBulk(commandCtx, stdout, ap, args)
 		})
 	})
@@ -401,7 +409,7 @@ func runWithWorkspace(commandArgs []string, run func(workspace.Info) error) erro
 	return run(ws)
 }
 
-func runWithApp(ctx context.Context, commandArgs []string, run func(context.Context, *app.App) error) error {
+func runWithApp(ctx context.Context, accessMode appAccessMode, commandArgs []string, run func(context.Context, *app.App) error) error {
 	_, _, err := enforceBeadsPreflight(commandArgs)
 	if err != nil {
 		return err
@@ -410,9 +418,7 @@ func runWithApp(ctx context.Context, commandArgs []string, run func(context.Cont
 	if err != nil {
 		return fmt.Errorf("get cwd: %w", err)
 	}
-	// [LAW:dataflow-not-control-flow] CLI startup behavior is derived once from canonical command args, not duplicated across callsites.
-	// [LAW:single-enforcer] App access mode is resolved at the CLI boundary so read commands share one non-mutating startup contract.
-	accessMode := resolveAppAccessMode(commandArgs)
+	// [LAW:single-enforcer] Cobra command registration owns app access selection so startup mode is declared once per entrypoint.
 	var ap *app.App
 	switch accessMode {
 	case appAccessRead:
@@ -430,47 +436,17 @@ func runWithApp(ctx context.Context, commandArgs []string, run func(context.Cont
 	return run(ctx, ap)
 }
 
-func resolveAppAccessMode(commandArgs []string) appAccessMode {
-	if len(commandArgs) == 0 {
+func resolveFsckAccessMode(args []string) appAccessMode {
+	cmd := &cobra.Command{Use: "fsck"}
+	repair := false
+	cmd.Flags().BoolVar(&repair, "repair", false, "Attempt safe repairs")
+	if err := cmd.ParseFlags(args); err != nil {
 		return appAccessWrite
 	}
-
-	command := commandArgs[0]
-	switch command {
-	case "ready", "ls", "show", "children", "export", "doctor":
-		return appAccessRead
-	case "dep":
-		if len(commandArgs) > 1 && commandArgs[1] == "ls" {
-			return appAccessRead
-		}
-	case "backup":
-		if len(commandArgs) > 1 {
-			switch commandArgs[1] {
-			case "create", "list":
-				return appAccessRead
-			}
-		}
-	case "fsck":
-		if !hasTruthyBoolFlag(commandArgs[1:], "repair") {
-			return appAccessRead
-		}
+	if repair {
+		return appAccessWrite
 	}
-
-	return appAccessWrite
-}
-
-func hasTruthyBoolFlag(args []string, name string) bool {
-	longFlag := "--" + name
-	for _, arg := range args {
-		switch {
-		case arg == longFlag:
-			return true
-		case strings.HasPrefix(arg, longFlag+"="):
-			value := strings.TrimSpace(strings.TrimPrefix(arg, longFlag+"="))
-			return value == "" || value == "true" || value == "1"
-		}
-	}
-	return false
+	return appAccessRead
 }
 
 func enforceBeadsPreflight(commandArgs []string) (workspace.Info, bool, error) {
