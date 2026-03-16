@@ -8,6 +8,32 @@ Run commands from a repo/worktree directory.
 
 Upgrade Dolt to `>= 1.81.10`.
 
+## macOS build fails with `unicode/regex.h file not found` or zstd link errors
+
+On macOS with Homebrew, the Dolt driver stack needs ICU and zstd headers / libraries on the cgo search path.
+
+Install dependencies:
+
+```sh
+brew install icu4c@78 zstd
+```
+
+Persist the Go toolchain flags:
+
+```sh
+go env -w CGO_CPPFLAGS='-I/opt/homebrew/opt/icu4c@78/include -I/opt/homebrew/opt/zstd/include'
+go env -w CGO_CFLAGS='-I/opt/homebrew/opt/icu4c@78/include -I/opt/homebrew/opt/zstd/include'
+go env -w CGO_CXXFLAGS='-I/opt/homebrew/opt/icu4c@78/include -I/opt/homebrew/opt/zstd/include'
+go env -w CGO_LDFLAGS='-L/opt/homebrew/opt/icu4c@78/lib -L/opt/homebrew/opt/zstd/lib'
+```
+
+Then retry:
+
+```sh
+go test ./internal/cli -run TestQuickstartOutputsStructuredJSON -count=1
+go build -buildvcs=false ./cmd/lnks
+```
+
 ## Sync warning on push hook
 
 The hook is warn-only and never blocks push. The warning includes `trigger=git-pre-push`, the remote, and a `trace=` path under the workspace `traces_dir`. Retry manually:
