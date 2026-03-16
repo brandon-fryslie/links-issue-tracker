@@ -39,13 +39,10 @@ const (
 )
 
 type Store struct {
-	db              *sql.DB
-	workspaceID     string
-	commitLockPath  string
-	queuePath       string
-	queueOffsetPath string
-	queueLockPath   string
-	telemetryDir    string
+	db             *sql.DB
+	workspaceID    string
+	commitLockPath string
+	telemetryDir   string
 }
 
 type retryOperation func(context.Context) error
@@ -250,13 +247,10 @@ func openStoreConnection(doltRootDir string, workspaceID string) (*Store, error)
 	db.SetMaxIdleConns(1)
 	db.SetConnMaxLifetime(0)
 	return &Store{
-		db:              db,
-		workspaceID:     workspaceID,
-		commitLockPath:  filepath.Join(filepath.Clean(doltRootDir), ".links-commit.lock"),
-		queuePath:       filepath.Join(filepath.Clean(doltRootDir), ".links-mutation-queue.jsonl"),
-		queueOffsetPath: filepath.Join(filepath.Clean(doltRootDir), ".links-mutation-queue.offset"),
-		queueLockPath:   filepath.Join(filepath.Clean(doltRootDir), ".links-mutation-queue.lock"),
-		telemetryDir:    filepath.Join(filepath.Clean(doltRootDir), "telemetry"),
+		db:             db,
+		workspaceID:    workspaceID,
+		commitLockPath: filepath.Join(filepath.Clean(doltRootDir), ".links-commit.lock"),
+		telemetryDir:   filepath.Join(filepath.Clean(doltRootDir), "telemetry"),
 	}, nil
 }
 

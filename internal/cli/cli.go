@@ -60,11 +60,6 @@ const (
 	appAccessWrite appAccessMode = "write"
 )
 
-type appBootstrapPolicy struct {
-	accessMode appAccessMode
-	drainQueue bool
-}
-
 func (w outputModeWriter) linksOutputMode() outputMode {
 	return w.mode
 }
@@ -416,10 +411,10 @@ func runWithApp(ctx context.Context, commandArgs []string, run func(context.Cont
 		return fmt.Errorf("get cwd: %w", err)
 	}
 	// [LAW:dataflow-not-control-flow] CLI startup behavior is derived once from canonical command args, not duplicated across callsites.
-	// [LAW:single-enforcer] App bootstrap policy is resolved at the CLI boundary so read commands share one non-mutating startup contract.
-	policy := resolveAppBootstrapPolicy(commandArgs)
+	// [LAW:single-enforcer] App access mode is resolved at the CLI boundary so read commands share one non-mutating startup contract.
+	accessMode := resolveAppAccessMode(commandArgs)
 	var ap *app.App
-	switch policy.accessMode {
+	switch accessMode {
 	case appAccessRead:
 		ap, err = app.OpenForRead(ctx, cwd)
 	default:
@@ -432,42 +427,36 @@ func runWithApp(ctx context.Context, commandArgs []string, run func(context.Cont
 		return err
 	}
 	defer ap.Close()
-	if policy.drainQueue {
-		// [LAW:single-enforcer] Pending queued mutations are drained only on writable bootstrap so read commands never trigger startup writes.
-		if err := ap.Store.DrainMutationQueue(ctx); err != nil {
-			return fmt.Errorf("drain mutation queue: %w", err)
-		}
-	}
 	return run(ctx, ap)
 }
 
-func resolveAppBootstrapPolicy(commandArgs []string) appBootstrapPolicy {
+func resolveAppAccessMode(commandArgs []string) appAccessMode {
 	if len(commandArgs) == 0 {
-		return appBootstrapPolicy{accessMode: appAccessWrite, drainQueue: true}
+		return appAccessWrite
 	}
 
 	command := commandArgs[0]
 	switch command {
 	case "ready", "ls", "show", "children", "export", "doctor":
-		return appBootstrapPolicy{accessMode: appAccessRead, drainQueue: false}
+		return appAccessRead
 	case "dep":
 		if len(commandArgs) > 1 && commandArgs[1] == "ls" {
-			return appBootstrapPolicy{accessMode: appAccessRead, drainQueue: false}
+			return appAccessRead
 		}
 	case "backup":
 		if len(commandArgs) > 1 {
 			switch commandArgs[1] {
 			case "create", "list":
-				return appBootstrapPolicy{accessMode: appAccessRead, drainQueue: false}
+				return appAccessRead
 			}
 		}
 	case "fsck":
 		if !hasTruthyBoolFlag(commandArgs[1:], "repair") {
-			return appBootstrapPolicy{accessMode: appAccessRead, drainQueue: false}
+			return appAccessRead
 		}
 	}
 
-	return appBootstrapPolicy{accessMode: appAccessWrite, drainQueue: true}
+	return appAccessWrite
 }
 
 func hasTruthyBoolFlag(args []string, name string) bool {
