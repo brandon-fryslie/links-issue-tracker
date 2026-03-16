@@ -75,6 +75,44 @@ func TestQuickstartRefreshRewritesManagedAssetsAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestQuickstartRefreshReportsIncompatibleHookAsSkipped(t *testing.T) {
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+	ws, err := workspace.Resolve(repo)
+	if err != nil {
+		t.Fatalf("workspace.Resolve() error = %v", err)
+	}
+
+	hookPath := filepath.Join(ws.GitCommonDir, "hooks", "pre-push")
+	if err := os.MkdirAll(filepath.Dir(hookPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(hooks dir) error = %v", err)
+	}
+	if err := os.WriteFile(hookPath, []byte("#!/usr/bin/env sh\necho incompatible-hook\n"), 0o755); err != nil {
+		t.Fatalf("WriteFile(pre-push) error = %v", err)
+	}
+
+	prevWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatalf("Chdir(repo) error = %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prevWD) })
+
+	refresh := decodeQuickstartRefresh(t, runQuickstartRefreshJSON(t))
+	hooks := refresh["hooks"].(map[string]any)
+	if hooks["status"] != "skipped" {
+		t.Fatalf("hooks refresh status = %v, want skipped", hooks)
+	}
+	if hooks["managed"] != false {
+		t.Fatalf("hooks managed = %v, want false", hooks["managed"])
+	}
+	if hooks["reason"] != "incompatible" {
+		t.Fatalf("hooks reason = %v, want incompatible", hooks["reason"])
+	}
+}
+
 func runQuickstartRefreshJSON(t *testing.T) map[string]any {
 	t.Helper()
 	var stdout bytes.Buffer

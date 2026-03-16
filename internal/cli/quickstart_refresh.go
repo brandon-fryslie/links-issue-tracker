@@ -7,8 +7,10 @@ import (
 )
 
 type quickstartRefreshItem struct {
-	Path   string `json:"path"`
-	Status string `json:"status"`
+	Path    string `json:"path"`
+	Status  string `json:"status"`
+	Managed bool   `json:"managed"`
+	Reason  string `json:"reason,omitempty"`
 }
 
 type quickstartRefreshReport struct {
@@ -27,13 +29,11 @@ func refreshQuickstartManagedAssets(ws workspace.Info) (quickstartRefreshReport,
 		return quickstartRefreshReport{}, agentsErr
 	}
 	return quickstartRefreshReport{
-		Hooks: quickstartRefreshItem{
-			Path:   hookResult.HookPath,
-			Status: managedAssetStatus(hookResult.Changed, false),
-		},
+		Hooks: quickstartHookRefreshItem(hookResult),
 		Agents: quickstartRefreshItem{
-			Path:   agentsResult.Path,
-			Status: managedAssetStatus(agentsResult.Changed, agentsResult.Created),
+			Path:    agentsResult.Path,
+			Status:  managedAssetStatus(agentsResult.Changed, agentsResult.Created),
+			Managed: true,
 		},
 	}, nil
 }
@@ -51,5 +51,25 @@ func managedAssetStatus(changed bool, created bool) string {
 }
 
 func formatQuickstartRefreshSummary(refresh quickstartRefreshReport) string {
-	return fmt.Sprintf("hooks=%s agents=%s", refresh.Hooks.Status, refresh.Agents.Status)
+	return fmt.Sprintf("hooks=%s agents=%s", formatQuickstartRefreshItemSummary(refresh.Hooks), formatQuickstartRefreshItemSummary(refresh.Agents))
+}
+
+func quickstartHookRefreshItem(result hookInstallResult) quickstartRefreshItem {
+	status := managedAssetStatus(result.Changed, false)
+	if !result.Managed && result.Reason != "" {
+		status = "skipped"
+	}
+	return quickstartRefreshItem{
+		Path:    result.HookPath,
+		Status:  status,
+		Managed: result.Managed,
+		Reason:  result.Reason,
+	}
+}
+
+func formatQuickstartRefreshItemSummary(item quickstartRefreshItem) string {
+	if item.Reason == "" {
+		return item.Status
+	}
+	return fmt.Sprintf("%s(%s)", item.Status, item.Reason)
 }

@@ -21,10 +21,12 @@ brew install icu4c@78 zstd
 Persist the Go toolchain flags:
 
 ```sh
-go env -w CGO_CPPFLAGS='-I/opt/homebrew/opt/icu4c@78/include -I/opt/homebrew/opt/zstd/include'
-go env -w CGO_CFLAGS='-I/opt/homebrew/opt/icu4c@78/include -I/opt/homebrew/opt/zstd/include'
-go env -w CGO_CXXFLAGS='-I/opt/homebrew/opt/icu4c@78/include -I/opt/homebrew/opt/zstd/include'
-go env -w CGO_LDFLAGS='-L/opt/homebrew/opt/icu4c@78/lib -L/opt/homebrew/opt/zstd/lib'
+ICU_PREFIX="$(brew --prefix icu4c@78)"
+ZSTD_PREFIX="$(brew --prefix zstd)"
+go env -w CGO_CPPFLAGS="-I${ICU_PREFIX}/include -I${ZSTD_PREFIX}/include"
+go env -w CGO_CFLAGS="-I${ICU_PREFIX}/include -I${ZSTD_PREFIX}/include"
+go env -w CGO_CXXFLAGS="-I${ICU_PREFIX}/include -I${ZSTD_PREFIX}/include"
+go env -w CGO_LDFLAGS="-L${ICU_PREFIX}/lib -L${ZSTD_PREFIX}/lib"
 ```
 
 Then retry:
