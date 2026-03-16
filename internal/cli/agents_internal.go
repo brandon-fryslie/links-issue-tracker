@@ -37,16 +37,16 @@ Session bootstrap (every session / after compaction):
 Work acquisition:
 1. Use the issue ID already assigned in context when present.
 2. Check current ready work with `+"`lnks ready`"+`.
-3. If no issue exists for the task, create one with `+"`lnks new ...`"+`.
-4. Mark work in progress with `+"`lnks update <issue-id> --status in_progress`"+` (or `+"`lnks start ...`"+`).
-5. Record work start with `+"`lnks comment add <issue-id> --body \"Starting: <plan>\"`"+`.
+3. Create or claim an issue only when the work needs tracking. Do not create tickets for trivial drive-by edits like one-line doc fixes that will be resolved immediately.
+4. For tracked work, mark it in progress with `+"`lnks update <issue-id> --status in_progress`"+` (or `+"`lnks start ...`"+`).
+5. For tracked work, record work start with `+"`lnks comment add <issue-id> --body \"Starting: <plan>\"`"+`.
 
 Execution:
 - Keep structure current with `+"`lnks parent`"+` / `+"`lnks dep`"+` / `+"`lnks label`"+` / `+"`lnks comment`"+`.
 
 Closeout:
-1. Add completion summary: `+"`lnks comment add <issue-id> --body \"Done: <summary>\"`"+`.
-2. Close completed issue: `+"`lnks close <issue-id> --reason \"<completion reason>\"`"+`.
+1. For tracked work, add completion summary: `+"`lnks comment add <issue-id> --body \"Done: <summary>\"`"+`.
+2. For tracked work, close completed issue: `+"`lnks close <issue-id> --reason \"<completion reason>\"`"+`.
 3. You MUST create a git commit for the completed work: `+"`git add -A && git commit -m \"<summary>\"`"+`.
 4. Work is NOT complete until the commit exists. Do NOT start the next issue before committing.
 
