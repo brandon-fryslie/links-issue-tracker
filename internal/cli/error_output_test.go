@@ -57,21 +57,21 @@ func TestBuildCommandErrorPayloadNotFound(t *testing.T) {
 
 func TestBuildCommandErrorPayloadInvalidGlobalFlags(t *testing.T) {
 	t.Run("invalid json flag", func(t *testing.T) {
-		payload := buildCommandErrorPayload(errors.New(`invalid --json value "nope" (expected true|false)`))
+		payload := buildCommandErrorPayload(errors.New(`--json does not accept a value ("false"); use --json for JSON or omit it for text`))
 		if payload.Reason != "invalid_json_flag" {
 			t.Fatalf("reason = %q, want invalid_json_flag", payload.Reason)
 		}
-		if !strings.Contains(payload.Remediation, "--json=true") {
+		if !strings.Contains(payload.Remediation, "omit it for text output") {
 			t.Fatalf("unexpected remediation: %q", payload.Remediation)
 		}
 	})
 
-	t.Run("unsupported output mode", func(t *testing.T) {
-		payload := buildCommandErrorPayload(errors.New(`unsupported output mode "nope" (expected auto|text|json)`))
-		if payload.Reason != "unsupported_output_mode" {
-			t.Fatalf("reason = %q, want unsupported_output_mode", payload.Reason)
+	t.Run("unsupported output flag", func(t *testing.T) {
+		payload := buildCommandErrorPayload(errors.New(`--output is no longer supported; use --json for JSON or omit it for text`))
+		if payload.Reason != "unsupported_output_flag" {
+			t.Fatalf("reason = %q, want unsupported_output_flag", payload.Reason)
 		}
-		if !strings.Contains(payload.Remediation, "--output json") {
+		if !strings.Contains(payload.Remediation, "Remove `--output`") {
 			t.Fatalf("unexpected remediation: %q", payload.Remediation)
 		}
 	})
@@ -89,62 +89,47 @@ func TestBuildCommandErrorPayloadTraceRefDeterministic(t *testing.T) {
 func TestShouldEmitJSONError(t *testing.T) {
 	nonTTY := &bytes.Buffer{}
 
-	t.Run("default non-tty uses json", func(t *testing.T) {
-		t.Setenv(outputModeEnvVar, "")
-		if !shouldEmitJSONError([]string{"quickstart"}, nonTTY) {
-			t.Fatal("expected json mode for non-tty default")
-		}
-	})
-
-	t.Run("env text disables json", func(t *testing.T) {
-		t.Setenv(outputModeEnvVar, "text")
+	t.Run("default errors use text", func(t *testing.T) {
 		if shouldEmitJSONError([]string{"quickstart"}, nonTTY) {
-			t.Fatal("expected text mode from env override")
+			t.Fatal("expected text mode when no explicit json was requested")
 		}
 	})
 
-	t.Run("explicit json flag wins", func(t *testing.T) {
-		t.Setenv(outputModeEnvVar, "text")
+	t.Run("exact global json flag enables json", func(t *testing.T) {
 		if !shouldEmitJSONError([]string{"--json", "quickstart"}, nonTTY) {
 			t.Fatal("expected json mode from --json")
 		}
 	})
 
 	t.Run("command-local json flag wins for startup errors", func(t *testing.T) {
-		t.Setenv(outputModeEnvVar, "text")
 		if !shouldEmitJSONError([]string{"ready", "--json"}, nonTTY) {
 			t.Fatal("expected json mode from command-local --json")
 		}
 	})
 
 	t.Run("command-local json false does not force json", func(t *testing.T) {
-		t.Setenv(outputModeEnvVar, "text")
 		if shouldEmitJSONError([]string{"ready", "--json=false"}, nonTTY) {
 			t.Fatal("expected command-local --json=false to avoid forcing json")
 		}
 	})
 
-	t.Run("parse error still honors explicit json request", func(t *testing.T) {
-		t.Setenv(outputModeEnvVar, "")
-		if !shouldEmitJSONError([]string{"--json=nope", "quickstart"}, nonTTY) {
-			t.Fatal("expected json mode fallback for invalid explicit --json value")
+	t.Run("invalid json value is not treated as explicit json", func(t *testing.T) {
+		if shouldEmitJSONError([]string{"--json=nope", "quickstart"}, nonTTY) {
+			t.Fatal("expected invalid --json value to keep text error output")
 		}
 	})
 
-	t.Run("command-local parse error still honors explicit json request", func(t *testing.T) {
-		t.Setenv(outputModeEnvVar, "text")
-		if !shouldEmitJSONError([]string{"ready", "--json=nope"}, nonTTY) {
-			t.Fatal("expected command-local invalid --json value to force json error output")
+	t.Run("exact json still wins when mixed with removed output flag", func(t *testing.T) {
+		if !shouldEmitJSONError([]string{"--json", "--output", "text", "quickstart"}, nonTTY) {
+			t.Fatal("expected exact --json to keep json error output")
 		}
 	})
 }
 
 func TestWriteCommandErrorJSON(t *testing.T) {
-	t.Setenv(outputModeEnvVar, "")
-
 	var stderr bytes.Buffer
 	var stdout bytes.Buffer
-	exitCode := WriteCommandError(&stderr, &stdout, []string{"unknown"}, errors.New(`unknown command "unknown"`))
+	exitCode := WriteCommandError(&stderr, &stdout, []string{"--json", "unknown"}, errors.New(`unknown command "unknown"`))
 	if exitCode != ExitValidation {
 		t.Fatalf("exitCode = %d, want %d", exitCode, ExitValidation)
 	}
@@ -166,8 +151,6 @@ func TestWriteCommandErrorJSON(t *testing.T) {
 }
 
 func TestWriteCommandErrorText(t *testing.T) {
-	t.Setenv(outputModeEnvVar, "text")
-
 	var stderr bytes.Buffer
 	var stdout bytes.Buffer
 	WriteCommandError(&stderr, &stdout, []string{"unknown"}, errors.New(`unknown command "unknown"`))
@@ -177,20 +160,15 @@ func TestWriteCommandErrorText(t *testing.T) {
 	}
 }
 
-func TestWriteCommandErrorStartupValidationJSON(t *testing.T) {
-	t.Setenv(outputModeEnvVar, "")
-
+func TestWriteCommandErrorStartupValidationTextWithoutJSON(t *testing.T) {
 	var stderr bytes.Buffer
 	var stdout bytes.Buffer
-	WriteCommandError(&stderr, &stdout, []string{"--output", "nope", "ready"}, errors.New(`unsupported output mode "nope" (expected auto|text|json)`))
-
-	var payload map[string]map[string]any
-	if err := json.Unmarshal(stderr.Bytes(), &payload); err != nil {
-		t.Fatalf("stderr should be json for startup validation errors: %v", err)
+	WriteCommandError(&stderr, &stdout, []string{"--output", "nope", "ready"}, errors.New(`--output is no longer supported; use --json for JSON or omit it for text`))
+	if strings.Contains(stderr.String(), `"error"`) {
+		t.Fatalf("stderr should be text without explicit --json: %q", stderr.String())
 	}
-	errorPayload := payload["error"]
-	if errorPayload["reason"] != "unsupported_output_mode" {
-		t.Fatalf("reason = %v, want unsupported_output_mode", errorPayload["reason"])
+	if !strings.Contains(stderr.String(), "error (code=3): --output is no longer supported") {
+		t.Fatalf("unexpected stderr: %q", stderr.String())
 	}
 }
 

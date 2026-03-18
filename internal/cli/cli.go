@@ -31,19 +31,15 @@ import (
 	"github.com/bmf/links-issue-tracker/internal/syncfile"
 	"github.com/bmf/links-issue-tracker/internal/workspace"
 	"github.com/spf13/cobra"
-	"github.com/spf13/viper"
-	"golang.org/x/term"
 )
 
 var missingRemoteBranchPattern = regexp.MustCompile(`branch "([^"]+)" not found on remote`)
 
-const outputModeEnvVar = "LNKS_OUTPUT"
 const debugSyncBranchEnvVar = "LINKS_DEBUG_DOLT_SYNC_BRANCH"
 
 type outputMode string
 
 const (
-	outputModeAuto outputMode = "auto"
 	outputModeText outputMode = "text"
 	outputModeJSON outputMode = "json"
 )
@@ -99,11 +95,9 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 		Long: strings.Join([]string{
 			"Worktree-native issue tracker with Dolt-backed sync.",
 			"",
-			"Global output mode:",
-			"  default auto (TTY -> text, non-TTY -> json)",
-			"  --json shorthand for JSON compatibility",
-			"  --output auto|text|json to force mode",
-			"  LNKS_OUTPUT environment default",
+			"Output mode:",
+			"  default text",
+			"  --json for machine-readable JSON output",
 		}, "\n"),
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -485,18 +479,10 @@ func resolveWorkspaceFromWD() (workspace.Info, error) {
 	return ws, nil
 }
 
-func parseGlobalOutputMode(args []string, stdout io.Writer) ([]string, outputMode, error) {
-	// [LAW:single-enforcer] Global output precedence (--output/--json/env/auto) is enforced exactly once at CLI entry.
-	envMode, err := modeFromEnv()
-	if err != nil {
-		return nil, "", err
-	}
-	// [LAW:one-source-of-truth] Resolve output mode from collected flag values in one place so precedence cannot drift by parse order.
-	mode := envMode
-	hasJSONOverride := false
-	hasOutputOverride := false
-	jsonMode := outputModeJSON
-	outputOverrideMode := outputModeAuto
+func parseGlobalOutputMode(args []string, _ io.Writer) ([]string, outputMode, error) {
+	// [LAW:single-enforcer] Exact global --json handling and legacy output flag rejection live in one parser path.
+	// [LAW:one-source-of-truth] Text is the canonical default; only an explicit global --json flips the shared writer mode.
+	mode := outputModeText
 	index := 0
 	for index < len(args) {
 		switch {
@@ -504,62 +490,31 @@ func parseGlobalOutputMode(args []string, stdout io.Writer) ([]string, outputMod
 			index++
 			goto done
 		case args[index] == "--json":
-			hasJSONOverride = true
-			jsonMode = outputModeJSON
+			mode = outputModeJSON
 			index++
 		case strings.HasPrefix(args[index], "--json="):
-			jsonValue := strings.TrimSpace(strings.TrimPrefix(args[index], "--json="))
-			parsed, parseErr := strconv.ParseBool(jsonValue)
-			if parseErr != nil {
-				return nil, "", fmt.Errorf("invalid --json value %q (expected true|false)", jsonValue)
-			}
-			if parsed {
-				jsonMode = outputModeJSON
-			} else {
-				jsonMode = outputModeText
-			}
-			hasJSONOverride = true
-			index++
+			return nil, "", unsupportedJSONValueError(strings.TrimSpace(strings.TrimPrefix(args[index], "--json=")))
 		case args[index] == "--output":
-			if index+1 >= len(args) {
-				return nil, "", errors.New("usage: lnks [--output auto|text|json] [--json] [command]")
-			}
-			parsedMode, parseErr := parseOutputMode(args[index+1])
-			if parseErr != nil {
-				return nil, "", parseErr
-			}
-			outputOverrideMode = parsedMode
-			hasOutputOverride = true
-			index += 2
+			return nil, "", unsupportedOutputFlagError()
 		default:
 			if strings.HasPrefix(args[index], "--output=") {
-				parsedMode, parseErr := parseOutputMode(strings.TrimPrefix(args[index], "--output="))
-				if parseErr != nil {
-					return nil, "", parseErr
-				}
-				outputOverrideMode = parsedMode
-				hasOutputOverride = true
-				index++
-				continue
+				return nil, "", unsupportedOutputFlagError()
+			}
+			if args[index] == "--help" || args[index] == "-h" {
+				goto done
 			}
 			goto done
 		}
 	}
 
 done:
-	if hasJSONOverride {
-		mode = jsonMode
-	}
-	if hasOutputOverride {
-		mode = outputOverrideMode
-	}
-	if mode == outputModeAuto {
-		mode = detectOutputMode(stdout)
-	}
 	return args[index:], mode, nil
 }
 
 func parseFlagSet(fs *flag.FlagSet, args []string, helpOutput io.Writer) error {
+	if err := validateLegacyOutputFlagSyntax(fs, args); err != nil {
+		return err
+	}
 	fs.SetOutput(io.Discard)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -572,40 +527,54 @@ func parseFlagSet(fs *flag.FlagSet, args []string, helpOutput io.Writer) error {
 	return nil
 }
 
-func modeFromEnv() (outputMode, error) {
-	config := viper.New()
-	if err := config.BindEnv("output", outputModeEnvVar); err != nil {
-		return "", fmt.Errorf("bind %s: %w", outputModeEnvVar, err)
+func validateLegacyOutputFlagSyntax(fs *flag.FlagSet, args []string) error {
+	// [LAW:single-enforcer] Rejection of legacy output flag spellings is centralized so command parsers cannot drift.
+	expectValue := false
+	for _, arg := range args {
+		switch {
+		case arg == "--":
+			return nil
+		case expectValue:
+			expectValue = false
+			continue
+		case !strings.HasPrefix(arg, "-") || arg == "-":
+			continue
+		}
+
+		name, value, hasValue := splitFlagToken(arg)
+		defined := fs.Lookup(name)
+		if defined == nil {
+			continue
+		}
+		if name == "json" && hasValue {
+			return unsupportedJSONValueError(value)
+		}
+		if !hasValue && !flagValueIsBool(defined.Value) {
+			expectValue = true
+		}
 	}
-	raw := strings.TrimSpace(strings.ToLower(config.GetString("output")))
-	if raw == "" {
-		return outputModeAuto, nil
-	}
-	return parseOutputMode(raw)
+	return nil
 }
 
-func parseOutputMode(raw string) (outputMode, error) {
-	switch strings.TrimSpace(strings.ToLower(raw)) {
-	case string(outputModeAuto):
-		return outputModeAuto, nil
-	case string(outputModeText):
-		return outputModeText, nil
-	case string(outputModeJSON):
-		return outputModeJSON, nil
-	default:
-		return "", fmt.Errorf("unsupported output mode %q (expected auto|text|json)", raw)
+func splitFlagToken(arg string) (string, string, bool) {
+	trimmed := strings.TrimLeft(arg, "-")
+	if equalIndex := strings.Index(trimmed, "="); equalIndex >= 0 {
+		return trimmed[:equalIndex], trimmed[equalIndex+1:], true
 	}
+	return trimmed, "", false
 }
 
-func detectOutputMode(stdout io.Writer) outputMode {
-	file, ok := stdout.(*os.File)
-	if !ok {
-		return outputModeJSON
-	}
-	if term.IsTerminal(int(file.Fd())) {
-		return outputModeText
-	}
-	return outputModeJSON
+func flagValueIsBool(value flag.Value) bool {
+	boolFlag, ok := value.(interface{ IsBoolFlag() bool })
+	return ok && boolFlag.IsBoolFlag()
+}
+
+func unsupportedOutputFlagError() error {
+	return errors.New("--output is no longer supported; use --json for JSON or omit it for text")
+}
+
+func unsupportedJSONValueError(value string) error {
+	return fmt.Errorf("--json does not accept a value (%q); use --json for JSON or omit it for text", value)
 }
 
 func runNew(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
@@ -2749,20 +2718,12 @@ func printUsage(w io.Writer) {
 Worktree-native issue tracker with Dolt-backed sync.
 
 Output:
-  --output auto|json|text     Output mode for commands that support structured output.
-  --json                      Shorthand for --output json.
-  Precedence: --output > --json > LNKS_OUTPUT > auto
-  Auto behavior: TTY -> text, non-TTY -> json
+  default text
+  --json                      Output machine-readable JSON.
 
 Usage:
-  lnks [--output auto|text|json] [--json] [command]
-  lnks [--output auto|text|json] [--json] [command] [flags]
-
-Global Output Mode:
-  default        auto (TTY -> text, non-TTY -> json)
-  --json         Explicit shorthand for JSON output compatibility
-  --output MODE  Force output mode (auto|text|json)
-  LNKS_OUTPUT     Environment default when flags are not provided
+  lnks [--json] [command]
+  lnks [--json] [command] [flags]
 
 Sync Branch:
   default        remote default branch (resolved from git remote HEAD)
