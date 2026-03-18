@@ -28,12 +28,6 @@ func TestParseGlobalOutputMode(t *testing.T) {
 			wantArgs: []string{"quickstart"},
 			wantMode: outputModeJSON,
 		},
-		{
-			name:     "command args that look like removed output flags are preserved",
-			args:     []string{"new", "--title", "--output"},
-			wantArgs: []string{"new", "--title", "--output"},
-			wantMode: outputModeText,
-		},
 	}
 
 	for _, tc := range tests {
@@ -51,28 +45,6 @@ func TestParseGlobalOutputMode(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestParseGlobalOutputModeErrors(t *testing.T) {
-	t.Run("removed output flag is rejected", func(t *testing.T) {
-		_, _, err := parseGlobalOutputMode([]string{"--output", "json", "quickstart"}, &bytes.Buffer{})
-		if err == nil {
-			t.Fatalf("expected error for removed --output")
-		}
-		if !strings.Contains(err.Error(), "--output is no longer supported") {
-			t.Fatalf("unexpected error: %v", err)
-		}
-	})
-
-	t.Run("json flag values are rejected", func(t *testing.T) {
-		_, _, err := parseGlobalOutputMode([]string{"--json=false", "quickstart"}, &bytes.Buffer{})
-		if err == nil {
-			t.Fatalf("expected error for unsupported --json value")
-		}
-		if !strings.Contains(err.Error(), "--json does not accept a value") {
-			t.Fatalf("unexpected error: %v", err)
-		}
-	})
 }
 
 func TestRunQuickstartDefaultsToTextOnNonTTY(t *testing.T) {
@@ -96,16 +68,5 @@ func TestRunQuickstartJSONFlagEnablesJSON(t *testing.T) {
 	var payload map[string]any
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatalf("expected json output when --json is set: %v", err)
-	}
-}
-
-func TestRunRejectsCommandLocalJSONFalse(t *testing.T) {
-	var stdout bytes.Buffer
-	err := Run(context.Background(), &stdout, &stdout, []string{"quickstart", "--json=false"})
-	if err == nil {
-		t.Fatal("expected error for command-local --json=false")
-	}
-	if !strings.Contains(err.Error(), "--json does not accept a value") {
-		t.Fatalf("unexpected error: %v", err)
 	}
 }

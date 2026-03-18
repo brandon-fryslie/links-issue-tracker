@@ -492,8 +492,6 @@ func parseGlobalOutputMode(args []string, _ io.Writer) ([]string, outputMode, er
 		case args[index] == "--json":
 			mode = outputModeJSON
 			index++
-		case strings.HasPrefix(args[index], "--json="):
-			return nil, "", unsupportedJSONValueError(strings.TrimSpace(strings.TrimPrefix(args[index], "--json=")))
 		case args[index] == "--output":
 			return nil, "", unsupportedOutputFlagError()
 		default:
@@ -512,9 +510,6 @@ done:
 }
 
 func parseFlagSet(fs *flag.FlagSet, args []string, helpOutput io.Writer) error {
-	if err := validateLegacyOutputFlagSyntax(fs, args); err != nil {
-		return err
-	}
 	fs.SetOutput(io.Discard)
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -527,54 +522,8 @@ func parseFlagSet(fs *flag.FlagSet, args []string, helpOutput io.Writer) error {
 	return nil
 }
 
-func validateLegacyOutputFlagSyntax(fs *flag.FlagSet, args []string) error {
-	// [LAW:single-enforcer] Rejection of legacy output flag spellings is centralized so command parsers cannot drift.
-	expectValue := false
-	for _, arg := range args {
-		switch {
-		case arg == "--":
-			return nil
-		case expectValue:
-			expectValue = false
-			continue
-		case !strings.HasPrefix(arg, "-") || arg == "-":
-			continue
-		}
-
-		name, value, hasValue := splitFlagToken(arg)
-		defined := fs.Lookup(name)
-		if defined == nil {
-			continue
-		}
-		if name == "json" && hasValue {
-			return unsupportedJSONValueError(value)
-		}
-		if !hasValue && !flagValueIsBool(defined.Value) {
-			expectValue = true
-		}
-	}
-	return nil
-}
-
-func splitFlagToken(arg string) (string, string, bool) {
-	trimmed := strings.TrimLeft(arg, "-")
-	if equalIndex := strings.Index(trimmed, "="); equalIndex >= 0 {
-		return trimmed[:equalIndex], trimmed[equalIndex+1:], true
-	}
-	return trimmed, "", false
-}
-
-func flagValueIsBool(value flag.Value) bool {
-	boolFlag, ok := value.(interface{ IsBoolFlag() bool })
-	return ok && boolFlag.IsBoolFlag()
-}
-
 func unsupportedOutputFlagError() error {
 	return errors.New("--output is no longer supported; use --json for JSON or omit it for text")
-}
-
-func unsupportedJSONValueError(value string) error {
-	return fmt.Errorf("--json does not accept a value (%q); use --json for JSON or omit it for text", value)
 }
 
 func runNew(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {

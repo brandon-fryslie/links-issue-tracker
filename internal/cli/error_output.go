@@ -123,8 +123,6 @@ func commandErrorReason(err error) string {
 		return "unknown_command"
 	case strings.HasPrefix(message, "usage:"):
 		return "usage_error"
-	case strings.Contains(message, "--json does not accept a value"):
-		return "invalid_json_flag"
 	case strings.Contains(message, "--output is no longer supported"),
 		strings.Contains(message, "flag provided but not defined: -output"):
 		return "unsupported_output_flag"
@@ -145,8 +143,6 @@ func commandErrorRemediation(reason string) string {
 		return "Run `lnks --help` (or `lnks help <command>`) to select a supported command path."
 	case "usage_error":
 		return "Run the command with `--help` and retry with valid arguments."
-	case "invalid_json_flag":
-		return "Use `--json` for JSON output or omit it for text output."
 	case "unsupported_output_flag":
 		return "Remove `--output`. Use `--json` for JSON output or omit it for text output."
 	case "entity_not_found":

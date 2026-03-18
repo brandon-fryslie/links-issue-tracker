@@ -22,7 +22,6 @@ func TestExitCodeMappings(t *testing.T) {
 		{name: "usage message", err: errors.New("usage: lit foo"), want: ExitUsage},
 		{name: "validation required", err: errors.New("--title is required"), want: ExitValidation},
 		{name: "beads migration required typed", err: BeadsMigrationRequiredError{}, want: ExitValidation},
-		{name: "validation invalid json flag", err: errors.New(`--json does not accept a value ("false"); use --json for JSON or omit it for text`), want: ExitValidation},
 		{name: "validation unknown command", err: errors.New("unknown command \"abc\""), want: ExitValidation},
 		{name: "string conflict", err: errors.New("sync import conflict"), want: ExitConflict},
 		{name: "generic", err: errors.New("boom"), want: ExitGeneric},

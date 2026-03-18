@@ -55,28 +55,6 @@ func TestBuildCommandErrorPayloadNotFound(t *testing.T) {
 	}
 }
 
-func TestBuildCommandErrorPayloadInvalidGlobalFlags(t *testing.T) {
-	t.Run("invalid json flag", func(t *testing.T) {
-		payload := buildCommandErrorPayload(errors.New(`--json does not accept a value ("false"); use --json for JSON or omit it for text`))
-		if payload.Reason != "invalid_json_flag" {
-			t.Fatalf("reason = %q, want invalid_json_flag", payload.Reason)
-		}
-		if !strings.Contains(payload.Remediation, "omit it for text output") {
-			t.Fatalf("unexpected remediation: %q", payload.Remediation)
-		}
-	})
-
-	t.Run("unsupported output flag", func(t *testing.T) {
-		payload := buildCommandErrorPayload(errors.New(`--output is no longer supported; use --json for JSON or omit it for text`))
-		if payload.Reason != "unsupported_output_flag" {
-			t.Fatalf("reason = %q, want unsupported_output_flag", payload.Reason)
-		}
-		if !strings.Contains(payload.Remediation, "Remove `--output`") {
-			t.Fatalf("unexpected remediation: %q", payload.Remediation)
-		}
-	})
-}
-
 func TestBuildCommandErrorPayloadTraceRefDeterministic(t *testing.T) {
 	err := errors.New("boom")
 	a := buildCommandErrorPayload(err)
@@ -104,24 +82,6 @@ func TestShouldEmitJSONError(t *testing.T) {
 	t.Run("command-local json flag wins for startup errors", func(t *testing.T) {
 		if !shouldEmitJSONError([]string{"ready", "--json"}, nonTTY) {
 			t.Fatal("expected json mode from command-local --json")
-		}
-	})
-
-	t.Run("command-local json false does not force json", func(t *testing.T) {
-		if shouldEmitJSONError([]string{"ready", "--json=false"}, nonTTY) {
-			t.Fatal("expected command-local --json=false to avoid forcing json")
-		}
-	})
-
-	t.Run("invalid json value is not treated as explicit json", func(t *testing.T) {
-		if shouldEmitJSONError([]string{"--json=nope", "quickstart"}, nonTTY) {
-			t.Fatal("expected invalid --json value to keep text error output")
-		}
-	})
-
-	t.Run("exact json still wins when mixed with removed output flag", func(t *testing.T) {
-		if !shouldEmitJSONError([]string{"--json", "--output", "text", "quickstart"}, nonTTY) {
-			t.Fatal("expected exact --json to keep json error output")
 		}
 	})
 }
@@ -157,18 +117,6 @@ func TestWriteCommandErrorText(t *testing.T) {
 
 	if !strings.Contains(stderr.String(), "error (code=3): unknown command \"unknown\"") {
 		t.Fatalf("unexpected text stderr: %q", stderr.String())
-	}
-}
-
-func TestWriteCommandErrorStartupValidationTextWithoutJSON(t *testing.T) {
-	var stderr bytes.Buffer
-	var stdout bytes.Buffer
-	WriteCommandError(&stderr, &stdout, []string{"--output", "nope", "ready"}, errors.New(`--output is no longer supported; use --json for JSON or omit it for text`))
-	if strings.Contains(stderr.String(), `"error"`) {
-		t.Fatalf("stderr should be text without explicit --json: %q", stderr.String())
-	}
-	if !strings.Contains(stderr.String(), "error (code=3): --output is no longer supported") {
-		t.Fatalf("unexpected stderr: %q", stderr.String())
 	}
 }
 

@@ -45,7 +45,6 @@ func ExitCode(err error) int {
 		strings.Contains(message, "must be"),
 		strings.Contains(message, "unsupported"),
 		strings.Contains(message, "--output is no longer supported"),
-		strings.Contains(message, "--json does not accept a value"),
 		strings.Contains(message, "unknown command"):
 		return ExitValidation
 	case strings.Contains(message, "conflict"):
