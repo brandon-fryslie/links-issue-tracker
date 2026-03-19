@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -82,6 +83,77 @@ func TestStoreRejectsInvalidIssueType(t *testing.T) {
 	defer st.Close()
 	if _, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Bad", IssueType: "weird", Priority: 2}); err == nil {
 		t.Fatal("expected invalid issue type error")
+	}
+}
+
+func TestStoreCreateIssueUsesBeadsCompatibleIDFormat(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer st.Close()
+
+	issue, err := st.CreateIssue(ctx, CreateIssueInput{
+		Title:       "Renderer cleanup",
+		Description: "Normalize issue IDs with beads.",
+		IssueType:   "task",
+		Priority:    1,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue() error = %v", err)
+	}
+
+	re := regexp.MustCompile(`^lit-[0-9a-z]{3,8}$`)
+	if !re.MatchString(issue.ID) {
+		t.Fatalf("issue.ID = %q, want lit-<3-8 base36 chars>", issue.ID)
+	}
+}
+
+func TestGenerateHashIssueIDIsDeterministicForSameInputs(t *testing.T) {
+	createdAt := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)
+
+	first := generateHashIssueID(issueIDPrefix, "Fix parser", "Adopt beads ID shape", "links", createdAt, 6, 0)
+	second := generateHashIssueID(issueIDPrefix, "Fix parser", "Adopt beads ID shape", "links", createdAt, 6, 0)
+
+	if first != second {
+		t.Fatalf("generateHashIssueID() = %q then %q, want deterministic output", first, second)
+	}
+}
+
+func TestNewIssueIDCollisionsAdvanceNonce(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer st.Close()
+
+	createdAt := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)
+	tx, err := st.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatalf("BeginTx() error = %v", err)
+	}
+	defer tx.Rollback()
+
+	firstID, err := newIssueID(ctx, tx, "Duplicate title", "Duplicate description", "links", createdAt)
+	if err != nil {
+		t.Fatalf("newIssueID(first) error = %v", err)
+	}
+	_, err = tx.ExecContext(ctx, `INSERT INTO issues(
+		id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at, archived_at, deleted_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+		firstID, "Duplicate title", "Duplicate description", "open", 1, "task", "", createdAt.Format(time.RFC3339Nano), createdAt.Format(time.RFC3339Nano))
+	if err != nil {
+		t.Fatalf("insert first issue error = %v", err)
+	}
+
+	secondID, err := newIssueID(ctx, tx, "Duplicate title", "Duplicate description", "links", createdAt)
+	if err != nil {
+		t.Fatalf("newIssueID(second) error = %v", err)
+	}
+	if secondID == firstID {
+		t.Fatalf("secondID = %q, want collision fallback to choose a different ID than %q", secondID, firstID)
 	}
 }
 

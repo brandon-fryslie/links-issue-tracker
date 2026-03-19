@@ -547,8 +547,8 @@ func (s *Store) createIssueOnce(ctx context.Context, in CreateIssueInput) (model
 	if err != nil {
 		return model.Issue{}, err
 	}
+	createdBy := "links"
 	issue := model.Issue{
-		ID:          newIssueID(s.workspaceID),
 		Title:       strings.TrimSpace(in.Title),
 		Description: strings.TrimSpace(in.Description),
 		Status:      "open",
@@ -569,6 +569,10 @@ func (s *Store) createIssueOnce(ctx context.Context, in CreateIssueInput) (model
 		return model.Issue{}, fmt.Errorf("begin create issue tx: %w", err)
 	}
 	defer tx.Rollback()
+	issue.ID, err = newIssueID(ctx, tx, issue.Title, issue.Description, createdBy, issue.CreatedAt)
+	if err != nil {
+		return model.Issue{}, err
+	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO issues(
 		id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at, archived_at, deleted_at
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
@@ -577,10 +581,10 @@ func (s *Store) createIssueOnce(ctx context.Context, in CreateIssueInput) (model
 	if err != nil {
 		return model.Issue{}, fmt.Errorf("insert issue: %w", err)
 	}
-	if err := s.replaceLabelsTx(ctx, tx, issue.ID, issue.Labels, "links"); err != nil {
+	if err := s.replaceLabelsTx(ctx, tx, issue.ID, issue.Labels, createdBy); err != nil {
 		return model.Issue{}, err
 	}
-	if err := s.insertHistoryTx(ctx, tx, issue.ID, "created", "issue created", "", "open", "links"); err != nil {
+	if err := s.insertHistoryTx(ctx, tx, issue.ID, "created", "issue created", "", "open", createdBy); err != nil {
 		return model.Issue{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -2595,9 +2599,4 @@ func isManifestReadOnlyCommitError(err error) bool {
 	}
 	normalized := strings.ToLower(err.Error())
 	return strings.Contains(normalized, "cannot update manifest") && strings.Contains(normalized, "read only")
-}
-
-func newIssueID(workspaceID string) string {
-	prefix := strings.SplitN(workspaceID, "-", 2)[0]
-	return fmt.Sprintf("lit-%s-%s", prefix, uuid.NewString()[:8])
 }
