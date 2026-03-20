@@ -7,21 +7,65 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	issueIDPrefix               = "lit"
+	defaultIssueIDPrefix        = "lit"
+	defaultIssueTopic           = "misc"
 	issueIDCollisionProbability = 0.25
 	issueIDMinHashLength        = 3
 	issueIDMaxHashLength        = 8
 	issueIDNonceAttempts        = 10
+	issueTopicMinLength         = 3
+	issueTopicMaxLength         = 30
 	base36Alphabet              = "0123456789abcdefghijklmnopqrstuvwxyz"
+	// [LAW:verifiable-goals] Remove the startup topic backfill once all pre-topic repositories
+	// have crossed the sunset window on April 19, 2026.
+	legacyTopicMigrationRemoveBy = "2026-04-19"
 )
 
-func newIssueID(ctx context.Context, tx *sql.Tx, title string, description string, createdBy string, createdAt time.Time) (string, error) {
-	baseLength, err := getAdaptiveIssueIDLength(ctx, tx, issueIDPrefix)
+func (s *Store) EnsureIssuePrefix(ctx context.Context, prefix string) error {
+	normalized := normalizeConfiguredIssuePrefix(prefix)
+	if normalized == "" {
+		normalized = defaultIssueIDPrefix
+	}
+	changed, err := s.ensureMetaValue(ctx, "issue_prefix", normalized)
+	if err != nil {
+		return err
+	}
+	if !changed {
+		return nil
+	}
+	return s.commitWorkingSet(ctx, "set issue prefix")
+}
+
+func (s *Store) issuePrefixForTx(ctx context.Context, tx *sql.Tx) (string, error) {
+	var prefix string
+	if err := tx.QueryRowContext(ctx, `SELECT meta_value FROM meta WHERE meta_key = 'issue_prefix'`).Scan(&prefix); err != nil {
+		if err == sql.ErrNoRows {
+			return defaultIssueIDPrefix, nil
+		}
+		return "", fmt.Errorf("get issue prefix: %w", err)
+	}
+	normalized := normalizeConfiguredIssuePrefix(prefix)
+	if normalized == "" {
+		return defaultIssueIDPrefix, nil
+	}
+	return normalized, nil
+}
+
+func newIssueID(ctx context.Context, tx *sql.Tx, prefix string, topic string, title string, description string, createdBy string, createdAt time.Time, parentID string) (string, error) {
+	if strings.TrimSpace(parentID) != "" {
+		return newChildIssueID(ctx, tx, parentID)
+	}
+	return newTopLevelIssueID(ctx, tx, prefix, topic, title, description, createdBy, createdAt)
+}
+
+func newTopLevelIssueID(ctx context.Context, tx *sql.Tx, prefix string, topic string, title string, description string, createdBy string, createdAt time.Time) (string, error) {
+	baseLength, err := getAdaptiveIssueIDLength(ctx, tx, prefix)
 	if err != nil {
 		baseLength = 6
 	}
@@ -30,7 +74,7 @@ func newIssueID(ctx context.Context, tx *sql.Tx, title string, description strin
 	}
 	for length := baseLength; length <= issueIDMaxHashLength; length++ {
 		for nonce := 0; nonce < issueIDNonceAttempts; nonce++ {
-			candidate := generateHashIssueID(issueIDPrefix, title, description, createdBy, createdAt, length, nonce)
+			candidate := generateHashIssueID(prefix, topic, title, description, createdBy, createdAt, length, nonce)
 			var count int
 			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id = ?`, candidate).Scan(&count); err != nil {
 				return "", fmt.Errorf("check issue id collision: %w", err)
@@ -43,6 +87,37 @@ func newIssueID(ctx context.Context, tx *sql.Tx, title string, description strin
 	return "", fmt.Errorf("generate unique issue id: exhausted lengths %d-%d", baseLength, issueIDMaxHashLength)
 }
 
+func newChildIssueID(ctx context.Context, tx *sql.Tx, parentID string) (string, error) {
+	rows, err := tx.QueryContext(ctx, `SELECT id FROM issues WHERE id LIKE ?`, parentID+".%")
+	if err != nil {
+		return "", fmt.Errorf("query child ids: %w", err)
+	}
+	defer rows.Close()
+
+	maxChildNumber := 0
+	for rows.Next() {
+		var candidate string
+		if err := rows.Scan(&candidate); err != nil {
+			return "", fmt.Errorf("scan child id: %w", err)
+		}
+		suffix := strings.TrimPrefix(candidate, parentID+".")
+		if suffix == "" || strings.Contains(suffix, ".") {
+			continue
+		}
+		childNumber, err := strconv.Atoi(suffix)
+		if err != nil {
+			continue
+		}
+		if childNumber > maxChildNumber {
+			maxChildNumber = childNumber
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return "", fmt.Errorf("iterate child ids: %w", err)
+	}
+	return fmt.Sprintf("%s.%d", parentID, maxChildNumber+1), nil
+}
+
 func getAdaptiveIssueIDLength(ctx context.Context, tx *sql.Tx, prefix string) (int, error) {
 	numIssues, err := countTopLevelIssues(ctx, tx, prefix)
 	if err != nil {
@@ -53,7 +128,7 @@ func getAdaptiveIssueIDLength(ctx context.Context, tx *sql.Tx, prefix string) (i
 
 func countTopLevelIssues(ctx context.Context, tx *sql.Tx, prefix string) (int, error) {
 	var count int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id LIKE ?`, prefix+"-%").Scan(&count); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id LIKE ? AND id NOT LIKE ?`, prefix+"-%", "%.%").Scan(&count); err != nil {
 		return 0, err
 	}
 	return count, nil
@@ -74,11 +149,11 @@ func collisionProbability(numIssues int, idLength int) float64 {
 	return 1.0 - math.Exp(exponent)
 }
 
-func generateHashIssueID(prefix string, title string, description string, creator string, createdAt time.Time, length int, nonce int) string {
-	content := fmt.Sprintf("%s|%s|%s|%d|%d", title, description, creator, createdAt.UnixNano(), nonce)
+func generateHashIssueID(prefix string, topic string, title string, description string, creator string, createdAt time.Time, length int, nonce int) string {
+	content := fmt.Sprintf("%s|%s|%s|%s|%d|%d", topic, title, description, creator, createdAt.UnixNano(), nonce)
 	hash := sha256.Sum256([]byte(content))
 	shortHash := encodeBase36(hash[:hashBytesForLength(length)], length)
-	return fmt.Sprintf("%s-%s", prefix, shortHash)
+	return fmt.Sprintf("%s-%s-%s", prefix, topic, shortHash)
 }
 
 func hashBytesForLength(length int) int {
@@ -118,4 +193,50 @@ func encodeBase36(data []byte, length int) string {
 		value = value[len(value)-length:]
 	}
 	return value
+}
+
+func normalizeConfiguredIssuePrefix(input string) string {
+	normalized := normalizeIssueSlug(input)
+	if normalized == "" {
+		return ""
+	}
+	return normalized
+}
+
+func normalizeIssueTopicForCreate(input string) (string, error) {
+	normalized := normalizeIssueSlug(input)
+	if normalized == "" {
+		normalized = defaultIssueTopic
+	}
+	if len(normalized) < issueTopicMinLength {
+		return "", fmt.Errorf("topic must be at least %d characters after normalization", issueTopicMinLength)
+	}
+	if len(normalized) > issueTopicMaxLength {
+		return "", fmt.Errorf("topic must be at most %d characters after normalization", issueTopicMaxLength)
+	}
+	return normalized, nil
+}
+
+func normalizeIssueTopicForMigration(input string) string {
+	normalized := normalizeIssueSlug(input)
+	if len(normalized) < issueTopicMinLength || len(normalized) > issueTopicMaxLength {
+		return defaultIssueTopic
+	}
+	return normalized
+}
+
+func normalizeIssueSlug(input string) string {
+	var builder strings.Builder
+	previousDash := false
+	for _, r := range strings.ToLower(strings.TrimSpace(input)) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			builder.WriteRune(r)
+			previousDash = false
+		case !previousDash:
+			builder.WriteByte('-')
+			previousDash = true
+		}
+	}
+	return strings.Trim(builder.String(), "-")
 }

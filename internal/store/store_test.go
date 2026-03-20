@@ -97,6 +97,7 @@ func TestStoreCreateIssueUsesBeadsCompatibleIDFormat(t *testing.T) {
 	issue, err := st.CreateIssue(ctx, CreateIssueInput{
 		Title:       "Renderer cleanup",
 		Description: "Normalize issue IDs with beads.",
+		Topic:       "renderer",
 		IssueType:   "task",
 		Priority:    1,
 	})
@@ -104,17 +105,20 @@ func TestStoreCreateIssueUsesBeadsCompatibleIDFormat(t *testing.T) {
 		t.Fatalf("CreateIssue() error = %v", err)
 	}
 
-	re := regexp.MustCompile(`^lit-[0-9a-z]{3,8}$`)
+	re := regexp.MustCompile(`^lit-renderer-[0-9a-z]{3,8}$`)
 	if !re.MatchString(issue.ID) {
-		t.Fatalf("issue.ID = %q, want lit-<3-8 base36 chars>", issue.ID)
+		t.Fatalf("issue.ID = %q, want lit-renderer-<3-8 base36 chars>", issue.ID)
+	}
+	if issue.Topic != "renderer" {
+		t.Fatalf("issue.Topic = %q, want renderer", issue.Topic)
 	}
 }
 
 func TestGenerateHashIssueIDIsDeterministicForSameInputs(t *testing.T) {
 	createdAt := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)
 
-	first := generateHashIssueID(issueIDPrefix, "Fix parser", "Adopt beads ID shape", "links", createdAt, 6, 0)
-	second := generateHashIssueID(issueIDPrefix, "Fix parser", "Adopt beads ID shape", "links", createdAt, 6, 0)
+	first := generateHashIssueID(defaultIssueIDPrefix, "parser", "Fix parser", "Adopt beads ID shape", "links", createdAt, 6, 0)
+	second := generateHashIssueID(defaultIssueIDPrefix, "parser", "Fix parser", "Adopt beads ID shape", "links", createdAt, 6, 0)
 
 	if first != second {
 		t.Fatalf("generateHashIssueID() = %q then %q, want deterministic output", first, second)
@@ -136,24 +140,78 @@ func TestNewIssueIDCollisionsAdvanceNonce(t *testing.T) {
 	}
 	defer tx.Rollback()
 
-	firstID, err := newIssueID(ctx, tx, "Duplicate title", "Duplicate description", "links", createdAt)
+	firstID, err := newIssueID(ctx, tx, defaultIssueIDPrefix, "parser", "Duplicate title", "Duplicate description", "links", createdAt, "")
 	if err != nil {
 		t.Fatalf("newIssueID(first) error = %v", err)
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO issues(
-		id, title, description, status, priority, issue_type, assignee, created_at, updated_at, closed_at, archived_at, deleted_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
-		firstID, "Duplicate title", "Duplicate description", "open", 1, "task", "", createdAt.Format(time.RFC3339Nano), createdAt.Format(time.RFC3339Nano))
+		id, title, description, status, priority, issue_type, topic, assignee, created_at, updated_at, closed_at, archived_at, deleted_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+		firstID, "Duplicate title", "Duplicate description", "open", 1, "task", "parser", "", createdAt.Format(time.RFC3339Nano), createdAt.Format(time.RFC3339Nano))
 	if err != nil {
 		t.Fatalf("insert first issue error = %v", err)
 	}
 
-	secondID, err := newIssueID(ctx, tx, "Duplicate title", "Duplicate description", "links", createdAt)
+	secondID, err := newIssueID(ctx, tx, defaultIssueIDPrefix, "parser", "Duplicate title", "Duplicate description", "links", createdAt, "")
 	if err != nil {
 		t.Fatalf("newIssueID(second) error = %v", err)
 	}
 	if secondID == firstID {
 		t.Fatalf("secondID = %q, want collision fallback to choose a different ID than %q", secondID, firstID)
+	}
+}
+
+func TestCreateIssueChildIDsIncrementFromParent(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer st.Close()
+
+	parent, err := st.CreateIssue(ctx, CreateIssueInput{
+		Title:     "Renderer cleanup",
+		Topic:     "renderer",
+		IssueType: "epic",
+		Priority:  1,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue(parent) error = %v", err)
+	}
+
+	childOne, err := st.CreateIssue(ctx, CreateIssueInput{
+		Title:     "Fix first race",
+		Topic:     "renderer",
+		ParentID:  parent.ID,
+		IssueType: "task",
+		Priority:  2,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue(childOne) error = %v", err)
+	}
+	childTwo, err := st.CreateIssue(ctx, CreateIssueInput{
+		Title:     "Fix second race",
+		Topic:     "renderer",
+		ParentID:  parent.ID,
+		IssueType: "task",
+		Priority:  2,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue(childTwo) error = %v", err)
+	}
+
+	if childOne.ID != parent.ID+".1" {
+		t.Fatalf("childOne.ID = %q, want %q", childOne.ID, parent.ID+".1")
+	}
+	if childTwo.ID != parent.ID+".2" {
+		t.Fatalf("childTwo.ID = %q, want %q", childTwo.ID, parent.ID+".2")
+	}
+	detail, err := st.GetIssueDetail(ctx, childTwo.ID)
+	if err != nil {
+		t.Fatalf("GetIssueDetail(childTwo) error = %v", err)
+	}
+	if detail.Parent == nil || detail.Parent.ID != parent.ID {
+		t.Fatalf("detail.Parent = %#v, want %q", detail.Parent, parent.ID)
 	}
 }
 

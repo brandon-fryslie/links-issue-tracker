@@ -28,12 +28,18 @@ func newTestCLIApp(t *testing.T) *app.App {
 	if err != nil {
 		t.Fatalf("store.Open() error = %v", err)
 	}
+	if err := st.EnsureIssuePrefix(ctx, "test"); err != nil {
+		t.Fatalf("EnsureIssuePrefix() error = %v", err)
+	}
 	t.Cleanup(func() {
 		_ = st.Close()
 	})
 	return &app.App{
 		Workspace: workspace.Info{
-			RootDir: workspaceRoot,
+			RootDir:      workspaceRoot,
+			DatabasePath: filepath.Join(workspaceRoot, "dolt"),
+			WorkspaceID:  "test-workspace-id",
+			IssuePrefix:  "test",
 		},
 		Store: st,
 	}

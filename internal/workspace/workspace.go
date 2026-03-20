@@ -18,6 +18,7 @@ var ErrNotGitRepo = errors.New("links requires a git repository/worktree")
 
 type Config struct {
 	WorkspaceID string    `json:"workspace_id"`
+	IssuePrefix string    `json:"issue_prefix"`
 	CreatedAt   time.Time `json:"created_at"`
 	Version     int       `json:"schema_version"`
 }
@@ -30,6 +31,7 @@ type Info struct {
 	DatabasePath string
 	DoltRepoPath string
 	WorkspaceID  string
+	IssuePrefix  string
 }
 
 type GitRemote struct {
@@ -74,7 +76,7 @@ func Resolve(cwd string) (Info, error) {
 	if err := os.MkdirAll(storageDir, 0o755); err != nil {
 		return Info{}, fmt.Errorf("create storage dir: %w", err)
 	}
-	cfg, err := loadOrCreateConfig(configPath)
+	cfg, err := loadOrCreateConfig(rootDir, configPath)
 	if err != nil {
 		return Info{}, err
 	}
@@ -86,6 +88,7 @@ func Resolve(cwd string) (Info, error) {
 		DatabasePath: databasePath,
 		DoltRepoPath: doltRepoPath,
 		WorkspaceID:  cfg.WorkspaceID,
+		IssuePrefix:  cfg.IssuePrefix,
 	}, nil
 }
 
@@ -180,7 +183,19 @@ func GitRemotes(cwd string) ([]GitRemote, error) {
 	return remotes, nil
 }
 
-func loadOrCreateConfig(path string) (Config, error) {
+func loadOrCreateConfig(rootDir string, path string) (Config, error) {
+	writeConfig := func(cfg Config) (Config, error) {
+		payload, err := json.MarshalIndent(cfg, "", "  ")
+		if err != nil {
+			return Config{}, fmt.Errorf("marshal workspace config: %w", err)
+		}
+		payload = append(payload, '\n')
+		if err := os.WriteFile(path, payload, 0o644); err != nil {
+			return Config{}, fmt.Errorf("write workspace config: %w", err)
+		}
+		return cfg, nil
+	}
+
 	payload, err := os.ReadFile(path)
 	if err == nil {
 		var cfg Config
@@ -190,6 +205,15 @@ func loadOrCreateConfig(path string) (Config, error) {
 		if cfg.WorkspaceID == "" {
 			return Config{}, errors.New("workspace config missing workspace_id")
 		}
+		normalizedPrefix := normalizeIssuePrefix(cfg.IssuePrefix)
+		if normalizedPrefix == "" {
+			cfg.IssuePrefix = deriveIssuePrefix(rootDir)
+			return writeConfig(cfg)
+		}
+		if normalizedPrefix != cfg.IssuePrefix {
+			cfg.IssuePrefix = normalizedPrefix
+			return writeConfig(cfg)
+		}
 		return cfg, nil
 	}
 	if !errors.Is(err, os.ErrNotExist) {
@@ -197,16 +221,45 @@ func loadOrCreateConfig(path string) (Config, error) {
 	}
 	cfg := Config{
 		WorkspaceID: uuid.NewString(),
+		IssuePrefix: deriveIssuePrefix(rootDir),
 		CreatedAt:   time.Now().UTC(),
 		Version:     1,
 	}
-	payload, err = json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return Config{}, fmt.Errorf("marshal workspace config: %w", err)
+	return writeConfig(cfg)
+}
+
+func deriveIssuePrefix(rootDir string) string {
+	base := normalizeIssuePrefix(filepath.Base(rootDir))
+	if base == "" {
+		return "lit"
 	}
-	payload = append(payload, '\n')
-	if err := os.WriteFile(path, payload, 0o644); err != nil {
-		return Config{}, fmt.Errorf("write workspace config: %w", err)
+	parts := strings.Split(base, "-")
+	for _, part := range parts {
+		if len(part) >= 3 {
+			if len(part) > 12 {
+				return part[:12]
+			}
+			return part
+		}
 	}
-	return cfg, nil
+	if len(base) > 12 {
+		return base[:12]
+	}
+	return base
+}
+
+func normalizeIssuePrefix(input string) string {
+	var builder strings.Builder
+	previousDash := false
+	for _, r := range strings.ToLower(strings.TrimSpace(input)) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			builder.WriteRune(r)
+			previousDash = false
+		case !previousDash:
+			builder.WriteByte('-')
+			previousDash = true
+		}
+	}
+	return strings.Trim(builder.String(), "-")
 }

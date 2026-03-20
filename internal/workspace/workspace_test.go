@@ -18,6 +18,9 @@ func TestResolveCreatesSharedConfigInGitCommonDir(t *testing.T) {
 	if info.WorkspaceID == "" {
 		t.Fatal("expected workspace ID")
 	}
+	if info.IssuePrefix == "" {
+		t.Fatal("expected issue prefix")
+	}
 	if _, err := os.Stat(info.ConfigPath); err != nil {
 		t.Fatalf("config file missing: %v", err)
 	}
@@ -42,6 +45,9 @@ func TestResolveCreatesSharedConfigInGitCommonDir(t *testing.T) {
 	}
 	if info2.WorkspaceID != info.WorkspaceID {
 		t.Fatalf("workspace ID changed: %q != %q", info2.WorkspaceID, info.WorkspaceID)
+	}
+	if info2.IssuePrefix != info.IssuePrefix {
+		t.Fatalf("issue prefix changed: %q != %q", info2.IssuePrefix, info.IssuePrefix)
 	}
 }
 
