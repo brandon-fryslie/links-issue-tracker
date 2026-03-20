@@ -138,7 +138,7 @@ func commandErrorReason(err error) string {
 func commandErrorRemediation(reason string) string {
 	switch reason {
 	case "beads_migration_required":
-		return "Run `lit migrate beads --apply --json` before retrying the command."
+		return "Run `lit migrate --apply --json` before retrying the command."
 	case "unknown_command":
 		return "Run `lit --help` (or `lit help <command>`) to select a supported command path."
 	case "usage_error":
