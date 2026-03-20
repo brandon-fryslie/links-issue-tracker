@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bmf/links-issue-tracker/internal/issueid"
 	"github.com/google/uuid"
 )
 
@@ -205,10 +206,17 @@ func loadOrCreateConfig(rootDir string, path string) (Config, error) {
 		if cfg.WorkspaceID == "" {
 			return Config{}, errors.New("workspace config missing workspace_id")
 		}
-		normalizedPrefix := normalizeIssuePrefix(cfg.IssuePrefix)
-		if normalizedPrefix == "" {
-			cfg.IssuePrefix = deriveIssuePrefix(rootDir)
+		if strings.TrimSpace(cfg.IssuePrefix) == "" {
+			derivedPrefix, err := deriveIssuePrefix(rootDir)
+			if err != nil {
+				return Config{}, err
+			}
+			cfg.IssuePrefix = derivedPrefix
 			return writeConfig(cfg)
+		}
+		normalizedPrefix, err := issueid.NormalizeConfiguredPrefix(cfg.IssuePrefix)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid issue_prefix: %w", err)
 		}
 		if normalizedPrefix != cfg.IssuePrefix {
 			cfg.IssuePrefix = normalizedPrefix
@@ -221,45 +229,31 @@ func loadOrCreateConfig(rootDir string, path string) (Config, error) {
 	}
 	cfg := Config{
 		WorkspaceID: uuid.NewString(),
-		IssuePrefix: deriveIssuePrefix(rootDir),
 		CreatedAt:   time.Now().UTC(),
 		Version:     1,
+	}
+	cfg.IssuePrefix, err = deriveIssuePrefix(rootDir)
+	if err != nil {
+		return Config{}, err
 	}
 	return writeConfig(cfg)
 }
 
-func deriveIssuePrefix(rootDir string) string {
-	base := normalizeIssuePrefix(filepath.Base(rootDir))
+func deriveIssuePrefix(rootDir string) (string, error) {
+	base := issueid.NormalizeSlug(filepath.Base(rootDir))
 	if base == "" {
-		return "lit"
+		return "", fmt.Errorf("derive issue_prefix: repository name %q does not contain at least %d normalized characters", filepath.Base(rootDir), issueid.PrefixMinLength)
 	}
 	parts := strings.Split(base, "-")
 	for _, part := range parts {
-		if len(part) >= 3 {
-			if len(part) > 12 {
-				return part[:12]
-			}
-			return part
+		candidate, err := issueid.NormalizeConfiguredPrefix(part)
+		if err == nil && candidate != "" {
+			return candidate, nil
 		}
 	}
-	if len(base) > 12 {
-		return base[:12]
+	candidate, err := issueid.NormalizeConfiguredPrefix(base)
+	if err != nil || candidate == "" {
+		return "", fmt.Errorf("derive issue_prefix: repository name %q does not produce a valid prefix", filepath.Base(rootDir))
 	}
-	return base
-}
-
-func normalizeIssuePrefix(input string) string {
-	var builder strings.Builder
-	previousDash := false
-	for _, r := range strings.ToLower(strings.TrimSpace(input)) {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			builder.WriteRune(r)
-			previousDash = false
-		case !previousDash:
-			builder.WriteByte('-')
-			previousDash = true
-		}
-	}
-	return strings.Trim(builder.String(), "-")
+	return candidate, nil
 }

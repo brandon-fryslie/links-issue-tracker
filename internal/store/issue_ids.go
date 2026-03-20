@@ -4,23 +4,22 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/bmf/links-issue-tracker/internal/issueid"
 )
 
 const (
-	defaultIssueIDPrefix        = "lit"
-	defaultIssueTopic           = "misc"
 	issueIDCollisionProbability = 0.25
 	issueIDMinHashLength        = 3
 	issueIDMaxHashLength        = 8
 	issueIDNonceAttempts        = 10
-	issueTopicMinLength         = 3
-	issueTopicMaxLength         = 30
 	base36Alphabet              = "0123456789abcdefghijklmnopqrstuvwxyz"
 	// [LAW:verifiable-goals] Remove the startup topic backfill once all pre-topic repositories
 	// have crossed the sunset window on April 19, 2026.
@@ -28,9 +27,9 @@ const (
 )
 
 func (s *Store) EnsureIssuePrefix(ctx context.Context, prefix string) error {
-	normalized := normalizeConfiguredIssuePrefix(prefix)
-	if normalized == "" {
-		normalized = defaultIssueIDPrefix
+	normalized, err := issueid.NormalizeConfiguredPrefix(prefix)
+	if err != nil {
+		return fmt.Errorf("normalize issue prefix: %w", err)
 	}
 	changed, err := s.ensureMetaValue(ctx, "issue_prefix", normalized)
 	if err != nil {
@@ -46,13 +45,13 @@ func (s *Store) issuePrefixForTx(ctx context.Context, tx *sql.Tx) (string, error
 	var prefix string
 	if err := tx.QueryRowContext(ctx, `SELECT meta_value FROM meta WHERE meta_key = 'issue_prefix'`).Scan(&prefix); err != nil {
 		if err == sql.ErrNoRows {
-			return defaultIssueIDPrefix, nil
+			return "", errors.New("issue prefix is not configured")
 		}
 		return "", fmt.Errorf("get issue prefix: %w", err)
 	}
-	normalized := normalizeConfiguredIssuePrefix(prefix)
-	if normalized == "" {
-		return defaultIssueIDPrefix, nil
+	normalized, err := issueid.NormalizeConfiguredPrefix(prefix)
+	if err != nil {
+		return "", fmt.Errorf("normalize stored issue prefix: %w", err)
 	}
 	return normalized, nil
 }
@@ -195,48 +194,10 @@ func encodeBase36(data []byte, length int) string {
 	return value
 }
 
-func normalizeConfiguredIssuePrefix(input string) string {
-	normalized := normalizeIssueSlug(input)
-	if normalized == "" {
-		return ""
-	}
-	return normalized
-}
-
 func normalizeIssueTopicForCreate(input string) (string, error) {
-	normalized := normalizeIssueSlug(input)
-	if normalized == "" {
-		normalized = defaultIssueTopic
-	}
-	if len(normalized) < issueTopicMinLength {
-		return "", fmt.Errorf("topic must be at least %d characters after normalization", issueTopicMinLength)
-	}
-	if len(normalized) > issueTopicMaxLength {
-		return "", fmt.Errorf("topic must be at most %d characters after normalization", issueTopicMaxLength)
-	}
-	return normalized, nil
-}
-
-func normalizeIssueTopicForMigration(input string) string {
-	normalized := normalizeIssueSlug(input)
-	if len(normalized) < issueTopicMinLength || len(normalized) > issueTopicMaxLength {
-		return defaultIssueTopic
-	}
-	return normalized
+	return issueid.NormalizeTopicForCreate(input)
 }
 
 func normalizeIssueSlug(input string) string {
-	var builder strings.Builder
-	previousDash := false
-	for _, r := range strings.ToLower(strings.TrimSpace(input)) {
-		switch {
-		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
-			builder.WriteRune(r)
-			previousDash = false
-		case !previousDash:
-			builder.WriteByte('-')
-			previousDash = true
-		}
-	}
-	return strings.Trim(builder.String(), "-")
+	return issueid.NormalizeSlug(input)
 }

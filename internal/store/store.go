@@ -332,7 +332,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		}
 		changed = changed || stmtChanged
 	}
-	topicColumnChanged, err := execIgnoreAlreadyExists(ctx, s.db, `ALTER TABLE issues ADD COLUMN topic VARCHAR(191) NOT NULL DEFAULT '' AFTER issue_type`)
+	topicColumnChanged, err := execIgnoreAlreadyExists(ctx, s.db, `ALTER TABLE issues ADD COLUMN topic VARCHAR(191) NOT NULL DEFAULT 'misc' AFTER issue_type`)
 	if err != nil {
 		return err
 	}
@@ -427,37 +427,13 @@ func (s *Store) ensureUnifiedStatusSchema(ctx context.Context) (bool, error) {
 }
 
 func (s *Store) ensureIssueTopics(ctx context.Context) (bool, error) {
-	// [LAW:single-enforcer] Startup backfill reuses the same topic normalizer as creation instead of inventing a second slug contract.
-	rows, err := s.db.QueryContext(ctx, `SELECT id, topic FROM issues`)
-	if err != nil {
-		return false, fmt.Errorf("scan issue topics: %w", err)
-	}
-	defer rows.Close()
-
-	type topicUpdate struct {
-		id    string
-		topic string
-	}
-	updates := []topicUpdate{}
-	for rows.Next() {
-		var id, topic string
-		if err := rows.Scan(&id, &topic); err != nil {
-			return false, fmt.Errorf("scan issue topic row: %w", err)
-		}
-		normalized := normalizeIssueTopicForMigration(topic)
-		if normalized != topic {
-			updates = append(updates, topicUpdate{id: id, topic: normalized})
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return false, fmt.Errorf("iterate issue topic rows: %w", err)
-	}
-	for _, update := range updates {
-		if _, err := s.db.ExecContext(ctx, `UPDATE issues SET topic = ? WHERE id = ?`, update.topic, update.id); err != nil {
-			return false, fmt.Errorf("backfill issue topic %s: %w", update.id, err)
-		}
-	}
-	return len(updates) > 0, nil
+	// [LAW:single-enforcer] Legacy topic repair happens in one SQL reconciliation stage instead of a second Go defaulting path.
+	return s.execReconciliationUpdate(
+		ctx,
+		`SELECT 1 FROM issues WHERE TRIM(COALESCE(topic, '')) = '' LIMIT 1`,
+		`UPDATE issues SET topic = 'misc' WHERE TRIM(COALESCE(topic, '')) = ''`,
+		"backfill legacy issue topics",
+	)
 }
 
 func (s *Store) ensureStatusConstraint(ctx context.Context) (bool, error) {
@@ -1230,7 +1206,7 @@ func (s *Store) ImportIssue(ctx context.Context, in ImportIssue) error {
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `INSERT INTO issues(
 			id, title, description, status, priority, issue_type, topic, assignee, created_at, updated_at, closed_at, archived_at, deleted_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+		) VALUES (?, ?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), 'misc'), ?, ?, ?, ?, NULL, NULL)
 		ON DUPLICATE KEY UPDATE
 			title = VALUES(title),
 			description = VALUES(description),
@@ -1248,7 +1224,7 @@ func (s *Store) ImportIssue(ctx context.Context, in ImportIssue) error {
 		status,
 		in.Priority,
 		issueType,
-		normalizeIssueTopicForMigration(in.Topic),
+		normalizeIssueSlug(in.Topic),
 		strings.TrimSpace(in.Assignee),
 		in.CreatedAt.Format(time.RFC3339Nano),
 		in.UpdatedAt.Format(time.RFC3339Nano),
@@ -1923,8 +1899,8 @@ func (s *Store) ReplaceFromExport(ctx context.Context, export model.Export) erro
 			return fmt.Errorf("restore issue %s: %w", issue.ID, err)
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO issues(id, title, description, status, priority, issue_type, topic, assignee, created_at, updated_at, closed_at, archived_at, deleted_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			issue.ID, issue.Title, issue.Description, status, issue.Priority, issue.IssueType, normalizeIssueTopicForMigration(issue.Topic), issue.Assignee, issue.CreatedAt.Format(time.RFC3339Nano), issue.UpdatedAt.Format(time.RFC3339Nano), closedAt, nullableTime(issue.ArchivedAt), nullableTime(issue.DeletedAt)); err != nil {
+			VALUES (?, ?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), 'misc'), ?, ?, ?, ?, ?, ?)`,
+			issue.ID, issue.Title, issue.Description, status, issue.Priority, issue.IssueType, normalizeIssueSlug(issue.Topic), issue.Assignee, issue.CreatedAt.Format(time.RFC3339Nano), issue.UpdatedAt.Format(time.RFC3339Nano), closedAt, nullableTime(issue.ArchivedAt), nullableTime(issue.DeletedAt)); err != nil {
 			return fmt.Errorf("restore issue %s: %w", issue.ID, err)
 		}
 	}

@@ -156,12 +156,14 @@ func TestRunReadyAnnotatesBlockedIssues(t *testing.T) {
 
 	openA := h.createIssue(store.CreateIssueInput{
 		Title:     "Open issue A",
+		Topic:     "alpha",
 		IssueType: "task",
 		Priority:  2,
 		Assignee:  "alice",
 	})
 	openB := h.createIssue(store.CreateIssueInput{
 		Title:     "Open issue B",
+		Topic:     "bravo",
 		IssueType: "bug",
 		Priority:  1,
 		Assignee:  "bob",
@@ -170,6 +172,7 @@ func TestRunReadyAnnotatesBlockedIssues(t *testing.T) {
 
 	closed := h.createIssue(store.CreateIssueInput{
 		Title:     "Already done",
+		Topic:     "closed",
 		IssueType: "task",
 		Priority:  0,
 	})
@@ -206,12 +209,14 @@ func TestRunReadySupportsAssigneeAndLimit(t *testing.T) {
 
 	h.createIssue(store.CreateIssueInput{
 		Title:     "Alice old",
+		Topic:     "alice",
 		IssueType: "task",
 		Priority:  1,
 		Assignee:  "alice",
 	})
 	h.createIssue(store.CreateIssueInput{
 		Title:     "Bob task",
+		Topic:     "bob",
 		IssueType: "task",
 		Priority:  0,
 		Assignee:  "bob",
@@ -233,6 +238,7 @@ func TestRunReadyAcceptsOmitemptyRequiredFieldAndAnnotatesMissing(t *testing.T) 
 
 	issue := h.createIssue(store.CreateIssueInput{
 		Title:       "Needs assignee",
+		Topic:       "assignee",
 		IssueType:   "task",
 		Priority:    1,
 		Description: "still missing assignee",
@@ -280,12 +286,14 @@ func TestRunReadyTextOutputIncludesNotReadySectionAndReason(t *testing.T) {
 
 	h.createIssue(store.CreateIssueInput{
 		Title:       "Ready ticket",
+		Topic:       "ready",
 		IssueType:   "task",
 		Priority:    1,
 		Description: "ship it",
 	})
 	h.createIssue(store.CreateIssueInput{
 		Title:     "Missing description",
+		Topic:     "missing",
 		IssueType: "task",
 		Priority:  2,
 	})

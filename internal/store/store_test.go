@@ -15,22 +15,33 @@ import (
 	"github.com/bmf/links-issue-tracker/internal/model"
 )
 
-func TestStoreCreateEpicAndRelations(t *testing.T) {
-	ctx := context.Background()
+func openIssueStore(t *testing.T, ctx context.Context) *Store {
+	t.Helper()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
-	defer st.Close()
-	epic, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Renderer cleanup", IssueType: "epic", Priority: 1})
+	if err := st.EnsureIssuePrefix(ctx, "test"); err != nil {
+		t.Fatalf("EnsureIssuePrefix() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = st.Close()
+	})
+	return st
+}
+
+func TestStoreCreateEpicAndRelations(t *testing.T) {
+	ctx := context.Background()
+	st := openIssueStore(t, ctx)
+	epic, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Renderer cleanup", Topic: "renderer", IssueType: "epic", Priority: 1})
 	if err != nil {
 		t.Fatalf("CreateIssue epic error = %v", err)
 	}
-	child, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Move pass validation", IssueType: "task", Priority: 2})
+	child, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Move pass validation", Topic: "renderer", IssueType: "task", Priority: 2})
 	if err != nil {
 		t.Fatalf("CreateIssue child error = %v", err)
 	}
-	related, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Guard shared buffers", IssueType: "feature", Priority: 2})
+	related, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Guard shared buffers", Topic: "renderer", IssueType: "feature", Priority: 2})
 	if err != nil {
 		t.Fatalf("CreateIssue related error = %v", err)
 	}
@@ -76,23 +87,25 @@ func TestStoreCreateEpicAndRelations(t *testing.T) {
 
 func TestStoreRejectsInvalidIssueType(t *testing.T) {
 	ctx := context.Background()
-	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
-	}
-	defer st.Close()
-	if _, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Bad", IssueType: "weird", Priority: 2}); err == nil {
+	st := openIssueStore(t, ctx)
+	if _, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Bad", Topic: "bad", IssueType: "weird", Priority: 2}); err == nil {
 		t.Fatal("expected invalid issue type error")
+	}
+}
+
+func TestStoreCreateIssueRequiresTopic(t *testing.T) {
+	ctx := context.Background()
+	st := openIssueStore(t, ctx)
+	if _, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Bad", IssueType: "task", Priority: 2}); err == nil {
+		t.Fatal("expected missing topic error")
+	} else if !strings.Contains(err.Error(), "topic is required") {
+		t.Fatalf("CreateIssue() error = %v, want missing topic validation", err)
 	}
 }
 
 func TestStoreCreateIssueUsesBeadsCompatibleIDFormat(t *testing.T) {
 	ctx := context.Background()
-	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
-	}
-	defer st.Close()
+	st := openIssueStore(t, ctx)
 
 	issue, err := st.CreateIssue(ctx, CreateIssueInput{
 		Title:       "Renderer cleanup",
@@ -105,9 +118,9 @@ func TestStoreCreateIssueUsesBeadsCompatibleIDFormat(t *testing.T) {
 		t.Fatalf("CreateIssue() error = %v", err)
 	}
 
-	re := regexp.MustCompile(`^lit-renderer-[0-9a-z]{3,8}$`)
+	re := regexp.MustCompile(`^test-renderer-[0-9a-z]{3,8}$`)
 	if !re.MatchString(issue.ID) {
-		t.Fatalf("issue.ID = %q, want lit-renderer-<3-8 base36 chars>", issue.ID)
+		t.Fatalf("issue.ID = %q, want test-renderer-<3-8 base36 chars>", issue.ID)
 	}
 	if issue.Topic != "renderer" {
 		t.Fatalf("issue.Topic = %q, want renderer", issue.Topic)
@@ -117,21 +130,37 @@ func TestStoreCreateIssueUsesBeadsCompatibleIDFormat(t *testing.T) {
 func TestGenerateHashIssueIDIsDeterministicForSameInputs(t *testing.T) {
 	createdAt := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)
 
-	first := generateHashIssueID(defaultIssueIDPrefix, "parser", "Fix parser", "Adopt beads ID shape", "links", createdAt, 6, 0)
-	second := generateHashIssueID(defaultIssueIDPrefix, "parser", "Fix parser", "Adopt beads ID shape", "links", createdAt, 6, 0)
+	first := generateHashIssueID("test", "parser", "Fix parser", "Adopt beads ID shape", "links", createdAt, 6, 0)
+	second := generateHashIssueID("test", "parser", "Fix parser", "Adopt beads ID shape", "links", createdAt, 6, 0)
 
 	if first != second {
 		t.Fatalf("generateHashIssueID() = %q then %q, want deterministic output", first, second)
 	}
 }
 
-func TestNewIssueIDCollisionsAdvanceNonce(t *testing.T) {
+func TestEnsureIssuePrefixNormalizesAndClampsConfiguredValue(t *testing.T) {
 	ctx := context.Background()
 	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
 	defer st.Close()
+
+	if err := st.EnsureIssuePrefix(ctx, "Renderer Platform Team"); err != nil {
+		t.Fatalf("EnsureIssuePrefix() error = %v", err)
+	}
+	got, err := st.getMeta(ctx, nil, "issue_prefix")
+	if err != nil {
+		t.Fatalf("getMeta(issue_prefix) error = %v", err)
+	}
+	if got != "renderer-pla" {
+		t.Fatalf("issue_prefix = %q, want renderer-pla", got)
+	}
+}
+
+func TestNewIssueIDCollisionsAdvanceNonce(t *testing.T) {
+	ctx := context.Background()
+	st := openIssueStore(t, ctx)
 
 	createdAt := time.Date(2026, 3, 19, 12, 0, 0, 0, time.UTC)
 	tx, err := st.db.BeginTx(ctx, nil)
@@ -140,7 +169,7 @@ func TestNewIssueIDCollisionsAdvanceNonce(t *testing.T) {
 	}
 	defer tx.Rollback()
 
-	firstID, err := newIssueID(ctx, tx, defaultIssueIDPrefix, "parser", "Duplicate title", "Duplicate description", "links", createdAt, "")
+	firstID, err := newIssueID(ctx, tx, "test", "parser", "Duplicate title", "Duplicate description", "links", createdAt, "")
 	if err != nil {
 		t.Fatalf("newIssueID(first) error = %v", err)
 	}
@@ -152,7 +181,7 @@ func TestNewIssueIDCollisionsAdvanceNonce(t *testing.T) {
 		t.Fatalf("insert first issue error = %v", err)
 	}
 
-	secondID, err := newIssueID(ctx, tx, defaultIssueIDPrefix, "parser", "Duplicate title", "Duplicate description", "links", createdAt, "")
+	secondID, err := newIssueID(ctx, tx, "test", "parser", "Duplicate title", "Duplicate description", "links", createdAt, "")
 	if err != nil {
 		t.Fatalf("newIssueID(second) error = %v", err)
 	}
@@ -163,11 +192,7 @@ func TestNewIssueIDCollisionsAdvanceNonce(t *testing.T) {
 
 func TestCreateIssueChildIDsIncrementFromParent(t *testing.T) {
 	ctx := context.Background()
-	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
-	}
-	defer st.Close()
+	st := openIssueStore(t, ctx)
 
 	parent, err := st.CreateIssue(ctx, CreateIssueInput{
 		Title:     "Renderer cleanup",
@@ -217,15 +242,12 @@ func TestCreateIssueChildIDsIncrementFromParent(t *testing.T) {
 
 func TestStoreListIssuesSupportsAdvancedFilters(t *testing.T) {
 	ctx := context.Background()
-	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
-	}
-	defer st.Close()
+	st := openIssueStore(t, ctx)
 
 	issueA, err := st.CreateIssue(ctx, CreateIssueInput{
 		Title:       "Renderer contract cleanup",
 		Description: "Fix the renderer contract for draw prep.",
+		Topic:       "renderer",
 		IssueType:   "task",
 		Priority:    1,
 		Assignee:    "bmf",
@@ -237,6 +259,7 @@ func TestStoreListIssuesSupportsAdvancedFilters(t *testing.T) {
 	issueB, err := st.CreateIssue(ctx, CreateIssueInput{
 		Title:       "Fluid defaults",
 		Description: "Tune the fluid presets.",
+		Topic:       "fluid",
 		IssueType:   "feature",
 		Priority:    3,
 		Assignee:    "e-prawn",
@@ -274,14 +297,11 @@ func TestStoreListIssuesSupportsAdvancedFilters(t *testing.T) {
 
 func TestStoreLabelsAreWritableFirstClassData(t *testing.T) {
 	ctx := context.Background()
-	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
-	}
-	defer st.Close()
+	st := openIssueStore(t, ctx)
 
 	issue, err := st.CreateIssue(ctx, CreateIssueInput{
 		Title:     "Renderer cleanup",
+		Topic:     "renderer",
 		IssueType: "task",
 		Priority:  1,
 		Labels:    []string{"Renderer", "gpu"},
@@ -338,13 +358,9 @@ func intPtr(value int) *int { return &value }
 
 func TestReplaceFromExportAndSyncState(t *testing.T) {
 	ctx := context.Background()
-	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
-	}
-	defer st.Close()
+	st := openIssueStore(t, ctx)
 
-	issue, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Renderer cleanup", IssueType: "task", Priority: 1})
+	issue, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Renderer cleanup", Topic: "renderer", IssueType: "task", Priority: 1})
 	if err != nil {
 		t.Fatalf("CreateIssue() error = %v", err)
 	}
@@ -416,13 +432,9 @@ func TestReplaceFromExportAndSyncState(t *testing.T) {
 
 func TestIssueLifecycleTracksReasonHistory(t *testing.T) {
 	ctx := context.Background()
-	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
-	}
-	defer st.Close()
+	st := openIssueStore(t, ctx)
 
-	issue, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Renderer cleanup", IssueType: "task", Priority: 1})
+	issue, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Renderer cleanup", Topic: "renderer", IssueType: "task", Priority: 1})
 	if err != nil {
 		t.Fatalf("CreateIssue() error = %v", err)
 	}
@@ -484,13 +496,9 @@ func TestIssueLifecycleTracksReasonHistory(t *testing.T) {
 
 func TestIssueStatusClaimAndDoneAreDeterministic(t *testing.T) {
 	ctx := context.Background()
-	st, err := Open(ctx, filepath.Join(t.TempDir(), "dolt"), "test-workspace-id")
-	if err != nil {
-		t.Fatalf("Open() error = %v", err)
-	}
-	defer st.Close()
+	st := openIssueStore(t, ctx)
 
-	issue, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Claim me", IssueType: "task", Priority: 2})
+	issue, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Claim me", Topic: "claims", IssueType: "task", Priority: 2})
 	if err != nil {
 		t.Fatalf("CreateIssue() error = %v", err)
 	}
