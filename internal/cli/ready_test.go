@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bmf/links-issue-tracker/internal/annotation"
 	"github.com/bmf/links-issue-tracker/internal/app"
@@ -98,6 +99,14 @@ func (h readyTestHarness) closeIssue(issueID, reason string) {
 		CreatedBy: "tester",
 	}); err != nil {
 		h.t.Fatalf("TransitionIssue(close) error = %v", err)
+	}
+}
+
+func (h readyTestHarness) backdateUpdatedAt(issueID string, age time.Duration) {
+	h.t.Helper()
+	backdated := time.Now().UTC().Add(-age).Format(time.RFC3339Nano)
+	if err := h.ap.Store.ExecRaw(h.ctx, "UPDATE issues SET updated_at = ? WHERE id = ?", backdated, issueID); err != nil {
+		h.t.Fatalf("backdateUpdatedAt(%q) error = %v", issueID, err)
 	}
 }
 
@@ -329,6 +338,70 @@ func TestRunReadyTextOutputNoBlockedSectionWhenAllReady(t *testing.T) {
 	}
 }
 
+func TestRunReadyShowsInProgressSection(t *testing.T) {
+	h := newReadyTestHarness(t)
+
+	issue := h.createIssue(store.CreateIssueInput{
+		Title:     "Claimed work",
+		Topic:     "claimed",
+		IssueType: "task",
+		Priority:  1,
+	})
+	if _, err := h.ap.Store.TransitionIssue(h.ctx, store.TransitionIssueInput{
+		IssueID:   issue.ID,
+		Action:    "start",
+		Reason:    "claim",
+		CreatedBy: "agent",
+	}); err != nil {
+		t.Fatalf("TransitionIssue(start) error = %v", err)
+	}
+
+	text := h.runReadyText()
+	if !strings.Contains(text, "In Progress\n") {
+		t.Fatalf("ready output missing In Progress section: %q", text)
+	}
+	if !strings.Contains(text, issue.ID) {
+		t.Fatalf("ready output missing in-progress issue ID: %q", text)
+	}
+}
+
+func TestRunReadyAnnotatesOrphanedInProgressIssues(t *testing.T) {
+	h := newReadyTestHarness(t)
+
+	issue := h.createIssue(store.CreateIssueInput{
+		Title:     "Stale work",
+		Topic:     "stale",
+		IssueType: "task",
+		Priority:  1,
+	})
+	if _, err := h.ap.Store.TransitionIssue(h.ctx, store.TransitionIssueInput{
+		IssueID:   issue.ID,
+		Action:    "start",
+		Reason:    "claim",
+		CreatedBy: "agent",
+	}); err != nil {
+		t.Fatalf("TransitionIssue(start) error = %v", err)
+	}
+	h.backdateUpdatedAt(issue.ID, 25*time.Hour)
+
+	got := h.runReadyJSON()
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
+	}
+	orphan, ok := findAnnotation(got[0].Annotations, annotation.Orphaned)
+	if !ok {
+		t.Fatalf("expected orphaned annotation, got: %#v", got[0].Annotations)
+	}
+	if !strings.Contains(orphan.Message, "in_progress") {
+		t.Fatalf("orphaned message = %q, want mention of in_progress", orphan.Message)
+	}
+
+	text := h.runReadyText()
+	if !strings.Contains(text, "ORPHANED") {
+		t.Fatalf("text output missing ORPHANED marker: %q", text)
+	}
+}
+
 func TestRunReadyAnnotatesPriorityInversion(t *testing.T) {
 	h := newReadyTestHarness(t)
 
@@ -352,7 +425,6 @@ func TestRunReadyAnnotatesPriorityInversion(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("len(got) = %d, want 2", len(got))
 	}
-	// Find the high-priority dependent (it should have PriorityInversion).
 	var highEntry annotation.AnnotatedIssue
 	for _, entry := range got {
 		if entry.ID == highPri.ID {
@@ -470,7 +542,6 @@ func TestFixPriorityPullForwardPromotesBlockers(t *testing.T) {
 	if changes[0].NewPriority != 1 {
 		t.Fatalf("changes[0].NewPriority = %d, want 1", changes[0].NewPriority)
 	}
-	// Verify the blocker was actually updated in the store.
 	updated, err := h.ap.Store.GetIssue(h.ctx, lowPri.ID)
 	if err != nil {
 		t.Fatalf("GetIssue error = %v", err)
@@ -523,7 +594,6 @@ func TestFixPriorityPushBackDemotesDependent(t *testing.T) {
 func TestFixPriorityPullForwardWalksTransitiveChain(t *testing.T) {
 	h := newReadyTestHarness(t)
 
-	// C(P1) depends on B(P3) depends on A(P4) — both A and B should promote to P1.
 	a := h.createIssue(store.CreateIssueInput{
 		Title: "A", Topic: "aaa", IssueType: "task", Priority: 4,
 	})
@@ -548,7 +618,6 @@ func TestFixPriorityPullForwardWalksTransitiveChain(t *testing.T) {
 	if len(changes) != 2 {
 		t.Fatalf("len(changes) = %d, want 2; changes=%#v", len(changes), changes)
 	}
-	// Both should now be P1.
 	for _, c := range changes {
 		if c.NewPriority != 1 {
 			t.Fatalf("change %s: NewPriority = %d, want 1", c.ID, c.NewPriority)

@@ -129,9 +129,9 @@ type SortSpec struct {
 }
 
 type ListIssuesFilter struct {
-	Status          string
-	IssueType       string
-	Assignee        string
+	Statuses        []string
+	IssueTypes      []string
+	Assignees       []string
 	PriorityMin     *int
 	PriorityMax     *int
 	SearchTerms     []string
@@ -226,6 +226,12 @@ func validateOpenArgs(doltRootDir string, workspaceID string) error {
 		return errors.New("workspace id is required")
 	}
 	return nil
+}
+
+// ExecRaw executes a raw SQL statement. Intended for test fixtures only.
+func (s *Store) ExecRaw(ctx context.Context, query string, args ...any) error {
+	_, err := s.db.ExecContext(ctx, query, args...)
+	return err
 }
 
 func (s *Store) Close() error {
@@ -654,21 +660,34 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 	if !filter.IncludeDeleted {
 		where = append(where, "i.deleted_at IS NULL")
 	}
-	if filter.Status != "" {
-		status, err := normalizeStatus(filter.Status)
-		if err != nil {
-			return nil, err
+	if len(filter.Statuses) > 0 {
+		for _, s := range filter.Statuses {
+			if _, err := normalizeStatus(s); err != nil {
+				return nil, err
+			}
 		}
-		where = append(where, "i.status = ?")
-		args = append(args, status)
+		placeholders := make([]string, len(filter.Statuses))
+		for i, s := range filter.Statuses {
+			placeholders[i] = "?"
+			args = append(args, s)
+		}
+		where = append(where, "i.status IN ("+strings.Join(placeholders, ",")+")")
 	}
-	if filter.IssueType != "" {
-		where = append(where, "i.issue_type = ?")
-		args = append(args, filter.IssueType)
+	if len(filter.IssueTypes) > 0 {
+		placeholders := make([]string, len(filter.IssueTypes))
+		for i, t := range filter.IssueTypes {
+			placeholders[i] = "?"
+			args = append(args, t)
+		}
+		where = append(where, "i.issue_type IN ("+strings.Join(placeholders, ",")+")")
 	}
-	if filter.Assignee != "" {
-		where = append(where, "i.assignee = ?")
-		args = append(args, filter.Assignee)
+	if len(filter.Assignees) > 0 {
+		placeholders := make([]string, len(filter.Assignees))
+		for i, a := range filter.Assignees {
+			placeholders[i] = "?"
+			args = append(args, a)
+		}
+		where = append(where, "i.assignee IN ("+strings.Join(placeholders, ",")+")")
 	}
 	if filter.PriorityMin != nil {
 		where = append(where, "i.priority >= ?")
