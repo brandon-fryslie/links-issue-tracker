@@ -357,11 +357,14 @@ func TestRunReadyShowsInProgressSection(t *testing.T) {
 	}
 
 	text := h.runReadyText()
-	if !strings.Contains(text, "In Progress\n") {
+	if !strings.Contains(text, "\nIn Progress\n") {
 		t.Fatalf("ready output missing In Progress section: %q", text)
 	}
 	if !strings.Contains(text, issue.ID) {
 		t.Fatalf("ready output missing in-progress issue ID: %q", text)
+	}
+	if !strings.Contains(text, "Last Update:") {
+		t.Fatalf("ready output missing Last Update marker: %q", text)
 	}
 }
 
@@ -397,8 +400,11 @@ func TestRunReadyAnnotatesOrphanedInProgressIssues(t *testing.T) {
 	}
 
 	text := h.runReadyText()
-	if !strings.Contains(text, "ORPHANED") {
+	if !strings.Contains(text, "(ORPHANED)") {
 		t.Fatalf("text output missing ORPHANED marker: %q", text)
+	}
+	if !strings.Contains(text, "Last Update:") {
+		t.Fatalf("text output missing Last Update marker: %q", text)
 	}
 }
 

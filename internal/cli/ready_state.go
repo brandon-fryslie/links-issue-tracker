@@ -220,13 +220,13 @@ func printReadyOutput(w io.Writer, format string, columns []string, issues []ann
 		}
 	}
 
-	if err := printInProgressSection(w, format, resolved, inProgress); err != nil {
-		return err
-	}
 	if _, err := fmt.Fprintln(w, "Ready"); err != nil {
 		return err
 	}
 	if err := printAnnotatedRows(w, format, resolved, ready); err != nil {
+		return err
+	}
+	if err := printInProgressSection(w, format, resolved, inProgress); err != nil {
 		return err
 	}
 	if err := printBlockedSummary(w, blocked); err != nil {
