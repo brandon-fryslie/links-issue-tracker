@@ -313,7 +313,7 @@ func TestRunReadyTextOutputIncludesNotReadySectionAndReason(t *testing.T) {
 func TestRunReadyAnnotatesPriorityInversion(t *testing.T) {
 	h := newReadyTestHarness(t)
 
-	// highPri (P1) depends on lowPri (P5) — that's an inversion.
+	// highPri (P1) depends on lowPri (P4) — that's an inversion.
 	lowPri := h.createIssue(store.CreateIssueInput{
 		Title:     "Low priority blocker",
 		Topic:     "low",
@@ -356,7 +356,7 @@ func TestRunReadyAnnotatesPriorityInversion(t *testing.T) {
 func TestRunReadyNoPriorityInversionWhenBlockerIsHigherPriority(t *testing.T) {
 	h := newReadyTestHarness(t)
 
-	// lowPri (P5) depends on highPri (P1) — no inversion.
+	// lowPri (P4) depends on highPri (P1) — no inversion.
 	highPri := h.createIssue(store.CreateIssueInput{
 		Title:     "High priority blocker",
 		Topic:     "high",

@@ -31,6 +31,7 @@ func TestCompletionScriptsIncludeUpdateCommand(t *testing.T) {
 	}{
 		{shell: "bash", want: "show update fix-priority start"},
 		{shell: "zsh", want: "'update:update issue fields'"},
+		{shell: "zsh", want: "fix-priority"},
 		{shell: "fish", want: "show update fix-priority start"},
 	}
 	for _, tc := range cases {

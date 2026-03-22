@@ -317,6 +317,9 @@ func runFixPriority(ctx context.Context, stdout io.Writer, ap *app.App, args []s
 	if err := parseFlagSet(fs, flagArgs, stdout); err != nil {
 		return err
 	}
+	if fs.NArg() != 0 {
+		return fmt.Errorf("usage: lit fix-priority <issue-id> --pull-forward | --push-back")
+	}
 	if len(positional) != 1 {
 		return fmt.Errorf("usage: lit fix-priority <issue-id> --pull-forward | --push-back")
 	}
@@ -329,10 +332,11 @@ func runFixPriority(ctx context.Context, stdout io.Writer, ap *app.App, args []s
 		return err
 	}
 
+	writeJSON := shouldWriteJSON(stdout, *jsonOut)
 	if *pushBack {
-		return fixPriorityPushBack(ctx, stdout, ap, issue, *jsonOut)
+		return fixPriorityPushBack(ctx, stdout, ap, issue, writeJSON)
 	}
-	return fixPriorityPullForward(ctx, stdout, ap, issue, *jsonOut)
+	return fixPriorityPullForward(ctx, stdout, ap, issue, writeJSON)
 }
 
 type priorityChange struct {
@@ -358,11 +362,7 @@ func fixPriorityPushBack(ctx context.Context, stdout io.Writer, ap *app.App, iss
 		}
 	}
 	if worstPri == issue.Priority {
-		if jsonOut {
-			return writeJSON(stdout, []priorityChange{})
-		}
-		_, err := fmt.Fprintln(stdout, "No priority inversion found.")
-		return err
+		return printValue(stdout, []priorityChange{}, jsonOut, printPriorityChangesAny)
 	}
 	updated, err := ap.Store.UpdateIssue(ctx, issue.ID, store.UpdateIssueInput{Priority: &worstPri})
 	if err != nil {
@@ -374,10 +374,7 @@ func fixPriorityPushBack(ctx context.Context, stdout io.Writer, ap *app.App, iss
 		OldPriority: issue.Priority,
 		NewPriority: worstPri,
 	}}
-	if jsonOut {
-		return writeJSON(stdout, changes)
-	}
-	return printPriorityChanges(stdout, changes)
+	return printValue(stdout, changes, jsonOut, printPriorityChangesAny)
 }
 
 // fixPriorityPullForward promotes all blockers in the dependency chain
@@ -417,17 +414,15 @@ func fixPriorityPullForward(ctx context.Context, stdout io.Writer, ap *app.App, 
 			})
 		}
 	}
-	if jsonOut {
-		return writeJSON(stdout, changes)
-	}
-	if len(changes) == 0 {
-		_, err := fmt.Fprintln(stdout, "No priority inversion found.")
-		return err
-	}
-	return printPriorityChanges(stdout, changes)
+	return printValue(stdout, changes, jsonOut, printPriorityChangesAny)
 }
 
-func printPriorityChanges(w io.Writer, changes []priorityChange) error {
+func printPriorityChangesAny(w io.Writer, v any) error {
+	changes := v.([]priorityChange)
+	if len(changes) == 0 {
+		_, err := fmt.Fprintln(w, "No priority inversion found.")
+		return err
+	}
 	for _, c := range changes {
 		if _, err := fmt.Fprintf(w, "%s %q: P%d → P%d\n", c.ID, c.Title, c.OldPriority, c.NewPriority); err != nil {
 			return err
