@@ -1194,7 +1194,6 @@ func runChildren(ctx context.Context, stdout io.Writer, ap *app.App, args []stri
 
 func runExport(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
 	fs := newCobraFlagSet("export")
-	jsonOut := fs.Bool("json", true, "Output JSON")
 	if err := parseFlagSet(fs, args, stdout); err != nil {
 		return err
 	}
@@ -1202,9 +1201,8 @@ func runExport(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 	if err != nil {
 		return err
 	}
-	return printValue(stdout, export, *jsonOut, func(w io.Writer, _ any) error {
-		return writeJSON(w, export)
-	})
+	// Export is JSON-only — there is no text representation of a full database export.
+	return writeJSON(stdout, export)
 }
 
 func runWorkspace(stdout io.Writer, ws workspace.Info, args []string) error {
@@ -2394,9 +2392,9 @@ func outputModeFromWriter(w io.Writer) outputMode {
 }
 
 // printValue is the single enforcer for output format selection.
-// [LAW:single-enforcer] All command output goes through this function to guarantee
-// that JSON and text paths receive the same data. Direct writeJSON calls are forbidden
-// outside this function.
+// [LAW:single-enforcer] Commands with both JSON and text modes go through this function
+// to guarantee that both paths receive the same data. JSON-only commands (e.g., export)
+// may call writeJSON directly since there is no text path to diverge from.
 func printValue(w io.Writer, v any, jsonOut bool, textFn func(io.Writer, any) error) error {
 	if jsonOut || outputModeFromWriter(w) == outputModeJSON {
 		return writeJSON(w, v)

@@ -105,7 +105,7 @@ func (h readyTestHarness) closeIssue(issueID, reason string) {
 func (h readyTestHarness) backdateUpdatedAt(issueID string, age time.Duration) {
 	h.t.Helper()
 	backdated := time.Now().UTC().Add(-age).Format(time.RFC3339Nano)
-	if err := h.ap.Store.ExecRaw(h.ctx, "UPDATE issues SET updated_at = ? WHERE id = ?", backdated, issueID); err != nil {
+	if err := h.ap.Store.ExecRawForTest(h.ctx, "UPDATE issues SET updated_at = ? WHERE id = ?", backdated, issueID); err != nil {
 		h.t.Fatalf("backdateUpdatedAt(%q) error = %v", issueID, err)
 	}
 }

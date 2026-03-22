@@ -29,11 +29,15 @@ func Parse(input string) (ParseResult, error) {
 
 func Merge(base store.ListIssuesFilter, incoming store.ListIssuesFilter) (store.ListIssuesFilter, error) {
 	filter := base
-	normalizedStatuses, err := normalizeQueryStatuses(incoming.Statuses)
+	normalizedBase, err := normalizeQueryStatuses(filter.Statuses)
 	if err != nil {
 		return store.ListIssuesFilter{}, err
 	}
-	filter.Statuses = mergeSlice(filter.Statuses, normalizedStatuses)
+	normalizedIncoming, err := normalizeQueryStatuses(incoming.Statuses)
+	if err != nil {
+		return store.ListIssuesFilter{}, err
+	}
+	filter.Statuses = mergeSlice(normalizedBase, normalizedIncoming)
 	filter.IssueTypes = mergeSlice(filter.IssueTypes, incoming.IssueTypes)
 	filter.Assignees = mergeSlice(filter.Assignees, incoming.Assignees)
 	filter.SearchTerms = append(filter.SearchTerms, incoming.SearchTerms...)
@@ -70,7 +74,11 @@ func applyTerm(filter *store.ListIssuesFilter, term string) error {
 		filter.Statuses = append(filter.Statuses, status)
 		return nil
 	case strings.HasPrefix(term, "type:"):
-		filter.IssueTypes = append(filter.IssueTypes, strings.TrimPrefix(term, "type:"))
+		t := strings.TrimSpace(strings.TrimPrefix(term, "type:"))
+		if t == "" {
+			return nil
+		}
+		filter.IssueTypes = append(filter.IssueTypes, t)
 		return nil
 	case strings.HasPrefix(term, "assignee:"):
 		filter.Assignees = append(filter.Assignees, strings.TrimSpace(strings.TrimPrefix(term, "assignee:")))

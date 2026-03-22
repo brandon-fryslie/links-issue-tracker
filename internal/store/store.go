@@ -228,8 +228,10 @@ func validateOpenArgs(doltRootDir string, workspaceID string) error {
 	return nil
 }
 
-// ExecRaw executes a raw SQL statement. Intended for test fixtures only.
-func (s *Store) ExecRaw(ctx context.Context, query string, args ...any) error {
+// ExecRawForTest executes a raw SQL statement without acquiring the commit lock
+// or calling commitWorkingSet. It exists solely for test fixtures that need to
+// manipulate database state outside normal Store operations (e.g., backdating timestamps).
+func (s *Store) ExecRawForTest(ctx context.Context, query string, args ...any) error {
 	_, err := s.db.ExecContext(ctx, query, args...)
 	return err
 }
@@ -661,33 +663,44 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 		where = append(where, "i.deleted_at IS NULL")
 	}
 	if len(filter.Statuses) > 0 {
+		var placeholders []string
 		for _, s := range filter.Statuses {
-			if _, err := normalizeStatus(s); err != nil {
+			normalized, err := normalizeStatus(s)
+			if err != nil {
 				return nil, err
 			}
-		}
-		placeholders := make([]string, len(filter.Statuses))
-		for i, s := range filter.Statuses {
-			placeholders[i] = "?"
-			args = append(args, s)
+			placeholders = append(placeholders, "?")
+			args = append(args, normalized)
 		}
 		where = append(where, "i.status IN ("+strings.Join(placeholders, ",")+")")
 	}
 	if len(filter.IssueTypes) > 0 {
-		placeholders := make([]string, len(filter.IssueTypes))
-		for i, t := range filter.IssueTypes {
-			placeholders[i] = "?"
-			args = append(args, t)
+		var placeholders []string
+		for _, t := range filter.IssueTypes {
+			trimmed := strings.TrimSpace(t)
+			if trimmed == "" {
+				continue
+			}
+			placeholders = append(placeholders, "?")
+			args = append(args, trimmed)
 		}
-		where = append(where, "i.issue_type IN ("+strings.Join(placeholders, ",")+")")
+		if len(placeholders) > 0 {
+			where = append(where, "i.issue_type IN ("+strings.Join(placeholders, ",")+")")
+		}
 	}
 	if len(filter.Assignees) > 0 {
-		placeholders := make([]string, len(filter.Assignees))
-		for i, a := range filter.Assignees {
-			placeholders[i] = "?"
-			args = append(args, a)
+		var placeholders []string
+		for _, a := range filter.Assignees {
+			trimmed := strings.TrimSpace(a)
+			if trimmed == "" {
+				continue
+			}
+			placeholders = append(placeholders, "?")
+			args = append(args, trimmed)
 		}
-		where = append(where, "i.assignee IN ("+strings.Join(placeholders, ",")+")")
+		if len(placeholders) > 0 {
+			where = append(where, "i.assignee IN ("+strings.Join(placeholders, ",")+")")
+		}
 	}
 	if filter.PriorityMin != nil {
 		where = append(where, "i.priority >= ?")
