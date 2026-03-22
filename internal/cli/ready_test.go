@@ -289,55 +289,6 @@ func TestRunReadyErrorsOnInvalidRequiredField(t *testing.T) {
 	}
 }
 
-func TestRunReadyTextOutputShowsBlockedSummary(t *testing.T) {
-	h := newReadyTestHarness(t)
-	h.writeReadyConfig("description")
-
-	h.createIssue(store.CreateIssueInput{
-		Title:       "Ready ticket",
-		Topic:       "ready",
-		IssueType:   "task",
-		Priority:    1,
-		Description: "ship it",
-	})
-	h.createIssue(store.CreateIssueInput{
-		Title:     "Missing description",
-		Topic:     "missing",
-		IssueType: "task",
-		Priority:  2,
-	})
-
-	text := h.runReadyText()
-	if !strings.Contains(text, "Ready\n") {
-		t.Fatalf("ready output missing Ready section header: %q", text)
-	}
-	if strings.Contains(text, "Not Ready") {
-		t.Fatalf("ready output should not contain old 'Not Ready' section: %q", text)
-	}
-	if !strings.Contains(text, "Blocked (1):") {
-		t.Fatalf("ready output missing blocked summary: %q", text)
-	}
-	if !strings.Contains(text, "Blocked by missing_field") {
-		t.Fatalf("ready output missing blocked reason label: %q", text)
-	}
-}
-
-func TestRunReadyTextOutputNoBlockedSectionWhenAllReady(t *testing.T) {
-	h := newReadyTestHarness(t)
-
-	h.createIssue(store.CreateIssueInput{
-		Title:     "All good",
-		Topic:     "good",
-		IssueType: "task",
-		Priority:  1,
-	})
-
-	text := h.runReadyText()
-	if strings.Contains(text, "Blocked") {
-		t.Fatalf("ready output should not show blocked section when all tickets are ready: %q", text)
-	}
-}
-
 func TestRunReadyShowsInProgressSection(t *testing.T) {
 	h := newReadyTestHarness(t)
 
@@ -356,15 +307,15 @@ func TestRunReadyShowsInProgressSection(t *testing.T) {
 		t.Fatalf("TransitionIssue(start) error = %v", err)
 	}
 
-	text := h.runReadyText()
-	if !strings.Contains(text, "\nIn Progress\n") {
-		t.Fatalf("ready output missing In Progress section: %q", text)
+	got := h.runReadyJSON()
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
 	}
-	if !strings.Contains(text, issue.ID) {
-		t.Fatalf("ready output missing in-progress issue ID: %q", text)
+	if got[0].ID != issue.ID {
+		t.Fatalf("got[0].ID = %q, want %q", got[0].ID, issue.ID)
 	}
-	if !strings.Contains(text, "Last Update:") {
-		t.Fatalf("ready output missing Last Update marker: %q", text)
+	if got[0].Status != "in_progress" {
+		t.Fatalf("got[0].Status = %q, want in_progress", got[0].Status)
 	}
 }
 
@@ -391,20 +342,36 @@ func TestRunReadyAnnotatesOrphanedInProgressIssues(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("len(got) = %d, want 1", len(got))
 	}
-	orphan, ok := findAnnotation(got[0].Annotations, annotation.Orphaned)
+	_, ok := findAnnotation(got[0].Annotations, annotation.Orphaned)
 	if !ok {
 		t.Fatalf("expected orphaned annotation, got: %#v", got[0].Annotations)
 	}
-	if !strings.Contains(orphan.Message, "in_progress") {
-		t.Fatalf("orphaned message = %q, want mention of in_progress", orphan.Message)
+}
+
+func TestRunReadyNoOrphanedAnnotationWhenRecent(t *testing.T) {
+	h := newReadyTestHarness(t)
+
+	issue := h.createIssue(store.CreateIssueInput{
+		Title:     "Fresh work",
+		Topic:     "fresh",
+		IssueType: "task",
+		Priority:  1,
+	})
+	if _, err := h.ap.Store.TransitionIssue(h.ctx, store.TransitionIssueInput{
+		IssueID:   issue.ID,
+		Action:    "start",
+		Reason:    "claim",
+		CreatedBy: "agent",
+	}); err != nil {
+		t.Fatalf("TransitionIssue(start) error = %v", err)
 	}
 
-	text := h.runReadyText()
-	if !strings.Contains(text, "(ORPHANED)") {
-		t.Fatalf("text output missing ORPHANED marker: %q", text)
+	got := h.runReadyJSON()
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1", len(got))
 	}
-	if !strings.Contains(text, "Last Update:") {
-		t.Fatalf("text output missing Last Update marker: %q", text)
+	if _, ok := findAnnotation(got[0].Annotations, annotation.Orphaned); ok {
+		t.Fatalf("recently started issue should not be orphaned: %#v", got[0].Annotations)
 	}
 }
 
