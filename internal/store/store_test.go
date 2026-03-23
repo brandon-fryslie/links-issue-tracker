@@ -723,7 +723,7 @@ func TestOpenForReadAutoMigratesExistingSchema(t *testing.T) {
 
 	// Verify migration ran by checking the topic column exists.
 	var topicExists int
-	err = readStore.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'issues' AND column_name = 'topic'`).Scan(&topicExists)
+	err = readStore.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'issues' AND column_name = 'topic'`).Scan(&topicExists)
 	if err != nil {
 		t.Fatalf("check topic column error = %v", err)
 	}
