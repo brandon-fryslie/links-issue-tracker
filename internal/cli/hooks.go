@@ -78,7 +78,10 @@ func installHooks(ws workspace.Info) (hookInstallResult, error) {
 		return hookInstallResult{}, fmt.Errorf("create hooks dir: %w", err)
 	}
 
-	section := renderLinksPrePushHookSection(ws.RootDir)
+	section, err := renderLinksPrePushHookSection(ws.RootDir)
+	if err != nil {
+		return hookInstallResult{}, fmt.Errorf("load pre-push hook template: %w", err)
+	}
 	existing, err := os.ReadFile(hookPath)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return hookInstallResult{}, fmt.Errorf("read existing pre-push hook: %w", err)
@@ -157,11 +160,6 @@ func renderLinksPrePushHookFile(section string) string {
 	return "#!/usr/bin/env bash\n" + section
 }
 
-func renderLinksPrePushHookSection(workspaceRoot string) string {
-	content, err := templates.Load(templates.PrePushHookTemplateName, workspaceRoot)
-	if err != nil {
-		// [LAW:single-enforcer] Rendering owns template fallback so hook installation keeps one fallback boundary.
-		return templates.EmbeddedDefault(templates.PrePushHookTemplateName)
-	}
-	return content
+func renderLinksPrePushHookSection(workspaceRoot string) (string, error) {
+	return templates.Load(templates.PrePushHookTemplateName, workspaceRoot)
 }

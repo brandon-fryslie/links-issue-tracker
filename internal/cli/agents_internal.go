@@ -23,23 +23,25 @@ type agentsInstallResult struct {
 	Changed bool
 }
 
-func renderLinksAgentsFile(workspaceRoot string) string {
+func renderLinksAgentsFile(workspaceRoot string) (string, error) {
 	// [LAW:one-source-of-truth] Full-file refresh derives AGENTS.md from the canonical managed section renderer.
-	return "# AGENTS\n\n" + renderLinksAgentsSection(workspaceRoot)
+	section, err := renderLinksAgentsSection(workspaceRoot)
+	if err != nil {
+		return "", err
+	}
+	return "# AGENTS\n\n" + section, nil
 }
 
-func renderLinksAgentsSection(workspaceRoot string) string {
-	content, err := templates.Load(templates.AgentsSectionTemplateName, workspaceRoot)
-	if err != nil {
-		// [LAW:single-enforcer] Rendering owns template fallback so callers do not duplicate template error policy.
-		return templates.EmbeddedDefault(templates.AgentsSectionTemplateName)
-	}
-	return content
+func renderLinksAgentsSection(workspaceRoot string) (string, error) {
+	return templates.Load(templates.AgentsSectionTemplateName, workspaceRoot)
 }
 
 func ensureLinksAgentsSection(rootDir string) (agentsInstallResult, error) {
 	agentsPath := filepath.Join(rootDir, "AGENTS.md")
-	section := renderLinksAgentsSection(rootDir)
+	section, err := renderLinksAgentsSection(rootDir)
+	if err != nil {
+		return agentsInstallResult{}, fmt.Errorf("load AGENTS section template: %w", err)
+	}
 	content, err := os.ReadFile(agentsPath)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {
@@ -64,7 +66,10 @@ func ensureLinksAgentsSection(rootDir string) (agentsInstallResult, error) {
 
 func rewriteLinksAgentsFile(rootDir string) (agentsInstallResult, error) {
 	agentsPath := filepath.Join(rootDir, "AGENTS.md")
-	rendered := renderLinksAgentsFile(rootDir)
+	rendered, err := renderLinksAgentsFile(rootDir)
+	if err != nil {
+		return agentsInstallResult{}, fmt.Errorf("render AGENTS file: %w", err)
+	}
 	content, err := os.ReadFile(agentsPath)
 	if err != nil {
 		if !errors.Is(err, os.ErrNotExist) {

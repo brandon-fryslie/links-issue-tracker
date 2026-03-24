@@ -1,12 +1,14 @@
 package templates
 
 import (
+	"bytes"
 	"embed"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/bmf/links-issue-tracker/internal/config"
 )
@@ -26,17 +28,20 @@ var (
 	}
 )
 
-// Load resolves a managed template with project > global > embedded precedence.
+// Load resolves a managed template with project > global precedence.
 func Load(name string, workspaceRoot string) (string, error) {
+	if err := ensureGlobalTemplate(name); err != nil {
+		return "", err
+	}
+
 	projectPath := projectTemplatePath(workspaceRoot, name)
 	globalPath := globalTemplatePath(name)
 
-	// [LAW:dataflow-not-control-flow] Every source is always read in a fixed order; only values decide selection.
+	// [LAW:dataflow-not-control-flow] Sources are read in a fixed order on every call; only values decide precedence.
 	projectContent, projectErr := readOptionalFile(projectPath)
 	globalContent, globalErr := readOptionalFile(globalPath)
-	embeddedContent, embeddedErr := readEmbedded(name)
 
-	resolved := firstNonEmpty(projectContent, globalContent, embeddedContent)
+	resolved := firstNonEmpty(projectContent, globalContent)
 
 	if projectErr != nil {
 		return "", fmt.Errorf("load project template %s: %w", projectPath, projectErr)
@@ -44,22 +49,10 @@ func Load(name string, workspaceRoot string) (string, error) {
 	if globalErr != nil {
 		return "", fmt.Errorf("load global template %s: %w", globalPath, globalErr)
 	}
-	if embeddedErr != nil {
-		return "", fmt.Errorf("load embedded template %s: %w", name, embeddedErr)
-	}
 	if resolved == "" {
 		return "", fmt.Errorf("load template %s: no non-empty source", name)
 	}
 	return resolved, nil
-}
-
-// EmbeddedDefault returns the embedded template content for name.
-func EmbeddedDefault(name string) string {
-	content, err := readEmbedded(name)
-	if err != nil {
-		return ""
-	}
-	return content
 }
 
 // SeedGlobalDefaults writes embedded defaults into the global template directory.
@@ -84,26 +77,89 @@ func SeedGlobalDefaults() error {
 	return nil
 }
 
-func readOptionalFile(path string) (string, error) {
-	if strings.TrimSpace(path) == "" {
-		return "", nil
+func ensureGlobalTemplate(name string) error {
+	globalPath := globalTemplatePath(name)
+	globalContent, globalErr := readOptionalBytes(globalPath)
+	if globalErr == nil && isValidTemplateBytes(globalContent) {
+		return nil
 	}
-	content, err := os.ReadFile(path)
+
+	// [LAW:single-enforcer] Global template health checks (missing/invalid -> reset) are enforced once here.
+	if err := resetGlobalTemplate(name); err != nil {
+		return err
+	}
+	return nil
+}
+
+func resetGlobalTemplate(name string) error {
+	defaultContent, err := readEmbeddedBytes(name)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return "", nil
-		}
+		return fmt.Errorf("read embedded template %s: %w", name, err)
+	}
+
+	path := globalTemplatePath(name)
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("could not write template %s to global config directory: empty global template path", name)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return fmt.Errorf("could not write template %s to %s: %w", name, path, err)
+	}
+	if err := os.WriteFile(path, defaultContent, 0o644); err != nil {
+		return fmt.Errorf("could not write template %s to %s: %w", name, path, err)
+	}
+	return nil
+}
+
+func readOptionalFile(path string) (string, error) {
+	content, err := readOptionalBytes(path)
+	if err != nil {
 		return "", err
 	}
 	return string(content), nil
 }
 
+func readOptionalBytes(path string) ([]byte, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, nil
+	}
+	content, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return content, nil
+}
+
+func isValidTemplateBytes(content []byte) bool {
+	if len(content) == 0 {
+		return false
+	}
+	if !utf8.Valid(content) {
+		return false
+	}
+	if bytes.IndexByte(content, 0x00) >= 0 {
+		return false
+	}
+	return true
+}
+
 func readEmbedded(name string) (string, error) {
-	content, err := defaultsFS.ReadFile(filepath.Join("defaults", name))
+	content, err := readEmbeddedBytes(name)
 	if err != nil {
 		return "", err
 	}
 	return string(content), nil
+}
+
+func readEmbeddedBytes(name string) ([]byte, error) {
+	content, err := defaultsFS.ReadFile(filepath.Join("defaults", name))
+	if err != nil {
+		return nil, err
+	}
+	return content, nil
 }
 
 func writeFileIfMissing(path string, content []byte, mode os.FileMode) error {

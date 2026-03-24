@@ -5,10 +5,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
-func TestLoadEmbeddedFallback(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+func TestLoadResetsMissingGlobalTemplate(t *testing.T) {
+	xdgRoot := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdgRoot)
 
 	workspaceRoot := t.TempDir()
 	content, err := Load(AgentsSectionTemplateName, workspaceRoot)
@@ -16,7 +18,76 @@ func TestLoadEmbeddedFallback(t *testing.T) {
 		t.Fatalf("Load() error = %v", err)
 	}
 	if !strings.Contains(content, "BEGIN LINKS INTEGRATION") {
-		t.Fatalf("embedded fallback missing marker: %q", content)
+		t.Fatalf("loaded template missing marker: %q", content)
+	}
+
+	globalPath := filepath.Join(xdgRoot, "links-issue-tracker", "templates", AgentsSectionTemplateName)
+	globalContent, err := os.ReadFile(globalPath)
+	if err != nil {
+		t.Fatalf("ReadFile(global template) error = %v", err)
+	}
+	if len(globalContent) == 0 {
+		t.Fatal("global template should be reset to non-empty default")
+	}
+}
+
+func TestLoadResetsInvalidGlobalTemplateWhenEmpty(t *testing.T) {
+	xdgRoot := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdgRoot)
+
+	globalTemplates := filepath.Join(xdgRoot, "links-issue-tracker", "templates")
+	if err := os.MkdirAll(globalTemplates, 0o755); err != nil {
+		t.Fatalf("MkdirAll(global templates) error = %v", err)
+	}
+	globalPath := filepath.Join(globalTemplates, AgentsSectionTemplateName)
+	if err := os.WriteFile(globalPath, []byte{}, 0o644); err != nil {
+		t.Fatalf("WriteFile(empty global template) error = %v", err)
+	}
+
+	content, err := Load(AgentsSectionTemplateName, t.TempDir())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !strings.Contains(content, "BEGIN LINKS INTEGRATION") {
+		t.Fatalf("loaded template missing marker: %q", content)
+	}
+
+	rewritten, err := os.ReadFile(globalPath)
+	if err != nil {
+		t.Fatalf("ReadFile(rewritten global template) error = %v", err)
+	}
+	if len(rewritten) == 0 {
+		t.Fatal("global template remained empty after Load")
+	}
+}
+
+func TestLoadResetsInvalidGlobalTemplateWhenNotUTF8(t *testing.T) {
+	xdgRoot := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdgRoot)
+
+	globalTemplates := filepath.Join(xdgRoot, "links-issue-tracker", "templates")
+	if err := os.MkdirAll(globalTemplates, 0o755); err != nil {
+		t.Fatalf("MkdirAll(global templates) error = %v", err)
+	}
+	globalPath := filepath.Join(globalTemplates, PrePushHookTemplateName)
+	if err := os.WriteFile(globalPath, []byte{0xff, 0xfe, 0xfd}, 0o644); err != nil {
+		t.Fatalf("WriteFile(non-utf8 global template) error = %v", err)
+	}
+
+	content, err := Load(PrePushHookTemplateName, t.TempDir())
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if !strings.Contains(content, "BEGIN LINKS INTEGRATION") {
+		t.Fatalf("loaded template missing marker: %q", content)
+	}
+
+	rewritten, err := os.ReadFile(globalPath)
+	if err != nil {
+		t.Fatalf("ReadFile(rewritten global template) error = %v", err)
+	}
+	if !utf8.Valid(rewritten) {
+		t.Fatalf("rewritten global template is not valid utf8: %v", rewritten)
 	}
 }
 
@@ -73,7 +144,7 @@ func TestLoadProjectOverrideWins(t *testing.T) {
 	}
 }
 
-func TestLoadPropagatesFilesystemError(t *testing.T) {
+func TestLoadPropagatesProjectFilesystemError(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
 
 	workspaceRoot := t.TempDir()
@@ -85,6 +156,28 @@ func TestLoadPropagatesFilesystemError(t *testing.T) {
 	_, err := Load(AgentsSectionTemplateName, workspaceRoot)
 	if err == nil {
 		t.Fatal("Load() expected filesystem error, got nil")
+	}
+}
+
+func TestLoadFailsWhenGlobalResetCannotWriteTemplate(t *testing.T) {
+	xdgRoot := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdgRoot)
+
+	configRoot := filepath.Join(xdgRoot, "links-issue-tracker")
+	if err := os.MkdirAll(configRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(config root) error = %v", err)
+	}
+	blockedTemplatesPath := filepath.Join(configRoot, "templates")
+	if err := os.WriteFile(blockedTemplatesPath, []byte("not-a-dir\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(blocking templates path) error = %v", err)
+	}
+
+	_, err := Load(AgentsSectionTemplateName, t.TempDir())
+	if err == nil {
+		t.Fatal("Load() expected error when global reset cannot write template")
+	}
+	if !strings.Contains(err.Error(), "could not write template") {
+		t.Fatalf("error = %v, want write-template context", err)
 	}
 }
 
