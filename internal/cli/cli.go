@@ -1922,8 +1922,7 @@ func runDoctor(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 	}
 	if err := printValue(stdout, report, *jsonOut, func(w io.Writer, v any) error {
 		r := v.(store.HealthReport)
-		_, err := fmt.Fprintf(w, "integrity_check=%s foreign_key_issues=%d invalid_related_rows=%d orphan_history_rows=%d\n", r.IntegrityCheck, r.ForeignKeyIssues, r.InvalidRelatedRows, r.OrphanHistoryRows)
-		return err
+		return formatDoctorReport(w, r)
 	}); err != nil {
 		return err
 	}
@@ -1932,6 +1931,75 @@ func runDoctor(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 		return CorruptionError{Message: strings.Join(report.Errors, "; ")}
 	}
 	return nil
+}
+
+func formatDoctorReport(w io.Writer, r store.HealthReport) error {
+	healthy := r.IntegrityCheck == "ok" && r.ForeignKeyIssues == 0 && len(r.Errors) == 0
+	if healthy && r.InvalidRelatedRows == 0 && r.OrphanHistoryRows == 0 && len(r.Warnings) == 0 {
+		_, err := fmt.Fprintln(w, "Health check: all clear")
+		return err
+	}
+
+	// Checks table
+	type check struct {
+		name   string
+		status string
+		detail string
+	}
+	checks := []check{
+		{"Constraint integrity", statusLabel(r.IntegrityCheck == "ok"), ""},
+		{"Foreign key references", statusLabel(r.ForeignKeyIssues == 0), countDetail(r.ForeignKeyIssues, "orphan reference")},
+		{"Relation ordering", statusLabel(r.InvalidRelatedRows == 0), countDetail(r.InvalidRelatedRows, "misordered row")},
+		{"History references", statusLabel(r.OrphanHistoryRows == 0), countDetail(r.OrphanHistoryRows, "orphan row")},
+	}
+
+	_, _ = fmt.Fprintln(w, "Health check:")
+	_, _ = fmt.Fprintln(w)
+	for _, c := range checks {
+		line := fmt.Sprintf("  %s  %s", c.status, c.name)
+		if c.detail != "" {
+			line += "  " + c.detail
+		}
+		_, _ = fmt.Fprintln(w, line)
+	}
+
+	if len(r.Errors) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "Errors:")
+		for _, e := range r.Errors {
+			_, _ = fmt.Fprintf(w, "  - %s\n", e)
+		}
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "Run `lit fsck --repair` to attempt automatic fixes.")
+	}
+
+	if len(r.Warnings) > 0 {
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "Warnings:")
+		for _, warn := range r.Warnings {
+			_, _ = fmt.Fprintf(w, "  - %s\n", warn)
+		}
+		_, _ = fmt.Fprintln(w)
+		_, _ = fmt.Fprintln(w, "Run `lit fsck --repair` to clean up.")
+	}
+	return nil
+}
+
+func statusLabel(ok bool) string {
+	if ok {
+		return "ok"
+	}
+	return "FAIL"
+}
+
+func countDetail(n int, noun string) string {
+	if n == 0 {
+		return ""
+	}
+	if n == 1 {
+		return fmt.Sprintf("(%d %s)", n, noun)
+	}
+	return fmt.Sprintf("(%d %ss)", n, noun)
 }
 
 func runFsck(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
@@ -1948,8 +2016,11 @@ func runFsck(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	doRepair := *repair
 	if err := printValue(stdout, report, *jsonOut, func(w io.Writer, v any) error {
 		r := v.(store.HealthReport)
-		_, err := fmt.Fprintf(w, "integrity_check=%s foreign_key_issues=%d invalid_related_rows=%d orphan_history_rows=%d repair=%t\n", r.IntegrityCheck, r.ForeignKeyIssues, r.InvalidRelatedRows, r.OrphanHistoryRows, doRepair)
-		return err
+		if doRepair {
+			_, _ = fmt.Fprintln(w, "Repair completed.")
+			_, _ = fmt.Fprintln(w)
+		}
+		return formatDoctorReport(w, r)
 	}); err != nil {
 		return err
 	}
