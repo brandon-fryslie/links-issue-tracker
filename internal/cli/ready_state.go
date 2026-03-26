@@ -8,7 +8,6 @@ import (
 	"reflect"
 	"sort"
 	"strings"
-	"text/tabwriter"
 	"time"
 
 	"github.com/bmf/links-issue-tracker/internal/annotation"
@@ -229,7 +228,7 @@ func blockedByIDs(annotations []annotation.Annotation) []string {
 // printReadyOutput partitions annotated issues into in-progress, ready, and blocked
 // sections. Ready issues are shown with a preamble and inline dependency context,
 // followed by in-progress work, then a count-by-reason summary for blocked issues.
-func printReadyOutput(w io.Writer, format string, columns []string, issues []annotation.AnnotatedIssue) error {
+func printReadyOutput(w io.Writer, columns []string, issues []annotation.AnnotatedIssue) error {
 	resolved := resolveColumns(columns)
 	var inProgress, ready, blocked []annotation.AnnotatedIssue
 	for i := range issues {
@@ -245,10 +244,10 @@ func printReadyOutput(w io.Writer, format string, columns []string, issues []ann
 
 	unblocksMap := buildUnblocksMap(issues)
 
-	if err := printReadySection(w, format, resolved, ready, unblocksMap); err != nil {
+	if err := printReadySection(w, resolved, ready, unblocksMap); err != nil {
 		return err
 	}
-	if err := printInProgressSection(w, format, resolved, inProgress); err != nil {
+	if err := printInProgressSection(w, resolved, inProgress); err != nil {
 		return err
 	}
 	if err := printBlockedSummary(w, blocked); err != nil {
@@ -259,7 +258,7 @@ func printReadyOutput(w io.Writer, format string, columns []string, issues []ann
 
 // printReadySection prints the preamble, separator, and numbered ready items
 // with inline dependency info. Caps output at readyMaxItems.
-func printReadySection(w io.Writer, format string, columns []string, ready []annotation.AnnotatedIssue, unblocksMap map[string][]string) error {
+func printReadySection(w io.Writer, columns []string, ready []annotation.AnnotatedIssue, unblocksMap map[string][]string) error {
 	if _, err := fmt.Fprintln(w, readyPreamble); err != nil {
 		return err
 	}
@@ -320,38 +319,21 @@ func printInlineDeps(w io.Writer, entry annotation.AnnotatedIssue, unblocksMap m
 	return nil
 }
 
-func printInProgressSection(w io.Writer, format string, columns []string, issues []annotation.AnnotatedIssue) error {
+func printInProgressSection(w io.Writer, columns []string, issues []annotation.AnnotatedIssue) error {
 	if len(issues) == 0 {
 		return nil
 	}
 	if _, err := fmt.Fprintln(w, "\nIn Progress"); err != nil {
 		return err
 	}
-	switch format {
-	case "table":
-		tw := tabwriter.NewWriter(w, 2, 2, 2, ' ', 0)
-		headerCols := append(append([]string{}, columns...), "LAST UPDATE")
-		if _, err := fmt.Fprintln(tw, strings.ToUpper(strings.Join(headerCols, "\t"))); err != nil {
+	for _, entry := range issues {
+		line := formatIssueColumns(entry.Issue, columns, " | ")
+		line += " | Last Update: " + inProgressSuffix(entry)
+		if _, err := fmt.Fprintln(w, line); err != nil {
 			return err
 		}
-		for _, entry := range issues {
-			base := formatIssueColumns(entry.Issue, columns, "\t")
-			suffix := inProgressSuffix(entry)
-			if _, err := fmt.Fprintln(tw, base+"\t"+suffix); err != nil {
-				return err
-			}
-		}
-		return tw.Flush()
-	default:
-		for _, entry := range issues {
-			line := formatIssueColumns(entry.Issue, columns, " | ")
-			line += " | Last Update: " + inProgressSuffix(entry)
-			if _, err := fmt.Fprintln(w, line); err != nil {
-				return err
-			}
-		}
-		return nil
 	}
+	return nil
 }
 
 func inProgressSuffix(entry annotation.AnnotatedIssue) string {
