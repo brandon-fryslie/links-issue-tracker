@@ -147,9 +147,9 @@ func fixAllPriorityPullForward(ctx context.Context, stdout io.Writer, ap *app.Ap
 	if err != nil {
 		return err
 	}
-	visited := map[string]bool{}
 	var allChanges []priorityChange
 	for _, issue := range issues {
+		visited := map[string]bool{}
 		changes, err := computePullForwardChanges(ctx, ap, issue, visited)
 		if err != nil {
 			return err
