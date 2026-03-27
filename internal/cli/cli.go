@@ -1934,8 +1934,8 @@ func runDoctor(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 }
 
 func formatDoctorReport(w io.Writer, r store.HealthReport) error {
-	healthy := r.IntegrityCheck == "ok" && r.ForeignKeyIssues == 0 && len(r.Errors) == 0
-	if healthy && r.InvalidRelatedRows == 0 && r.OrphanHistoryRows == 0 && len(r.Warnings) == 0 {
+	// [LAW:one-source-of-truth] Healthy classification derived from the same methods used everywhere else.
+	if !r.HasAutoFixableIssues() && !r.HasNonAutoFixableIssues() && len(r.Errors) == 0 && len(r.Warnings) == 0 {
 		_, err := fmt.Fprintln(w, "Health check: all clear")
 		return err
 	}
@@ -1953,34 +1953,58 @@ func formatDoctorReport(w io.Writer, r store.HealthReport) error {
 		{"History references", statusLabel(r.OrphanHistoryRows == 0), countDetail(r.OrphanHistoryRows, "orphan row")},
 	}
 
-	_, _ = fmt.Fprintln(w, "Health check:")
-	_, _ = fmt.Fprintln(w)
+	if _, err := fmt.Fprintln(w, "Health check:"); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintln(w); err != nil {
+		return err
+	}
 	for _, c := range checks {
 		line := fmt.Sprintf("  %s  %s", c.status, c.name)
 		if c.detail != "" {
 			line += "  " + c.detail
 		}
-		_, _ = fmt.Fprintln(w, line)
+		if _, err := fmt.Fprintln(w, line); err != nil {
+			return err
+		}
 	}
 
 	if len(r.Errors) > 0 {
-		_, _ = fmt.Fprintln(w)
-		_, _ = fmt.Fprintln(w, "Errors:")
-		for _, e := range r.Errors {
-			_, _ = fmt.Fprintf(w, "  - %s\n", e)
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
 		}
-		_, _ = fmt.Fprintln(w)
-		_, _ = fmt.Fprintln(w, "Run `lit fsck --repair` to attempt automatic fixes.")
+		if _, err := fmt.Fprintln(w, "Errors:"); err != nil {
+			return err
+		}
+		for _, e := range r.Errors {
+			if _, err := fmt.Fprintf(w, "  - %s\n", e); err != nil {
+				return err
+			}
+		}
 	}
 
 	if len(r.Warnings) > 0 {
-		_, _ = fmt.Fprintln(w)
-		_, _ = fmt.Fprintln(w, "Warnings:")
-		for _, warn := range r.Warnings {
-			_, _ = fmt.Fprintf(w, "  - %s\n", warn)
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
 		}
-		_, _ = fmt.Fprintln(w)
-		_, _ = fmt.Fprintln(w, "Run `lit fsck --repair` to clean up.")
+		if _, err := fmt.Fprintln(w, "Warnings:"); err != nil {
+			return err
+		}
+		for _, warn := range r.Warnings {
+			if _, err := fmt.Fprintf(w, "  - %s\n", warn); err != nil {
+				return err
+			}
+		}
+	}
+
+	// [LAW:one-source-of-truth] Repair hint derived from the auto-fixable classification, not duplicated conditions.
+	if r.HasAutoFixableIssues() {
+		if _, err := fmt.Fprintln(w); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintln(w, "Run `lit fsck --repair` to attempt automatic fixes."); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -2017,14 +2041,21 @@ func runFsck(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	if err := printValue(stdout, report, *jsonOut, func(w io.Writer, v any) error {
 		r := v.(store.HealthReport)
 		if doRepair {
-			_, _ = fmt.Fprintln(w, "Repair completed.")
-			_, _ = fmt.Fprintln(w)
+			if _, err := fmt.Fprintln(w, "Repair completed."); err != nil {
+				return err
+			}
+			if _, err := fmt.Fprintln(w); err != nil {
+				return err
+			}
 		}
 		return formatDoctorReport(w, r)
 	}); err != nil {
 		return err
 	}
-	// [LAW:single-enforcer] Corruption classification is output-format agnostic and always enforced here.
+	// [LAW:single-enforcer] Post-repair verification: if auto-fixable issues still persist, that's a bug.
+	if doRepair && report.HasAutoFixableIssues() {
+		return fmt.Errorf("repair did not resolve all repairable issues — this is a bug in lit; please report it")
+	}
 	if len(report.Errors) > 0 {
 		return CorruptionError{Message: strings.Join(report.Errors, "; ")}
 	}

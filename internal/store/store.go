@@ -187,6 +187,18 @@ type HealthReport struct {
 	Warnings           []string `json:"warnings"`
 }
 
+// HasAutoFixableIssues reports whether the health check found issues that
+// `lit fsck --repair` claims to fix (orphan history rows, misordered relations).
+func (r HealthReport) HasAutoFixableIssues() bool {
+	return r.OrphanHistoryRows > 0 || r.InvalidRelatedRows > 0
+}
+
+// HasNonAutoFixableIssues reports whether the health check found issues that
+// require manual intervention (integrity failures, foreign key violations).
+func (r HealthReport) HasNonAutoFixableIssues() bool {
+	return r.IntegrityCheck != "ok" || r.ForeignKeyIssues > 0
+}
+
 func Open(ctx context.Context, doltRootDir string, workspaceID string) (*Store, error) {
 	if err := EnsureDatabase(ctx, doltRootDir, workspaceID); err != nil {
 		return nil, err
