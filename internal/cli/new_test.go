@@ -54,16 +54,14 @@ func TestRunNewSupportsTopicAndParent(t *testing.T) {
 func TestRunQuickstartLoadsTemplateGuidance(t *testing.T) {
 	ctx := context.Background()
 	ap := newTestCLIApp(t)
-	templatePath := filepath.Join(ap.Workspace.RootDir, ".lit", "templates", "agents-section.md")
+	templatePath := filepath.Join(ap.Workspace.RootDir, ".lit", "templates", "quickstart.md")
 	if err := os.MkdirAll(filepath.Dir(templatePath), 0o755); err != nil {
 		t.Fatalf("MkdirAll(template dir) error = %v", err)
 	}
 	template := strings.Join([]string{
-		linksAgentsBeginMarker,
 		"## Custom quickstart",
 		"",
 		"Use `lit ready`.",
-		linksAgentsEndMarker,
 		"",
 	}, "\n")
 	if err := os.WriteFile(templatePath, []byte(template), 0o644); err != nil {
@@ -75,9 +73,6 @@ func TestRunQuickstartLoadsTemplateGuidance(t *testing.T) {
 		t.Fatalf("runQuickstart() error = %v", err)
 	}
 	output := stdout.String()
-	if strings.Contains(output, linksAgentsBeginMarker) || strings.Contains(output, linksAgentsEndMarker) {
-		t.Fatalf("quickstart output should not include managed markers: %q", output)
-	}
 	if !strings.Contains(output, "## Custom quickstart") {
 		t.Fatalf("quickstart output missing template body: %q", output)
 	}

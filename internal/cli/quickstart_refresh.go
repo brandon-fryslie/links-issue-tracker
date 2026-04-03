@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/bmf/links-issue-tracker/internal/templates"
 	"github.com/bmf/links-issue-tracker/internal/workspace"
 )
 
@@ -76,11 +77,9 @@ func formatQuickstartRefreshItemSummary(item quickstartRefreshItem) string {
 }
 
 func renderQuickstartGuidance(workspaceRoot string) (string, error) {
-	template, err := renderLinksAgentsSection(workspaceRoot)
+	template, err := templates.Load(templates.QuickstartTemplateName, workspaceRoot)
 	if err != nil {
 		return "", fmt.Errorf("load quickstart guidance: %w", err)
 	}
-	guidance := strings.ReplaceAll(template, linksAgentsBeginMarker, "")
-	guidance = strings.ReplaceAll(guidance, linksAgentsEndMarker, "")
-	return strings.TrimSpace(guidance), nil
+	return strings.TrimSpace(template), nil
 }
