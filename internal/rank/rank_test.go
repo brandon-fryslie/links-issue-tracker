@@ -343,3 +343,32 @@ func TestSpacedRanksBetweenLongLowerBound(t *testing.T) {
 		}
 	}
 }
+
+func TestSpacedRanksBetweenRejectsNegativeN(t *testing.T) {
+	_, err := SpacedRanksBetween("", "", -1)
+	if err == nil {
+		t.Fatal("expected error for negative n")
+	}
+	if !strings.Contains(err.Error(), "non-negative") {
+		t.Fatalf("error = %q, want non-negative validation", err)
+	}
+}
+
+func TestSpacedRanksPanicsOnNegativeN(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected panic for negative n")
+		}
+	}()
+	_ = SpacedRanks(-1)
+}
+
+func TestSpacedRanksBetweenRejectsZeroUpperBound(t *testing.T) {
+	_, err := SpacedRanksBetween("", "0", 1)
+	if err == nil {
+		t.Fatal("expected error for zero upper bound")
+	}
+	if !strings.Contains(err.Error(), "upper bound too low") {
+		t.Fatalf("error = %q, want upper-bound validation", err)
+	}
+}

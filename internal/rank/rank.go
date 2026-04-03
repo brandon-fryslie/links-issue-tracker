@@ -127,6 +127,10 @@ func SpacedRanksBetween(lower, upper string, n int) ([]string, error) {
 }
 
 func spacedRanks(n int, lower, upper string) ([]string, error) {
+	// [LAW:single-enforcer] Size validation lives at the shared spacing boundary so all callers get identical behavior.
+	if n < 0 {
+		return nil, errors.New("rank: n must be non-negative")
+	}
 	if n == 0 {
 		return nil, nil
 	}
@@ -198,6 +202,9 @@ func upperBoundInt(s string, length int) (*big.Int, error) {
 	v, err := stringToInt(s, length)
 	if err != nil {
 		return nil, err
+	}
+	if v.Sign() == 0 {
+		return nil, errors.New("rank: upper bound too low to generate spaced ranks")
 	}
 	return new(big.Int).Sub(v, bigOne), nil
 }
