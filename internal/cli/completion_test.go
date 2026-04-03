@@ -67,14 +67,14 @@ func TestRunHelpDocumentsRankOrderingDefaults(t *testing.T) {
 	if err := Run(context.Background(), &stdout, &stdout, []string{"help"}); err != nil {
 		t.Fatalf("Run(help) error = %v", err)
 	}
-	help := stdout.String()
-	if !strings.Contains(help, "ready       List open work by readiness and rank") {
+	help := normalizeWhitespace(stdout.String())
+	if !strings.Contains(help, "ready List open work by readiness and rank") {
 		t.Fatalf("help output missing rank-based ready description: %q", help)
 	}
-	if !strings.Contains(help, "ls          List issues (rank by default)") {
+	if !strings.Contains(help, "ls List issues (rank by default)") {
 		t.Fatalf("help output missing default rank ls description: %q", help)
 	}
-	if !strings.Contains(help, "children    List child issues by rank") {
+	if !strings.Contains(help, "children List child issues by rank") {
 		t.Fatalf("help output missing rank-based children description: %q", help)
 	}
 }
