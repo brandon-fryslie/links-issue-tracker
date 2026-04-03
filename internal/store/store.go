@@ -1225,21 +1225,11 @@ func (s *Store) RankBelow(ctx context.Context, issueID, targetID string) error {
 // smoothing threshold and, if so, re-spaces a local window of items around the
 // insertion point. This keeps rank strings short with O(SmoothingWindow) cost
 // instead of a full O(n) rebalance.
-func (s *Store) smoothRanksIfNeeded(ctx context.Context, triggerRank string) error {
+func smoothRanksIfNeededTx(ctx context.Context, tx *sql.Tx, triggerRank string) error {
 	if len(triggerRank) < rank.SmoothingThreshold {
 		return nil
 	}
 	half := rank.SmoothingWindow / 2
-	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
-	if err != nil {
-		return err
-	}
-	defer releaseCommitLock()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin smooth tx: %w", err)
-	}
-	defer tx.Rollback()
 
 	// Collect the window: up to half items at or below the trigger, plus
 	// up to half items above it.
@@ -1333,6 +1323,23 @@ func (s *Store) smoothRanksIfNeeded(ctx context.Context, triggerRank string) err
 			}
 		}
 	}
+	return nil
+}
+
+func (s *Store) smoothRanksIfNeeded(ctx context.Context, triggerRank string) error {
+	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer releaseCommitLock()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin smooth tx: %w", err)
+	}
+	defer tx.Rollback()
+	if err := smoothRanksIfNeededTx(ctx, tx, triggerRank); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit smooth: %w", err)
 	}
@@ -1344,6 +1351,7 @@ const rankInversionsRelationClause = `FROM relations r
 	JOIN issues src ON src.id = r.src_id
 	JOIN issues dst ON dst.id = r.dst_id
 	WHERE r.type = 'blocks'
+	AND src.deleted_at IS NULL AND dst.deleted_at IS NULL
 	AND src.status != 'closed' AND dst.status != 'closed'
 	AND dst.item_rank > src.item_rank`
 
@@ -1354,7 +1362,7 @@ type rankInversion struct {
 
 // FixRankInversions finds all blocks relations where the dependency is ranked
 // below the dependent and ranks each dependency above its dependent. Returns
-// the number of inversions fixed.
+// the number of dependency issues that were re-ranked.
 func (s *Store) FixRankInversions(ctx context.Context) (int, error) {
 	loadInversions := func(ctx context.Context, tx *sql.Tx) ([]rankInversion, error) {
 		// In blocks relations: src_id is the dependent, dst_id is the dependency (blocker).
@@ -1394,7 +1402,7 @@ func (s *Store) FixRankInversions(ctx context.Context) (int, error) {
 		return 0, fmt.Errorf("fix rank inversions: begin tx: %w", err)
 	}
 	defer tx.Rollback()
-	totalFixed := 0
+	rerankedCount := 0
 	seenSnapshots := map[string]struct{}{}
 	for {
 		inversions, err := loadInversions(ctx, tx)
@@ -1448,10 +1456,13 @@ func (s *Store) FixRankInversions(ctx context.Context) (int, error) {
 			if _, err := tx.ExecContext(ctx, "UPDATE issues SET item_rank = ?, updated_at = ? WHERE id = ?", newRank, now, target.depID); err != nil {
 				return 0, fmt.Errorf("fix rank inversions: update %s: %w", target.depID, err)
 			}
-			totalFixed++
+			if err := smoothRanksIfNeededTx(ctx, tx, newRank); err != nil {
+				return 0, fmt.Errorf("fix rank inversions: smooth ranks: %w", err)
+			}
+			rerankedCount++
 		}
 	}
-	if totalFixed == 0 {
+	if rerankedCount == 0 {
 		return 0, nil
 	}
 	if err := tx.Commit(); err != nil {
@@ -1460,7 +1471,7 @@ func (s *Store) FixRankInversions(ctx context.Context) (int, error) {
 	if err := s.commitWorkingSet(ctx, "fix rank inversions"); err != nil {
 		return 0, err
 	}
-	return totalFixed, nil
+	return rerankedCount, nil
 }
 
 func (s *Store) AddComment(ctx context.Context, in AddCommentInput) (model.Comment, error) {

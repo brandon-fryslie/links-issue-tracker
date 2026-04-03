@@ -121,8 +121,8 @@ func TestFixRankInversionsConvergesWhenDependencyBlocksMultipleIssues(t *testing
 	if err != nil {
 		t.Fatalf("FixRankInversions() error = %v", err)
 	}
-	if fixed < 1 {
-		t.Fatalf("FixRankInversions() fixed = %d, want >= 1", fixed)
+	if fixed != 1 {
+		t.Fatalf("FixRankInversions() fixed = %d, want 1 (one dependency issue reranked)", fixed)
 	}
 
 	after, err := st.Doctor(ctx)
@@ -180,6 +180,46 @@ func TestFixRankInversionsConvergesWhenPassCreatesNewInversion(t *testing.T) {
 	}
 	if after.RankInversions != 0 {
 		t.Fatalf("Doctor(after).RankInversions = %d, want 0", after.RankInversions)
+	}
+}
+
+func TestFixRankInversionsIgnoresDeletedIssues(t *testing.T) {
+	ctx := context.Background()
+	st := openIssueStore(t, ctx)
+
+	dependent, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Dependent", Topic: "rank", IssueType: "task", Priority: 2})
+	if err != nil {
+		t.Fatalf("CreateIssue(dependent) error = %v", err)
+	}
+	blocker, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Blocker", Topic: "rank", IssueType: "task", Priority: 2})
+	if err != nil {
+		t.Fatalf("CreateIssue(blocker) error = %v", err)
+	}
+	if _, err := st.AddRelation(ctx, AddRelationInput{SrcID: dependent.ID, DstID: blocker.ID, Type: "blocks", CreatedBy: "tester"}); err != nil {
+		t.Fatalf("AddRelation(dependent blocks blocker) error = %v", err)
+	}
+	if _, err := st.TransitionIssue(ctx, TransitionIssueInput{
+		IssueID:   blocker.ID,
+		Action:    "delete",
+		Reason:    "removed",
+		CreatedBy: "tester",
+	}); err != nil {
+		t.Fatalf("TransitionIssue(delete blocker) error = %v", err)
+	}
+
+	report, err := st.Doctor(ctx)
+	if err != nil {
+		t.Fatalf("Doctor() error = %v", err)
+	}
+	if report.RankInversions != 0 {
+		t.Fatalf("Doctor().RankInversions = %d, want 0 for deleted issues", report.RankInversions)
+	}
+	fixed, err := st.FixRankInversions(ctx)
+	if err != nil {
+		t.Fatalf("FixRankInversions() error = %v", err)
+	}
+	if fixed != 0 {
+		t.Fatalf("FixRankInversions() fixed = %d, want 0 for deleted issues", fixed)
 	}
 }
 
