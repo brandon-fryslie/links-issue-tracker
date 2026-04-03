@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/bmf/links-issue-tracker/internal/workspace"
 )
@@ -72,4 +73,14 @@ func formatQuickstartRefreshItemSummary(item quickstartRefreshItem) string {
 		return item.Status
 	}
 	return fmt.Sprintf("%s(%s)", item.Status, item.Reason)
+}
+
+func renderQuickstartGuidance(workspaceRoot string) (string, error) {
+	template, err := renderLinksAgentsSection(workspaceRoot)
+	if err != nil {
+		return "", fmt.Errorf("load quickstart guidance: %w", err)
+	}
+	guidance := strings.ReplaceAll(template, linksAgentsBeginMarker, "")
+	guidance = strings.ReplaceAll(guidance, linksAgentsEndMarker, "")
+	return strings.TrimSpace(guidance), nil
 }

@@ -3,7 +3,6 @@ package cli
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -55,18 +54,14 @@ func TestRunQuickstartDefaultsToTextOnNonTTY(t *testing.T) {
 	if strings.Contains(stdout.String(), "\"summary\"") {
 		t.Fatalf("quickstart default output should be text: %q", stdout.String())
 	}
-	if !strings.Contains(stdout.String(), "Agent quickstart for links issue tracking") {
-		t.Fatalf("quickstart text output missing summary: %q", stdout.String())
+	if strings.TrimSpace(stdout.String()) == "" {
+		t.Fatal("quickstart text output is empty")
 	}
 }
 
-func TestRunQuickstartJSONFlagEnablesJSON(t *testing.T) {
+func TestRunQuickstartRejectsJSONOutput(t *testing.T) {
 	var stdout bytes.Buffer
-	if err := Run(context.Background(), &stdout, &stdout, []string{"--json", "quickstart"}); err != nil {
-		t.Fatalf("Run(--json quickstart) error = %v", err)
-	}
-	var payload map[string]any
-	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
-		t.Fatalf("expected json output when --json is set: %v", err)
+	if err := Run(context.Background(), &stdout, &stdout, []string{"--json", "quickstart"}); err == nil {
+		t.Fatal("Run(--json quickstart) unexpectedly succeeded")
 	}
 }
