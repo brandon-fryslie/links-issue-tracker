@@ -11,7 +11,7 @@ Agent quickstart for links issue tracking
    `lit new --title "..." --topic <topic> --parent <parent-id> --type task`
 
 3) Update tickets
-   `lit update <issue-id> --title "..." --description "..." --priority 1 --assignee <user> --labels a,b --status open|in_progress|closed`
+   `lit update <issue-id> --title "..." --description "..." --priority 1 --assignee <user> --labels a,b`
    `lit rank <issue-id> --top`
    `lit rank <issue-id> --bottom`
    `lit rank <issue-id> --above <other-id>`

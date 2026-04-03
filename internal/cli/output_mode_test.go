@@ -65,3 +65,10 @@ func TestRunQuickstartRejectsJSONOutput(t *testing.T) {
 		t.Fatal("Run(--json quickstart) unexpectedly succeeded")
 	}
 }
+
+func TestRunQuickstartRejectsCommandLocalJSONFlag(t *testing.T) {
+	var stdout bytes.Buffer
+	if err := Run(context.Background(), &stdout, &stdout, []string{"quickstart", "--json"}); err == nil {
+		t.Fatal("Run(quickstart --json) unexpectedly succeeded")
+	}
+}
