@@ -2339,16 +2339,14 @@ func runCompletion(stdout io.Writer, args []string) error {
 func runQuickstart(ctx context.Context, stdout io.Writer, ws workspace.Info, args []string) error {
 	_ = ctx
 	fs := newCobraFlagSet("quickstart")
-	jsonOut := fs.Bool("json", false, "Output JSON")
 	refresh := fs.Bool("refresh", false, "Refresh managed repo assets")
-	_ = fs.cmd.Flags().MarkHidden("json")
 	if err := parseFlagSet(fs, args, stdout); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
 		return errors.New("usage: lit quickstart [--refresh]")
 	}
-	if *jsonOut || outputModeFromWriter(stdout) == outputModeJSON {
+	if outputModeFromWriter(stdout) == outputModeJSON {
 		return errors.New("usage: lit quickstart [--refresh]")
 	}
 
