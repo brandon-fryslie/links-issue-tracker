@@ -2263,9 +2263,6 @@ func runBulk(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 		if len(issueIDs) == 0 {
 			return errors.New("--ids is required")
 		}
-		if strings.TrimSpace(*reason) == "" {
-			return errors.New("--reason is required")
-		}
 		results := map[string]string{}
 		for _, issueID := range issueIDs {
 			_, err := ap.Store.TransitionIssue(ctx, store.TransitionIssueInput{
