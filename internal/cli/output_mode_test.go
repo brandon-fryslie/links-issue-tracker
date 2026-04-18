@@ -61,14 +61,22 @@ func TestRunQuickstartDefaultsToTextOnNonTTY(t *testing.T) {
 
 func TestRunQuickstartRejectsJSONOutput(t *testing.T) {
 	var stdout bytes.Buffer
-	if err := Run(context.Background(), &stdout, &stdout, []string{"--json", "quickstart"}); err == nil {
+	err := Run(context.Background(), &stdout, &stdout, []string{"--json", "quickstart"})
+	if err == nil {
 		t.Fatal("Run(--json quickstart) unexpectedly succeeded")
+	}
+	if got := ExitCode(err); got != ExitUsage {
+		t.Fatalf("ExitCode(--json quickstart) = %d, want %d", got, ExitUsage)
 	}
 }
 
 func TestRunQuickstartRejectsCommandLocalJSONFlag(t *testing.T) {
 	var stdout bytes.Buffer
-	if err := Run(context.Background(), &stdout, &stdout, []string{"quickstart", "--json"}); err == nil {
+	err := Run(context.Background(), &stdout, &stdout, []string{"quickstart", "--json"})
+	if err == nil {
 		t.Fatal("Run(quickstart --json) unexpectedly succeeded")
+	}
+	if got := ExitCode(err); got != ExitUsage {
+		t.Fatalf("ExitCode(quickstart --json) = %d, want %d", got, ExitUsage)
 	}
 }
