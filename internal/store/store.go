@@ -42,6 +42,7 @@ const (
 type Store struct {
 	db             *sql.DB
 	workspaceID    string
+	doltRootDir    string
 	commitLockPath string
 	telemetryDir   string
 }
@@ -269,9 +270,32 @@ func openStoreConnection(doltRootDir string, workspaceID string) (*Store, error)
 	return &Store{
 		db:             db,
 		workspaceID:    workspaceID,
+		doltRootDir:    doltRootDir,
 		commitLockPath: filepath.Join(filepath.Clean(doltRootDir), ".links-commit.lock"),
 		telemetryDir:   filepath.Join(filepath.Clean(doltRootDir), "telemetry"),
 	}, nil
+}
+
+// reconnect closes s.db and opens a fresh connection using the same DSN.
+// Dolt's online garbage collection invalidates any SQL connection that was
+// open when it ran ("this connection can no longer be used. please reconnect."),
+// so callers that invoke DOLT_GC must rotate the pooled connection before
+// any subsequent query. Must be called while the commit lock is held so no
+// concurrent caller observes a torn s.db pointer.
+func (s *Store) reconnect() error {
+	// [LAW:dataflow-not-control-flow] Reconnect runs unconditionally on every invocation; what varies is the DSN's doltRootDir/workspaceID, not whether the rotation occurs.
+	if err := s.db.Close(); err != nil && !errors.Is(err, context.Canceled) {
+		return fmt.Errorf("close dolt connection for reconnect: %w", err)
+	}
+	db, err := sql.Open(doltDriverName, buildDoltDSN(s.doltRootDir, s.workspaceID, true))
+	if err != nil {
+		return fmt.Errorf("reopen dolt: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	db.SetConnMaxLifetime(0)
+	s.db = db
+	return nil
 }
 
 func (s *Store) migrate(ctx context.Context) error {
