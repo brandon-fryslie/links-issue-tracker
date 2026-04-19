@@ -225,6 +225,7 @@ func TestSyncCompactRunsCleanlyAndPreservesData(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open() error = %v", err)
 	}
+	defer st.Close()
 	if err := st.EnsureIssuePrefix(ctx, "test"); err != nil {
 		t.Fatalf("EnsureIssuePrefix() error = %v", err)
 	}

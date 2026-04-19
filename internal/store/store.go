@@ -276,25 +276,30 @@ func openStoreConnection(doltRootDir string, workspaceID string) (*Store, error)
 	}, nil
 }
 
-// reconnect closes s.db and opens a fresh connection using the same DSN.
+// reconnect swaps s.db for a fresh connection using the same DSN.
 // Dolt's online garbage collection invalidates any SQL connection that was
 // open when it ran ("this connection can no longer be used. please reconnect."),
 // so callers that invoke DOLT_GC must rotate the pooled connection before
 // any subsequent query. Must be called while the commit lock is held so no
 // concurrent caller observes a torn s.db pointer.
+//
+// The new handle is opened and configured before the old one is closed, so a
+// failure to open the replacement leaves s.db pointing at the still-working
+// original handle rather than tearing the Store.
 func (s *Store) reconnect() error {
 	// [LAW:dataflow-not-control-flow] Reconnect runs unconditionally on every invocation; what varies is the DSN's doltRootDir/workspaceID, not whether the rotation occurs.
-	if err := s.db.Close(); err != nil && !errors.Is(err, context.Canceled) {
-		return fmt.Errorf("close dolt connection for reconnect: %w", err)
-	}
-	db, err := sql.Open(doltDriverName, buildDoltDSN(s.doltRootDir, s.workspaceID, true))
+	next, err := sql.Open(doltDriverName, buildDoltDSN(s.doltRootDir, s.workspaceID, true))
 	if err != nil {
 		return fmt.Errorf("reopen dolt: %w", err)
 	}
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
-	db.SetConnMaxLifetime(0)
-	s.db = db
+	next.SetMaxOpenConns(1)
+	next.SetMaxIdleConns(1)
+	next.SetConnMaxLifetime(0)
+	prev := s.db
+	s.db = next
+	if err := prev.Close(); err != nil && !errors.Is(err, context.Canceled) {
+		return fmt.Errorf("close prior dolt connection after reconnect: %w", err)
+	}
 	return nil
 }
 
