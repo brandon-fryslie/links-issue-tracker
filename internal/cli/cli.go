@@ -551,6 +551,15 @@ func (fs *cobraFlagSet) Int(name string, value int, usage string) *int {
 	return fs.cmd.Flags().Int(name, value, usage)
 }
 
+// StringOptional declares a string flag whose value is `defaultIfAbsent` when
+// the flag is not passed, `defaultIfPresent` when the flag is passed with no
+// value (e.g. `--eject`), or the caller-supplied value otherwise.
+func (fs *cobraFlagSet) StringOptional(name, defaultIfPresent, defaultIfAbsent, usage string) *string {
+	p := fs.cmd.Flags().String(name, defaultIfAbsent, usage)
+	fs.cmd.Flags().Lookup(name).NoOptDefVal = defaultIfPresent
+	return p
+}
+
 func (fs *cobraFlagSet) NArg() int {
 	return fs.cmd.Flags().NArg()
 }
@@ -2340,14 +2349,30 @@ func runQuickstart(ctx context.Context, stdout io.Writer, ws workspace.Info, arg
 	_ = ctx
 	fs := newCobraFlagSet("quickstart")
 	refresh := fs.Bool("refresh", false, "Refresh managed repo assets")
+	eject := fs.StringOptional("eject", "all", "", "Eject embedded default(s) to the global override path (comma-separated: quickstart,agents,hook; empty = all)")
+	force := fs.Bool("force", false, "With --eject, overwrite existing override files")
 	if err := parseFlagSet(fs, args, stdout); err != nil {
 		return err
 	}
 	if fs.NArg() != 0 {
-		return errors.New("usage: lit quickstart [--refresh]")
+		return errors.New("usage: lit quickstart [--refresh] [--eject[=LIST]] [--force]")
 	}
 	if outputModeFromWriter(stdout) == outputModeJSON {
-		return errors.New("usage: lit quickstart [--refresh]")
+		return errors.New("usage: lit quickstart [--refresh] [--eject[=LIST]] [--force]")
+	}
+	if *eject != "" && *refresh {
+		return errors.New("usage: --refresh and --eject are mutually exclusive")
+	}
+	if *force && *eject == "" {
+		return errors.New("usage: --force is only valid with --eject")
+	}
+
+	if *eject != "" {
+		results, err := ejectTemplates(*eject, *force)
+		if err != nil {
+			return err
+		}
+		return writeEjectReport(stdout, results, *force)
 	}
 
 	// [LAW:one-source-of-truth] Quickstart guidance is loaded from the managed quickstart template instead of being re-encoded in CLI data structures.
