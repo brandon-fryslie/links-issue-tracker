@@ -161,6 +161,17 @@ func (s *Store) SyncPull(ctx context.Context, remote string, branch string) (Syn
 	return result, nil
 }
 
+func (s *Store) SyncCompact(ctx context.Context) error {
+	// [LAW:single-enforcer] Dolt garbage collection is exposed through a single Store entrypoint so every caller routes through the same commit-lock and retry wrapper.
+	return s.runSyncMutation(ctx, func(ctx context.Context) error {
+		if _, err := callIntProcedure(ctx, s.db, "DOLT_GC"); err != nil {
+			return fmt.Errorf("compact dolt store: %w", err)
+		}
+		// [LAW:single-enforcer] Online GC poisons the active SQL connection; the Store rotates it here so every downstream query contract is restored before lock release.
+		return s.reconnect()
+	})
+}
+
 func (s *Store) SyncPush(ctx context.Context, remote string, branch string, setUpstream bool, force bool) (SyncPushResult, error) {
 	trimmedRemote, err := requireSyncArg("remote", remote)
 	if err != nil {
@@ -177,6 +188,11 @@ func (s *Store) SyncPush(ctx context.Context, remote string, branch string, setU
 	args = append(args, trimmedRemote)
 	if trimmedBranch != "" {
 		args = append(args, fmt.Sprintf("HEAD:%s", trimmedBranch))
+	}
+
+	// [LAW:dataflow-not-control-flow] Every push unconditionally compacts first; gc decides what to reclaim from store state, not a caller-supplied gate.
+	if err := s.SyncCompact(ctx); err != nil {
+		return SyncPushResult{}, err
 	}
 
 	var result SyncPushResult
