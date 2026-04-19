@@ -568,6 +568,10 @@ func (fs *cobraFlagSet) Visit(fn func(*pflag.Flag)) {
 	fs.cmd.Flags().Visit(fn)
 }
 
+func (fs *cobraFlagSet) Changed(name string) bool {
+	return fs.cmd.Flags().Changed(name)
+}
+
 func (fs *cobraFlagSet) printHelp(helpOutput io.Writer) error {
 	fs.SetOutput(helpOutput)
 	if _, writeErr := fmt.Fprintf(helpOutput, "Usage of %s:\n", fs.cmd.Use); writeErr != nil {
