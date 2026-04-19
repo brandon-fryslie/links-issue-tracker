@@ -92,10 +92,9 @@ func Run(ctx context.Context, stdout io.Writer, stderr io.Writer, args []string)
 
 func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *cobra.Command {
 	root := &cobra.Command{
-		Use:   "lit",
-		Short: "Worktree-native issue tracker",
+		Use: "lit",
 		Long: strings.Join([]string{
-			"Worktree-native issue tracker with Dolt-backed sync.",
+			"Agent-native issue tracker",
 			"",
 			"Output mode:",
 			"  default text",
@@ -2765,7 +2764,7 @@ func (e CorruptionError) Error() string { return e.Message }
 func printUsage(w io.Writer) {
 	fmt.Fprint(w, `links / lit
 
-Worktree-native issue tracker with Dolt-backed sync.
+Agent-native issue tracker
 
 Output:
   default text
