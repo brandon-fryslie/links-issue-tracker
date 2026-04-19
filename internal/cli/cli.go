@@ -2360,15 +2360,20 @@ func runQuickstart(ctx context.Context, stdout io.Writer, ws workspace.Info, arg
 	if outputModeFromWriter(stdout) == outputModeJSON {
 		return errors.New("usage: lit quickstart [--refresh] [--eject[=LIST]] [--force]")
 	}
-	if *eject != "" && *refresh {
+	ejectChanged := fs.Changed("eject")
+	ejectValue := *eject
+	if ejectChanged && ejectValue == "" {
+		ejectValue = "all"
+	}
+	if ejectChanged && *refresh {
 		return errors.New("usage: --refresh and --eject are mutually exclusive")
 	}
-	if *force && *eject == "" {
+	if *force && !ejectChanged {
 		return errors.New("usage: --force is only valid with --eject")
 	}
 
-	if *eject != "" {
-		results, err := ejectTemplates(*eject, *force)
+	if ejectChanged {
+		results, err := ejectTemplates(ejectValue, *force)
 		if err != nil {
 			return err
 		}
