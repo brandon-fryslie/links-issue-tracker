@@ -20,6 +20,16 @@ var missingRemoteBranchPattern = regexp.MustCompile(`branch "([^"]+)" not found 
 
 const debugSyncBranchEnvVar = "LINKS_DEBUG_DOLT_SYNC_BRANCH"
 
+// firstPushSkipMessage is emitted when lit sync is invoked against a remote
+// that advertises no refs at all. This is only a legitimate state during the
+// very first push to a brand-new empty repo; in every other situation it
+// indicates a real problem (wrong URL, auth failure that ls-remote didn't
+// surface as an error, etc.) and must not be silently ignored.
+const firstPushSkipMessage = "Skipping lit sync: remote has no refs yet. " +
+	"This is normal ONLY for the very first push to a brand-new empty repo. " +
+	"If you have pushed to this remote before, do NOT ignore this message — " +
+	"something is wrong (check the remote URL, credentials, or run `git ls-remote <remote>`)."
+
 func validateSyncCommandPath(args []string) error {
 	return validateNestedCommandPath(args, "usage: lit sync <status|remote|fetch|pull|push> ...", "status", "remote", "fetch", "pull", "push")
 }
@@ -132,6 +142,19 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 				return printSyncPullPayload(w, v, *verbose)
 			})
 		}
+		// [LAW:single-enforcer] First-push detection is centralized so pull and push share one definition of "remote is empty".
+		hasRefs, refsErr := workspace.RemoteHasRefs(ws.RootDir, remoteName)
+		if refsErr == nil && !hasRefs {
+			payload := map[string]any{
+				"status": "skipped",
+				"reason": "remote_empty",
+				"remote": remoteName,
+				"raw":    firstPushSkipMessage,
+			}
+			return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
+				return printSyncPullPayload(w, v, *verbose)
+			})
+		}
 		resolvedBranch, err := resolveSyncBranch(ws.RootDir, remoteName)
 		if err != nil {
 			return err
@@ -173,6 +196,19 @@ func runSync(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 				"raw":    "no upstream remote and no single configured remote; skipping sync push",
 			}
 			// [LAW:dataflow-not-control-flow] exception: explicit no-remote policy requires suppressing sync side effects when remote resolution yields empty input.
+			return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
+				return printSyncPushPayload(w, v, *verbose)
+			})
+		}
+		// [LAW:single-enforcer] First-push detection is centralized so pull and push share one definition of "remote is empty".
+		hasRefs, refsErr := workspace.RemoteHasRefs(ws.RootDir, remoteName)
+		if refsErr == nil && !hasRefs {
+			payload := map[string]any{
+				"status": "skipped",
+				"reason": "remote_empty",
+				"remote": remoteName,
+				"raw":    firstPushSkipMessage,
+			}
 			return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
 				return printSyncPushPayload(w, v, *verbose)
 			})
@@ -411,6 +447,11 @@ func printSyncPullPayload(w io.Writer, v any, verbose bool) error {
 			_, err := fmt.Fprintln(w, "skipped sync pull: no eligible git remote")
 			return err
 		}
+		if reason == "remote_empty" {
+			// [LAW:dataflow-not-control-flow] exception: first-push skip message must always reach the caller so agents/humans see why sync did nothing.
+			_, err := fmt.Fprintln(w, firstPushSkipMessage)
+			return err
+		}
 		nextCommand := strings.TrimSpace(fmt.Sprintf("%v", payload["next_command"]))
 		retryCommand := strings.TrimSpace(fmt.Sprintf("%v", payload["retry_command"]))
 		if !verbose {
@@ -454,6 +495,12 @@ func printSyncPushPayload(w io.Writer, v any, verbose bool) error {
 	payload := v.(map[string]any)
 	status := strings.TrimSpace(fmt.Sprintf("%v", payload["status"]))
 	raw, hasRaw := payload["raw"].(string)
+	reason := strings.TrimSpace(fmt.Sprintf("%v", payload["reason"]))
+	if status == "skipped" && reason == "remote_empty" {
+		// [LAW:dataflow-not-control-flow] exception: first-push skip message must always reach the caller so agents/humans see why sync did nothing.
+		_, err := fmt.Fprintln(w, firstPushSkipMessage)
+		return err
+	}
 	if !verbose && status == "skipped" {
 		return nil
 	}
