@@ -724,9 +724,17 @@ func runReady(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 	if err != nil {
 		return err
 	}
+	// [LAW:single-enforcer] One pre-pass fetches per-row detail for the whole
+	// ready pipeline; both annotation and enrichment read from this map,
+	// eliminating the duplicate GetIssueDetail traffic that landed when
+	// enrichWithParentEpic was introduced alongside newBlockerAnnotator.
+	details, err := fetchIssueDetails(ctx, ap.Store, issues)
+	if err != nil {
+		return err
+	}
 	annotated, err := annotation.Annotate(ctx, issues,
 		fieldAnnotator,
-		newBlockerAnnotator(ap.Store),
+		newBlockerAnnotator(details),
 		newOrphanedAnnotator(24*time.Hour),
 	)
 	if err != nil {
@@ -734,12 +742,7 @@ func runReady(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 	}
 	sortByReadiness(annotated)
 	annotated = applyLimit(annotated, *limit)
-	// [LAW:dataflow-not-control-flow] Enrichment is a render-only concern and
-	// does not influence sorting or the readiness partition, so it runs after
-	// the limit is applied — no per-row store fetch for rows we will discard.
-	if err := enrichWithParentEpic(ctx, ap.Store, annotated); err != nil {
-		return err
-	}
+	enrichWithParentEpic(annotated, details)
 	columns := parseColumns(*columnsExpr)
 	return printValue(stdout, annotated, *jsonOut, func(w io.Writer, v any) error {
 		return printReadyOutput(w, columns, v.([]annotation.AnnotatedIssue))

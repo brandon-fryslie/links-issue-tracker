@@ -53,16 +53,33 @@ func newFieldAnnotator(requiredFields []string) (annotation.Annotator, error) {
 	}, nil
 }
 
-// newBlockerAnnotator returns an annotator that checks open dependency blockers
-// and flags rank inversions where a dependency is ranked below the dependent.
-func newBlockerAnnotator(st *store.Store) annotation.Annotator {
-	// [LAW:dataflow-not-control-flow] Dependency lookup runs for every issue;
-	// empty blockers list means no annotations, not a skipped operation.
-	return func(ctx context.Context, issue model.Issue) ([]annotation.Annotation, error) {
+// fetchIssueDetails fetches IssueDetail for every listed issue into a map.
+// [LAW:single-enforcer] One pre-pass is the single source of per-row detail
+// data for the ready pipeline; both annotation and enrichment read from it.
+// [LAW:dataflow-not-control-flow] The fetch is unconditional and happens
+// once; downstream stages are pure map lookups over the result.
+func fetchIssueDetails(ctx context.Context, st *store.Store, issues []model.Issue) (map[string]model.IssueDetail, error) {
+	details := make(map[string]model.IssueDetail, len(issues))
+	for _, issue := range issues {
 		detail, err := st.GetIssueDetail(ctx, issue.ID)
 		if err != nil {
 			return nil, err
 		}
+		details[issue.ID] = detail
+	}
+	return details, nil
+}
+
+// newBlockerAnnotator returns an annotator that checks open dependency blockers
+// and flags rank inversions where a dependency is ranked below the dependent.
+// The annotator is pure: it reads from the shared details map rather than
+// fetching from the store, so fetch cost is paid once upstream in
+// fetchIssueDetails.
+func newBlockerAnnotator(details map[string]model.IssueDetail) annotation.Annotator {
+	// [LAW:dataflow-not-control-flow] Dependency lookup runs for every issue;
+	// empty blockers list means no annotations, not a skipped operation.
+	return func(_ context.Context, issue model.Issue) ([]annotation.Annotation, error) {
+		detail := details[issue.ID]
 		// Collect open blockers and sort by ID for stable annotation ordering.
 		var openDeps []model.Issue
 		for _, dep := range detail.DependsOn {
@@ -174,12 +191,9 @@ func isRequiredFieldSet(value any) bool {
 // [LAW:dataflow-not-control-flow] Every row flows through the same lookup;
 // variability lives in whether the parent exists and its type, not in whether
 // the enrichment step runs. (links-agent-epic-model-uew.2)
-func enrichWithParentEpic(ctx context.Context, st *store.Store, rows []annotation.AnnotatedIssue) error {
+func enrichWithParentEpic(rows []annotation.AnnotatedIssue, details map[string]model.IssueDetail) {
 	for i := range rows {
-		detail, err := st.GetIssueDetail(ctx, rows[i].ID)
-		if err != nil {
-			return err
-		}
+		detail := details[rows[i].ID]
 		if detail.Parent == nil || detail.Parent.IssueType != "epic" {
 			continue
 		}
@@ -188,7 +202,6 @@ func enrichWithParentEpic(ctx context.Context, st *store.Store, rows []annotatio
 			Title: detail.Parent.Title,
 		}
 	}
-	return nil
 }
 
 // sortByReadiness places issues without blocking annotations first,
