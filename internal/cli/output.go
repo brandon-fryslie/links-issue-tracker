@@ -210,9 +210,11 @@ func parseColumns(input string) []string {
 	return splitCSV(strings.ToLower(input))
 }
 
-// indentLines prefixes every line of s with prefix, preserving line breaks.
+// indentLines prefixes every line of s with prefix, preserving internal line
+// breaks. Trailing newlines are stripped so callers that append their own "\n"
+// (e.g., via Fprintf) do not produce a stray prefix-only line at the end.
 func indentLines(s, prefix string) string {
-	lines := strings.Split(s, "\n")
+	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
 	for i, line := range lines {
 		lines[i] = prefix + line
 	}
