@@ -732,6 +732,9 @@ func runReady(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 	if err != nil {
 		return err
 	}
+	if err := enrichWithParentEpic(ctx, ap.Store, annotated); err != nil {
+		return err
+	}
 	sortByReadiness(annotated)
 	annotated = applyLimit(annotated, *limit)
 	columns := parseColumns(*columnsExpr)

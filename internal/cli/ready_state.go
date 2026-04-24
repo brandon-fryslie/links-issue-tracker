@@ -168,6 +168,29 @@ func isRequiredFieldSet(value any) bool {
 	}
 }
 
+// enrichWithParentEpic populates ParentEpic on every row whose parent is
+// type=epic. Rows with no parent or a non-epic parent get nil — the omitempty
+// tag drops them from JSON output and the renderer skips them.
+// [LAW:dataflow-not-control-flow] Every row flows through the same lookup;
+// variability lives in whether the parent exists and its type, not in whether
+// the enrichment step runs. (links-agent-epic-model-uew.2)
+func enrichWithParentEpic(ctx context.Context, st *store.Store, rows []annotation.AnnotatedIssue) error {
+	for i := range rows {
+		detail, err := st.GetIssueDetail(ctx, rows[i].ID)
+		if err != nil {
+			return err
+		}
+		if detail.Parent == nil || detail.Parent.IssueType != "epic" {
+			continue
+		}
+		rows[i].ParentEpic = &annotation.ParentEpicRef{
+			ID:    detail.Parent.ID,
+			Title: detail.Parent.Title,
+		}
+	}
+	return nil
+}
+
 // sortByReadiness places issues without blocking annotations first,
 // preserving the original store ordering within each group.
 func sortByReadiness(issues []annotation.AnnotatedIssue) {
@@ -184,7 +207,6 @@ func applyLimit(issues []annotation.AnnotatedIssue, limit int) []annotation.Anno
 	}
 	return issues[:limit]
 }
-
 
 // readyPreamble is printed before the ready list to give agents context about
 // how to interpret and act on the backlog.
@@ -307,6 +329,11 @@ func printInlineDeps(w io.Writer, entry annotation.AnnotatedIssue, unblocksMap m
 	deps := dependencyIDs(entry.Annotations)
 	unblocks := unblocksMap[entry.ID]
 
+	if entry.ParentEpic != nil {
+		if _, err := fmt.Fprintf(w, "%sepic: %s  %s\n", indent, entry.ParentEpic.ID, entry.ParentEpic.Title); err != nil {
+			return err
+		}
+	}
 	if len(deps) > 0 {
 		if _, err := fmt.Fprintf(w, "%sdepends on: %s\n", indent, strings.Join(deps, ", ")); err != nil {
 			return err
@@ -383,7 +410,6 @@ func printBlockedSummary(w io.Writer, blocked []annotation.AnnotatedIssue) error
 	return nil
 }
 
-
 // printRankInversions prints a count-only warning when dependencies are ranked
 // below the issues they block, with instructions to fix.
 func printRankInversions(w io.Writer, issues []annotation.AnnotatedIssue) error {
@@ -401,4 +427,3 @@ func printRankInversions(w io.Writer, issues []annotation.AnnotatedIssue) error 
 	_, err := fmt.Fprintf(w, "\nWarning: %d rank inversion(s) — dependencies ranked below their dependents. Run `lit doctor --fix` to repair. <agent-instructions>Run it yourself, do NOT ask the user — it is idempotent and safe.</agent-instructions>\n", count)
 	return err
 }
-
