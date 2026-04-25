@@ -1288,6 +1288,36 @@ func TestArchiveReturnsHydratedIssue(t *testing.T) {
 	}
 }
 
+func TestArchivedEpicProgressIncludesArchivedChildren(t *testing.T) {
+	ctx := context.Background()
+	st := openIssueStore(t, ctx)
+	epic, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Archived snapshot", Topic: "life", IssueType: "epic", Priority: 1})
+	if err != nil {
+		t.Fatalf("CreateIssue(epic) error = %v", err)
+	}
+	child, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Archived child", Topic: "life", IssueType: "task", Priority: 2, ParentID: epic.ID})
+	if err != nil {
+		t.Fatalf("CreateIssue(child) error = %v", err)
+	}
+	if _, err := st.TransitionIssue(ctx, TransitionIssueInput{IssueID: child.ID, Action: "archive", CreatedBy: "tester"}); err != nil {
+		t.Fatalf("TransitionIssue(archive child) error = %v", err)
+	}
+	activeEpic, err := st.GetIssue(ctx, epic.ID)
+	if err != nil {
+		t.Fatalf("GetIssue(active epic) error = %v", err)
+	}
+	if progress := activeEpic.Progress(); progress.Total != 0 {
+		t.Fatalf("active epic Progress() = %#v, want archived child excluded", progress)
+	}
+	archivedEpic, err := st.TransitionIssue(ctx, TransitionIssueInput{IssueID: epic.ID, Action: "archive", CreatedBy: "tester"})
+	if err != nil {
+		t.Fatalf("TransitionIssue(archive epic) error = %v", err)
+	}
+	if progress := archivedEpic.Progress(); progress.Total != 1 || progress.Open != 1 {
+		t.Fatalf("archived epic Progress() = %#v, want archived child snapshot included", progress)
+	}
+}
+
 func TestReopenClearsClosedAt(t *testing.T) {
 	ctx := context.Background()
 	st := openIssueStore(t, ctx)

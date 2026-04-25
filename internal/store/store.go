@@ -896,7 +896,11 @@ func (s *Store) transitionIssueOnce(ctx context.Context, in TransitionIssueInput
 	if err := s.commitWorkingSet(ctx, "transition issue"); err != nil {
 		return model.Issue{}, err
 	}
-	return s.GetIssue(ctx, issue.ID)
+	reloaded, err := s.GetIssue(ctx, issue.ID)
+	if err != nil {
+		return model.Issue{}, fmt.Errorf("%s committed but post-write hydration failed: %w", action, err)
+	}
+	return reloaded, nil
 }
 
 func (s *Store) writeStatusTransition(ctx context.Context, issue model.Issue, actor string, reason string, action string) (model.Issue, error) {
@@ -1491,10 +1495,13 @@ func (s *Store) lifecycleChildrenByEpicIDs(ctx context.Context, epicIDs []string
 		placeholders = append(placeholders, "?")
 		args = append(args, epicID)
 	}
+	// [LAW:one-source-of-truth] Active containers derive progress from active children; archived/deleted containers keep a full child snapshot so their lifecycle state does not collapse to empty/open.
 	rows, err := s.db.QueryContext(ctx, `SELECT r.dst_id, i.id, i.title, i.description, i.status, i.priority, i.issue_type, i.topic, i.assignee, i.item_rank, i.created_at, i.updated_at, i.closed_at, i.archived_at, i.deleted_at
 		FROM relations r
 		JOIN issues i ON i.id = r.src_id
-		WHERE r.dst_id IN (`+strings.Join(placeholders, ", ")+`) AND r.type = 'parent-child' AND i.archived_at IS NULL AND i.deleted_at IS NULL
+		JOIN issues p ON p.id = r.dst_id
+		WHERE r.dst_id IN (`+strings.Join(placeholders, ", ")+`) AND r.type = 'parent-child'
+			AND (p.archived_at IS NOT NULL OR p.deleted_at IS NOT NULL OR (i.archived_at IS NULL AND i.deleted_at IS NULL))
 		ORDER BY r.dst_id ASC, i.item_rank ASC`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("load lifecycle children: %w", err)

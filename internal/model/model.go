@@ -108,7 +108,7 @@ func (i Issue) Apply(action ActionName, actor string, reason string) (Issue, err
 	if err != nil {
 		return Issue{}, err
 	}
-	i.lifecycle = next
+	i.replaceLifecycle(next)
 	return i, nil
 }
 
@@ -148,12 +148,17 @@ func HydrateOwnedStatus(issue Issue, view StatusView) (Issue, error) {
 	if err != nil {
 		return Issue{}, err
 	}
-	issue.lifecycle = lifecycle.OwnedStatus{
+	issue.replaceLifecycle(lifecycle.OwnedStatus{
 		Value:    state,
 		Assignee: view.Assignee,
 		ClosedAt: cloneTime(view.ClosedAt),
-	}
+	})
 	return issue, nil
+}
+
+func (i *Issue) replaceLifecycle(next lifecycle.Lifecycle) {
+	// [LAW:single-enforcer] Lifecycle replacement is centralized inside model so callers cannot grow parallel mutation paths.
+	i.lifecycle = next
 }
 
 // HydrateAllOf composes child issue lifecycles into a non-actionable container.
@@ -167,7 +172,7 @@ func HydrateAllOf(issue Issue, children []Issue) (Issue, error) {
 		}
 		members = append(members, lifecycle)
 	}
-	issue.lifecycle = lifecycle.AllOf{Members: members}
+	issue.replaceLifecycle(lifecycle.AllOf{Members: members})
 	return issue, nil
 }
 
@@ -279,7 +284,7 @@ func (i *Issue) UnmarshalJSON(data []byte) error {
 	switch {
 	case IsContainerType(payload.IssueType):
 		// [LAW:single-enforcer] JSON cannot synthesize derived container lifecycle; store hydration is the only boundary that may attach child state.
-		i.lifecycle = needsStoreHydration{issueID: i.ID}
+		i.replaceLifecycle(needsStoreHydration{issueID: i.ID})
 	case payload.Status != nil:
 		hydrated, err := HydrateOwnedStatus(*i, StatusView{
 			Value:    *payload.Status,
