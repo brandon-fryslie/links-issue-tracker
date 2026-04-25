@@ -41,6 +41,50 @@ func printIssueLines(w io.Writer, issues []model.Issue, columns []string) error 
 	return nil
 }
 
+func printEpicDetail(w io.Writer, detail model.EpicDetail) error {
+	epic := detail.Epic
+	if _, err := fmt.Fprintf(w, "%s\n%s\n\ntype: epic\ntopic: %s\npriority: %d\nlabels: %s\narchived: %s\ndeleted: %s\n",
+		epic.ID, epic.Title, epic.Topic, epic.Priority,
+		emptyDash(strings.Join(epic.Labels, ", ")),
+		formatOptionalTime(epic.ArchivedAt), formatOptionalTime(epic.DeletedAt)); err != nil {
+		return err
+	}
+	progress := detail.Progress()
+	if _, err := fmt.Fprintf(w, "progress: %d/%d closed (open: %d, in_progress: %d, closed: %d)\n",
+		progress.Closed, progress.Total, progress.Open, progress.InProgress, progress.Closed); err != nil {
+		return err
+	}
+	if epic.Description != "" {
+		if _, err := fmt.Fprintf(w, "\ndescription:\n%s\n", epic.Description); err != nil {
+			return err
+		}
+	}
+	if err := printIssueGroup(w, "children", detail.Children); err != nil {
+		return err
+	}
+	if len(detail.Comments) > 0 {
+		if _, err := fmt.Fprintln(w, "\ncomments:"); err != nil {
+			return err
+		}
+		for _, c := range detail.Comments {
+			if _, err := fmt.Fprintf(w, "- [%s] %s\n", c.CreatedBy, strings.ReplaceAll(c.Body, "\n", "\\n")); err != nil {
+				return err
+			}
+		}
+	}
+	if len(detail.History) > 0 {
+		if _, err := fmt.Fprintln(w, "\nhistory:"); err != nil {
+			return err
+		}
+		for _, event := range detail.History {
+			if _, err := fmt.Fprintf(w, "- [%s] %s %s (%s -> %s)\n", event.CreatedBy, event.Action, strings.ReplaceAll(event.Reason, "\n", "\\n"), emptyDash(event.FromStatus), emptyDash(event.ToStatus)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 func printIssueDetail(w io.Writer, detail model.IssueDetail) error {
 	issue := detail.Issue
 	if _, err := fmt.Fprintf(w, "%s\n%s\n\nstatus: %s\ntype: %s\ntopic: %s\npriority: %d\nassignee: %s\nlabels: %s\narchived: %s\ndeleted: %s\n", issue.ID, issue.Title, issue.Status, issue.IssueType, issue.Topic, issue.Priority, emptyDash(issue.Assignee), emptyDash(strings.Join(issue.Labels, ", ")), formatOptionalTime(issue.ArchivedAt), formatOptionalTime(issue.DeletedAt)); err != nil {

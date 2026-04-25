@@ -25,10 +25,10 @@ type SetParentInput struct {
 }
 
 func (s *Store) AddRelation(ctx context.Context, in AddRelationInput) (model.Relation, error) {
-	if _, err := s.GetIssue(ctx, in.SrcID); err != nil {
+	if _, err := s.getIssueRaw(ctx, in.SrcID); err != nil {
 		return model.Relation{}, err
 	}
-	if _, err := s.GetIssue(ctx, in.DstID); err != nil {
+	if _, err := s.getIssueRaw(ctx, in.DstID); err != nil {
 		return model.Relation{}, err
 	}
 	relType := strings.TrimSpace(in.Type)
@@ -105,7 +105,7 @@ func (s *Store) RemoveRelation(ctx context.Context, srcID, dstID, relType string
 }
 
 func (s *Store) ListRelationsForIssue(ctx context.Context, issueID string, relType string) ([]model.Relation, error) {
-	if _, err := s.GetIssue(ctx, issueID); err != nil {
+	if _, err := s.getIssueRaw(ctx, issueID); err != nil {
 		return nil, err
 	}
 	rels, err := s.listRelations(ctx, issueID)
@@ -132,10 +132,10 @@ func (s *Store) SetParent(ctx context.Context, in SetParentInput) (model.Relatio
 	if in.ChildID == in.ParentID {
 		return model.Relation{}, errors.New("child and parent cannot be the same issue")
 	}
-	if _, err := s.GetIssue(ctx, in.ChildID); err != nil {
+	if _, err := s.getIssueRaw(ctx, in.ChildID); err != nil {
 		return model.Relation{}, err
 	}
-	if _, err := s.GetIssue(ctx, in.ParentID); err != nil {
+	if _, err := s.getIssueRaw(ctx, in.ParentID); err != nil {
 		return model.Relation{}, err
 	}
 	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
@@ -174,7 +174,7 @@ func (s *Store) SetParent(ctx context.Context, in SetParentInput) (model.Relatio
 }
 
 func (s *Store) ClearParent(ctx context.Context, childID string) error {
-	if _, err := s.GetIssue(ctx, childID); err != nil {
+	if _, err := s.getIssueRaw(ctx, childID); err != nil {
 		return err
 	}
 	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
@@ -205,7 +205,7 @@ func (s *Store) ClearParent(ctx context.Context, childID string) error {
 }
 
 func (s *Store) ListChildren(ctx context.Context, parentID string) ([]model.Issue, error) {
-	if _, err := s.GetIssue(ctx, parentID); err != nil {
+	if _, err := s.getIssueRaw(ctx, parentID); err != nil {
 		return nil, err
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT i.id, i.title, i.description, i.status, i.priority, i.issue_type, i.topic, i.assignee, i.item_rank, i.created_at, i.updated_at, i.closed_at, i.archived_at, i.deleted_at

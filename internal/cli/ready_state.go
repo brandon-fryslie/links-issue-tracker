@@ -193,13 +193,13 @@ func isRequiredFieldSet(value any) bool {
 // the enrichment step runs. (links-agent-epic-model-uew.2)
 func enrichWithParentEpic(rows []annotation.AnnotatedIssue, details map[string]model.IssueDetail) {
 	for i := range rows {
-		detail := details[rows[i].ID]
-		if detail.Parent == nil || detail.Parent.IssueType != "epic" {
+		parent := details[rows[i].ID].Parent
+		if parent == nil {
 			continue
 		}
 		rows[i].ParentEpic = &annotation.ParentEpicRef{
-			ID:    detail.Parent.ID,
-			Title: detail.Parent.Title,
+			ID:    parent.ID,
+			Title: parent.Title,
 		}
 	}
 }
@@ -215,8 +215,7 @@ func enrichWithParentEpic(rows []annotation.AnnotatedIssue, details map[string]m
 // whether some rows skip the sort. (links-agent-epic-model-uew.4)
 func sortByCompositeRank(rows []annotation.AnnotatedIssue, details map[string]model.IssueDetail) {
 	epicRank := func(issue model.Issue) string {
-		parent := details[issue.ID].Parent
-		if parent != nil && parent.IssueType == "epic" {
+		if parent := details[issue.ID].Parent; parent != nil {
 			return parent.Rank
 		}
 		return issue.Rank

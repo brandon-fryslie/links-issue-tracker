@@ -61,7 +61,12 @@ type HealthReport struct {
 }
 
 func (s *Store) Export(ctx context.Context) (model.Export, error) {
-	issues, err := s.ListIssues(ctx, ListIssuesFilter{Limit: 0, IncludeArchived: true, IncludeDeleted: true})
+	// Export must include every row regardless of issue_type; ListIssues
+	// contractually excludes epics, so use the raw row lister here. The
+	// wire format keeps a single Issues field that mixes leaves and epics
+	// distinguished by issue_type, for backward compat with existing sync
+	// readers. (links-agent-epic-model-uew.5)
+	issues, err := s.listAllIssueRows(ctx)
 	if err != nil {
 		return model.Export{}, err
 	}
@@ -253,7 +258,7 @@ func (s *Store) ImportIssue(ctx context.Context, in ImportIssue) error {
 }
 
 func (s *Store) ImportComment(ctx context.Context, in ImportComment) error {
-	if _, err := s.GetIssue(ctx, in.IssueID); err != nil {
+	if _, err := s.getIssueRaw(ctx, in.IssueID); err != nil {
 		return err
 	}
 	if strings.TrimSpace(in.ID) == "" {
@@ -297,10 +302,10 @@ func (s *Store) ImportComment(ctx context.Context, in ImportComment) error {
 }
 
 func (s *Store) ImportRelation(ctx context.Context, in ImportRelation) error {
-	if _, err := s.GetIssue(ctx, in.SrcID); err != nil {
+	if _, err := s.getIssueRaw(ctx, in.SrcID); err != nil {
 		return err
 	}
-	if _, err := s.GetIssue(ctx, in.DstID); err != nil {
+	if _, err := s.getIssueRaw(ctx, in.DstID); err != nil {
 		return err
 	}
 	relType := strings.TrimSpace(in.Type)
@@ -346,7 +351,7 @@ func (s *Store) ImportRelation(ctx context.Context, in ImportRelation) error {
 }
 
 func (s *Store) ImportLabel(ctx context.Context, in ImportLabel) error {
-	if _, err := s.GetIssue(ctx, in.IssueID); err != nil {
+	if _, err := s.getIssueRaw(ctx, in.IssueID); err != nil {
 		return err
 	}
 	label, err := normalizeLabel(in.Name)

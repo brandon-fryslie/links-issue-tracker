@@ -2,8 +2,14 @@ package model
 
 import "time"
 
-// [LAW:one-type-per-behavior] Issues and epics are one record type with
-// issue_type carrying the behavior distinction.
+// Issue is a leaf work item — something an agent can claim, work, and
+// transition. IssueType discriminates *kinds* of leaves (task, feature,
+// bug, chore). Epics live in their own type; see model.Epic.
+//
+// [LAW:one-type-per-behavior] Leaf issues all have identical lifecycle
+// operations (status transitions, assignee, close), so they are one type
+// with a kind discriminator. Epics, which lack those operations entirely,
+// are a separate type rather than a discriminator branch on Issue.
 type Issue struct {
 	ID          string     `json:"id"`
 	Title       string     `json:"title"`
@@ -64,8 +70,11 @@ type IssueDetail struct {
 	DependsOn []Issue        `json:"depends_on"`
 	Related   []Issue        `json:"related"`
 	Blocks    []Issue        `json:"blocks"`
-	Parent    *Issue         `json:"parent,omitempty"`
-	History   []IssueHistory `json:"history"`
+	// Parent is the containing epic, if any. Leaf-on-leaf parent relations
+	// (rare and pathological) are not surfaced here.
+	// (links-agent-epic-model-uew.5)
+	Parent  *Epic          `json:"parent,omitempty"`
+	History []IssueHistory `json:"history"`
 }
 
 type Export struct {

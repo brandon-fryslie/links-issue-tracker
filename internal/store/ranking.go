@@ -12,7 +12,7 @@ import (
 )
 
 func (s *Store) RankToTop(ctx context.Context, issueID string) error {
-	if _, err := s.GetIssue(ctx, issueID); err != nil {
+	if _, err := s.getIssueRaw(ctx, issueID); err != nil {
 		return err
 	}
 	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
@@ -51,7 +51,7 @@ func (s *Store) RankToTop(ctx context.Context, issueID string) error {
 
 // RankToBottom moves an issue to rank below all other issues.
 func (s *Store) RankToBottom(ctx context.Context, issueID string) error {
-	if _, err := s.GetIssue(ctx, issueID); err != nil {
+	if _, err := s.getIssueRaw(ctx, issueID); err != nil {
 		return err
 	}
 	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
@@ -93,11 +93,11 @@ func (s *Store) RankAbove(ctx context.Context, issueID, targetID string) error {
 	if issueID == targetID {
 		return errors.New("cannot rank an issue relative to itself")
 	}
-	target, err := s.GetIssue(ctx, targetID)
+	target, err := s.getIssueRaw(ctx, targetID)
 	if err != nil {
 		return err
 	}
-	if _, err := s.GetIssue(ctx, issueID); err != nil {
+	if _, err := s.getIssueRaw(ctx, issueID); err != nil {
 		return err
 	}
 	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
@@ -142,11 +142,11 @@ func (s *Store) RankBelow(ctx context.Context, issueID, targetID string) error {
 	if issueID == targetID {
 		return errors.New("cannot rank an issue relative to itself")
 	}
-	target, err := s.GetIssue(ctx, targetID)
+	target, err := s.getIssueRaw(ctx, targetID)
 	if err != nil {
 		return err
 	}
-	if _, err := s.GetIssue(ctx, issueID); err != nil {
+	if _, err := s.getIssueRaw(ctx, issueID); err != nil {
 		return err
 	}
 	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)

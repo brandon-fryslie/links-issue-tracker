@@ -391,9 +391,15 @@ func (s *Store) createIssueOnce(ctx context.Context, in CreateIssueInput) (model
 	return issue, nil
 }
 
+// ListIssues returns leaf issues matching the filter. Epics are never
+// returned — they are a separate type (model.Epic) and have their own
+// list API (ListEpics). This is a contract of the method, not a per-call
+// option, so it cannot be turned off.
+//
+// [LAW:single-enforcer] (links-agent-epic-model-uew.5)
 func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]model.Issue, error) {
 	query := `SELECT i.id, i.title, i.description, i.status, i.priority, i.issue_type, i.topic, i.assignee, i.item_rank, i.created_at, i.updated_at, i.closed_at, i.archived_at, i.deleted_at FROM issues i`
-	var where []string
+	where := []string{"i.issue_type != 'epic'"}
 	var args []any
 	if !filter.IncludeArchived {
 		where = append(where, "i.archived_at IS NULL")
@@ -576,29 +582,27 @@ func (s *Store) GetIssueDetail(ctx context.Context, id string) (model.IssueDetai
 		case "blocks":
 			// blocks convention: src_id=dependent, dst_id=dependency.
 			if rel.SrcID == id {
-				// This issue is the dependent; DstID is what it depends on.
-				dep, err := s.GetIssue(ctx, rel.DstID)
-				if err == nil {
+				dep, err := s.getIssueRaw(ctx, rel.DstID)
+				if err == nil && dep.IssueType != "epic" {
 					detail.DependsOn = append(detail.DependsOn, dep)
 				}
 			}
 			if rel.DstID == id {
-				// This issue is the dependency; SrcID depends on it.
-				dependent, err := s.GetIssue(ctx, rel.SrcID)
-				if err == nil {
+				dependent, err := s.getIssueRaw(ctx, rel.SrcID)
+				if err == nil && dependent.IssueType != "epic" {
 					detail.Blocks = append(detail.Blocks, dependent)
 				}
 			}
 		case "parent-child":
 			if rel.SrcID == id {
-				parent, err := s.GetIssue(ctx, rel.DstID)
+				epic, err := s.GetEpic(ctx, rel.DstID)
 				if err == nil {
-					detail.Parent = &parent
+					detail.Parent = &epic
 				}
 			}
 			if rel.DstID == id {
-				child, err := s.GetIssue(ctx, rel.SrcID)
-				if err == nil {
+				child, err := s.getIssueRaw(ctx, rel.SrcID)
+				if err == nil && child.IssueType != "epic" {
 					detail.Children = append(detail.Children, child)
 				}
 			}
@@ -607,8 +611,8 @@ func (s *Store) GetIssueDetail(ctx context.Context, id string) (model.IssueDetai
 			if otherID == id {
 				otherID = rel.DstID
 			}
-			related, err := s.GetIssue(ctx, otherID)
-			if err == nil {
+			related, err := s.getIssueRaw(ctx, otherID)
+			if err == nil && related.IssueType != "epic" {
 				detail.Related = append(detail.Related, related)
 			}
 		}
@@ -637,17 +641,57 @@ func (s *Store) GetIssueDetail(ctx context.Context, id string) (model.IssueDetai
 	}
 	detail.Blocks = labeled
 	sortIssuesByRank(detail.Blocks)
-	if detail.Parent != nil {
-		parentIssues, err := s.attachLabels(ctx, []model.Issue{*detail.Parent})
-		if err != nil {
-			return model.IssueDetail{}, err
-		}
-		detail.Parent = &parentIssues[0]
-	}
+	// Parent labels were already attached by GetEpic.
 	return detail, nil
 }
 
+// listAllIssueRows returns every row in the issues table including epics,
+// archived, and deleted rows. Used by Export (which needs a complete
+// snapshot of persisted state). Not part of the public API — public list
+// methods are typed (ListIssues for leaves, ListEpics for epics).
+func (s *Store) listAllIssueRows(ctx context.Context) ([]model.Issue, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, title, description, status, priority, issue_type, topic, assignee, item_rank, created_at, updated_at, closed_at, archived_at, deleted_at FROM issues`)
+	if err != nil {
+		return nil, fmt.Errorf("list all issue rows: %w", err)
+	}
+	defer rows.Close()
+	var issues []model.Issue
+	for rows.Next() {
+		issue, err := scanIssue(rows)
+		if err != nil {
+			return nil, err
+		}
+		issues = append(issues, issue)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return s.attachLabels(ctx, issues)
+}
+
+// GetIssue returns the leaf issue identified by id. NotFoundError is
+// returned if no row exists, or if the row exists but is an epic — epics
+// are a separate type (model.Epic) with no lifecycle status, so they
+// cannot be returned as a model.Issue. Use GetEpic for epic IDs.
+//
+// [LAW:one-type-per-behavior] (links-agent-epic-model-uew.5)
 func (s *Store) GetIssue(ctx context.Context, id string) (model.Issue, error) {
+	issue, err := s.getIssueRaw(ctx, id)
+	if err != nil {
+		return model.Issue{}, err
+	}
+	if issue.IssueType == "epic" {
+		return model.Issue{}, NotFoundError{Entity: "issue", ID: id}
+	}
+	return issue, nil
+}
+
+// getIssueRaw fetches any row from issues regardless of issue_type. Used
+// internally by code that needs to navigate by row id without committing
+// to leaf-or-epic semantics (existence checks, parent relations whose
+// other side may be either type).
+func (s *Store) getIssueRaw(ctx context.Context, id string) (model.Issue, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id, title, description, status, priority, issue_type, topic, assignee, item_rank, created_at, updated_at, closed_at, archived_at, deleted_at FROM issues WHERE id = ?`, id)
 	issue, err := scanIssue(row)
 	if err != nil {
@@ -756,7 +800,7 @@ func (s *Store) AddComment(ctx context.Context, in AddCommentInput) (model.Comme
 }
 
 func (s *Store) addCommentOnce(ctx context.Context, in AddCommentInput) (model.Comment, error) {
-	if _, err := s.GetIssue(ctx, in.IssueID); err != nil {
+	if _, err := s.getIssueRaw(ctx, in.IssueID); err != nil {
 		return model.Comment{}, err
 	}
 	body := strings.TrimSpace(in.Body)
@@ -807,6 +851,13 @@ func (s *Store) TransitionIssue(ctx context.Context, in TransitionIssueInput) (m
 }
 
 func (s *Store) transitionIssueOnce(ctx context.Context, in TransitionIssueInput) (model.Issue, error) {
+	// [LAW:one-type-per-behavior] Epics have no lifecycle status — a clear
+	// error here beats a misleading "issue not found" from GetIssue. Archive
+	// and delete still apply to epics; those go through other code paths.
+	// (links-agent-epic-model-uew.5)
+	if issueType, peekErr := s.PeekIssueType(ctx, in.IssueID); peekErr == nil && issueType == "epic" {
+		return model.Issue{}, fmt.Errorf("cannot %s %s: epics have no lifecycle status (status is derived from children)", in.Action, in.IssueID)
+	}
 	issue, err := s.GetIssue(ctx, in.IssueID)
 	if err != nil {
 		return model.Issue{}, err

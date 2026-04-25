@@ -706,17 +706,13 @@ func runReady(ctx context.Context, stdout io.Writer, ap *app.App, args []string)
 	// [LAW:one-source-of-truth] rank is the canonical ordering; no explicit SortBy
 	// needed — the store default is item_rank ASC.
 	issues, err := ap.Store.ListIssues(ctx, store.ListIssuesFilter{
-		Statuses: []string{"open", "in_progress"},
-		// [LAW:dataflow-not-control-flow] Epics never enter the ready pipeline;
-		// agents can't `lit start` a container, so surfacing one would force
-		// prose-driven drill rules to translate epic->child. Filter at the data
-		// boundary instead. (links-agent-epic-model-uew.1)
-		ExcludeIssueTypes: []string{"epic"},
-		Assignees:         toSlice(strings.TrimSpace(*assignee)),
-		IncludeArchived:   false,
-		IncludeDeleted:    false,
-		Limit:             0,
+		Statuses:        []string{"open", "in_progress"},
+		Assignees:       toSlice(strings.TrimSpace(*assignee)),
+		IncludeArchived: false,
+		IncludeDeleted:  false,
+		Limit:           0,
 	})
+	// ListIssues now contractually excludes epics (links-agent-epic-model-uew.5).
 	if err != nil {
 		return err
 	}
@@ -763,7 +759,24 @@ func runShow(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	if fs.NArg() != 0 {
 		return errors.New("usage: lit show <id>")
 	}
-	detail, err := ap.Store.GetIssueDetail(ctx, positional[0])
+	id := positional[0]
+	issueType, err := ap.Store.PeekIssueType(ctx, id)
+	if err != nil {
+		return err
+	}
+	if issueType == "epic" {
+		// [LAW:one-type-per-behavior] Epics are a distinct type — no status,
+		// no transitions — so they render via a different code path with a
+		// different shape. (links-agent-epic-model-uew.5)
+		detail, err := ap.Store.GetEpicDetail(ctx, id)
+		if err != nil {
+			return err
+		}
+		return printValue(stdout, detail, *jsonOut, func(w io.Writer, v any) error {
+			return printEpicDetail(w, v.(model.EpicDetail))
+		})
+	}
+	detail, err := ap.Store.GetIssueDetail(ctx, id)
 	if err != nil {
 		return err
 	}

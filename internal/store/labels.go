@@ -17,7 +17,7 @@ type AddLabelInput struct {
 }
 
 func (s *Store) AddLabel(ctx context.Context, in AddLabelInput) ([]string, error) {
-	if _, err := s.GetIssue(ctx, in.IssueID); err != nil {
+	if _, err := s.getIssueRaw(ctx, in.IssueID); err != nil {
 		return nil, err
 	}
 	label, err := normalizeLabel(in.Name)
@@ -54,7 +54,7 @@ func (s *Store) AddLabel(ctx context.Context, in AddLabelInput) ([]string, error
 }
 
 func (s *Store) RemoveLabel(ctx context.Context, issueID, labelName string) ([]string, error) {
-	if _, err := s.GetIssue(ctx, issueID); err != nil {
+	if _, err := s.getIssueRaw(ctx, issueID); err != nil {
 		return nil, err
 	}
 	label, err := normalizeLabel(labelName)
@@ -89,7 +89,7 @@ func (s *Store) RemoveLabel(ctx context.Context, issueID, labelName string) ([]s
 }
 
 func (s *Store) ReplaceLabels(ctx context.Context, issueID string, labels []string, createdBy string) error {
-	if _, err := s.GetIssue(ctx, issueID); err != nil {
+	if _, err := s.getIssueRaw(ctx, issueID); err != nil {
 		return err
 	}
 	normalized, err := canonicalizeLabels(labels)
