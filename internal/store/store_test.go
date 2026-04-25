@@ -1176,6 +1176,12 @@ func TestGetIssueDetailRelationSidesAreHydrated(t *testing.T) {
 	if len(detail.Blocks) != 1 || detail.Blocks[0].Capabilities().Status == nil {
 		t.Fatalf("Blocks = %#v, want hydrated leaf", detail.Blocks)
 	}
+	if len(detail.DependsOn) > 0 && detail.DependsOn[0].Labels == nil {
+		t.Fatalf("DependsOn[0].Labels = nil, want hydrated label slice")
+	}
+	if detail.Parent != nil && detail.Parent.Labels == nil {
+		t.Fatalf("Parent.Labels = nil, want hydrated label slice")
+	}
 }
 
 func TestEpicAsDependencyDerivedState(t *testing.T) {

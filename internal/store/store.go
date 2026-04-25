@@ -619,37 +619,10 @@ func (s *Store) GetIssueDetail(ctx context.Context, id string) (model.IssueDetai
 			}
 		}
 	}
-	labeled, err := s.attachLabels(ctx, detail.Children)
-	if err != nil {
-		return model.IssueDetail{}, err
-	}
-	detail.Children = labeled
 	sortIssuesByRank(detail.Children)
-	labeled, err = s.attachLabels(ctx, detail.DependsOn)
-	if err != nil {
-		return model.IssueDetail{}, err
-	}
-	detail.DependsOn = labeled
 	sortIssuesByRank(detail.DependsOn)
-	labeled, err = s.attachLabels(ctx, detail.Related)
-	if err != nil {
-		return model.IssueDetail{}, err
-	}
-	detail.Related = labeled
 	sortIssuesByRank(detail.Related)
-	labeled, err = s.attachLabels(ctx, detail.Blocks)
-	if err != nil {
-		return model.IssueDetail{}, err
-	}
-	detail.Blocks = labeled
 	sortIssuesByRank(detail.Blocks)
-	if detail.Parent != nil {
-		parentIssues, err := s.attachLabels(ctx, []model.Issue{*detail.Parent})
-		if err != nil {
-			return model.IssueDetail{}, err
-		}
-		detail.Parent = &parentIssues[0]
-	}
 	return detail, nil
 }
 
@@ -1531,27 +1504,6 @@ func (s *Store) lifecycleChildrenByEpicIDs(ctx context.Context, epicIDs []string
 		out[epicID] = hydrated
 	}
 	return out, nil
-}
-
-func (s *Store) attachLabels(ctx context.Context, issues []model.Issue) ([]model.Issue, error) {
-	if len(issues) == 0 {
-		return issues, nil
-	}
-	issueIDs := make([]string, 0, len(issues))
-	for _, issue := range issues {
-		issueIDs = append(issueIDs, issue.ID)
-	}
-	labelMap, err := s.loadLabelsByIssueIDs(ctx, issueIDs)
-	if err != nil {
-		return nil, err
-	}
-	for index := range issues {
-		issues[index].Labels = labelMap[issues[index].ID]
-		if issues[index].Labels == nil {
-			issues[index].Labels = []string{}
-		}
-	}
-	return issues, nil
 }
 
 func (s *Store) loadLabelsByIssueIDs(ctx context.Context, issueIDs []string) (map[string][]string, error) {
