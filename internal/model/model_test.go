@@ -51,6 +51,9 @@ func TestIssueJSONRoundTripEpicRequiresStoreHydration(t *testing.T) {
 	if decoded.IssueType != "epic" {
 		t.Fatalf("IssueType = %q, want epic", decoded.IssueType)
 	}
+	if !decoded.pendingHydration {
+		t.Fatalf("decoded epic pendingHydration = false, want true")
+	}
 	if decoded.Capabilities().Status != nil {
 		t.Fatalf("Capabilities().Status = %#v, want nil", decoded.Capabilities().Status)
 	}
@@ -102,30 +105,41 @@ func TestIssueJSONRejectsLeafWithoutStatus(t *testing.T) {
 	}
 }
 
-func TestUnhydratedIssueLifecycleMethodsReturnZeroValues(t *testing.T) {
-	issue := Issue{ID: "task-1", IssueType: "task"}
+func TestNilLifecycleIssueLifecycleMethodsPanic(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("State() on nil-lifecycle Issue did not panic")
+		}
+	}()
+	_ = Issue{ID: "task-1", IssueType: "task"}.State()
+}
+
+func TestNeedsStoreHydrationLifecycleMethodsReturnZero(t *testing.T) {
+	var issue Issue
+	issue.ID = "epic-1"
+	issue.IssueType = "epic"
+	issue.pendingHydration = true
 	if issue.State() != "" {
-		t.Fatalf("State() = %q, want zero state", issue.State())
+		t.Fatalf("State() = %q, want zero", issue.State())
 	}
 	if issue.Progress() != (Progress{}) {
-		t.Fatalf("Progress() = %#v, want zero progress", issue.Progress())
+		t.Fatalf("Progress() = %#v, want zero", issue.Progress())
 	}
 	if issue.Capabilities() != (Capabilities{}) {
-		t.Fatalf("Capabilities() = %#v, want empty capabilities", issue.Capabilities())
+		t.Fatalf("Capabilities() = %#v, want empty", issue.Capabilities())
 	}
 	if actions := issue.AvailableActions(); actions != nil {
 		t.Fatalf("AvailableActions() = %#v, want nil", actions)
 	}
-	if _, err := issue.Apply(ActionStart, "tester", ""); err == nil || !strings.Contains(err.Error(), "has no hydrated lifecycle") {
-		t.Fatalf("Apply() error = %v, want hydration error", err)
-	}
 }
 
-func TestUnhydratedIssueMarshalJSONReturnsError(t *testing.T) {
-	_, err := json.Marshal(Issue{ID: "task-1", IssueType: "task"})
-	if err == nil || !strings.Contains(err.Error(), "has no hydrated lifecycle") {
-		t.Fatalf("Marshal() error = %v, want hydration error", err)
-	}
+func TestNilLifecycleIssueMarshalJSONPanics(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("Marshal() on nil-lifecycle Issue did not panic")
+		}
+	}()
+	_, _ = json.Marshal(Issue{ID: "task-1", IssueType: "task"})
 }
 
 func TestIssueJSONOmitsProgress(t *testing.T) {
@@ -140,5 +154,16 @@ func TestIssueJSONOmitsProgress(t *testing.T) {
 	}
 	if _, ok := payload["progress"]; ok {
 		t.Fatalf("Marshal() included progress field: %s", data)
+	}
+}
+
+func TestIsContainerUsesIssueTypeNotLifecycle(t *testing.T) {
+	leaf := Issue{ID: "task-1", IssueType: "task"}
+	if leaf.IsContainer() {
+		t.Fatalf("unhydrated leaf reports IsContainer() = true; want false")
+	}
+	epic := Issue{ID: "epic-1", IssueType: "epic"}
+	if !epic.IsContainer() {
+		t.Fatalf("unhydrated epic reports IsContainer() = false; want true")
 	}
 }

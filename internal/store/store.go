@@ -1345,23 +1345,6 @@ type partialIssue struct {
 	DeletedAt   *time.Time
 }
 
-func (p partialIssue) toIssue() model.Issue {
-	return model.Issue{
-		ID:          p.ID,
-		Title:       p.Title,
-		Description: p.Description,
-		Priority:    p.Priority,
-		IssueType:   p.IssueType,
-		Topic:       p.Topic,
-		Rank:        p.Rank,
-		Labels:      p.Labels,
-		CreatedAt:   p.CreatedAt,
-		UpdatedAt:   p.UpdatedAt,
-		ArchivedAt:  p.ArchivedAt,
-		DeletedAt:   p.DeletedAt,
-	}
-}
-
 // nextRankAtBottom returns a rank that sorts after all existing items.
 // Called within a transaction to ensure consistency.
 func nextRankAtBottom(ctx context.Context, tx *sql.Tx) (string, error) {
@@ -1445,18 +1428,21 @@ func statusForStorage(issue model.Issue) string {
 }
 
 func (s *Store) hydrateIssues(ctx context.Context, rows []issueRow) ([]model.Issue, error) {
-	issues := make([]model.Issue, 0, len(rows))
-	for _, row := range rows {
-		issues = append(issues, row.Issue.toIssue())
+	if len(rows) == 0 {
+		return []model.Issue{}, nil
 	}
-	labeled, err := s.attachLabels(ctx, issues)
+	issueIDs := make([]string, 0, len(rows))
+	for _, row := range rows {
+		issueIDs = append(issueIDs, row.Issue.ID)
+	}
+	labelsByID, err := s.loadLabelsByIssueIDs(ctx, issueIDs)
 	if err != nil {
 		return nil, err
 	}
-	epicIDs := make([]string, 0, len(labeled))
-	for _, issue := range labeled {
-		if model.IsContainerType(issue.IssueType) {
-			epicIDs = append(epicIDs, issue.ID)
+	epicIDs := make([]string, 0, len(rows))
+	for _, row := range rows {
+		if model.IsContainerType(row.Issue.IssueType) {
+			epicIDs = append(epicIDs, row.Issue.ID)
 		}
 	}
 	childrenByEpicID, err := s.lifecycleChildrenByEpicIDs(ctx, epicIDs)
@@ -1464,18 +1450,31 @@ func (s *Store) hydrateIssues(ctx context.Context, rows []issueRow) ([]model.Iss
 		return nil, err
 	}
 	hydrated := make([]model.Issue, 0, len(rows))
-	for index, row := range rows {
-		issue := labeled[index]
-		// [LAW:single-enforcer] This store hydrator is the only read boundary that turns row status plus child relations into model lifecycle state.
-		if model.IsContainerType(issue.IssueType) {
-			issue, err = model.HydrateAllOf(issue, childrenByEpicID[issue.ID])
-			if err != nil {
-				return nil, err
-			}
-			hydrated = append(hydrated, issue)
-			continue
+	for _, row := range rows {
+		base := model.Issue{
+			ID:          row.Issue.ID,
+			Title:       row.Issue.Title,
+			Description: row.Issue.Description,
+			Priority:    row.Issue.Priority,
+			IssueType:   row.Issue.IssueType,
+			Topic:       row.Issue.Topic,
+			Rank:        row.Issue.Rank,
+			Labels:      labelsByID[row.Issue.ID],
+			CreatedAt:   row.Issue.CreatedAt,
+			UpdatedAt:   row.Issue.UpdatedAt,
+			ArchivedAt:  row.Issue.ArchivedAt,
+			DeletedAt:   row.Issue.DeletedAt,
 		}
-		issue, err = model.HydrateOwnedStatus(issue, row.Status)
+		if base.Labels == nil {
+			base.Labels = []string{}
+		}
+		var issue model.Issue
+		// [LAW:single-enforcer] This store hydrator is the only read boundary that turns row status plus child relations into model lifecycle state.
+		if model.IsContainerType(row.Issue.IssueType) {
+			issue, err = model.HydrateAllOf(base, childrenByEpicID[row.Issue.ID])
+		} else {
+			issue, err = model.HydrateOwnedStatus(base, row.Status)
+		}
 		if err != nil {
 			return nil, err
 		}

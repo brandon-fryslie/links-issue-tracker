@@ -46,7 +46,8 @@ type Issue struct {
 	ArchivedAt  *time.Time `json:"archived_at,omitempty"`
 	DeletedAt   *time.Time `json:"deleted_at,omitempty"`
 
-	lifecycle lifecycle.Lifecycle
+	lifecycle        lifecycle.Lifecycle
+	pendingHydration bool
 }
 
 func (i Issue) State() State {
@@ -137,7 +138,7 @@ func (i Issue) ClosedAtValue() *time.Time {
 }
 
 func (i Issue) IsContainer() bool {
-	return i.Capabilities().Status == nil
+	return IsContainerType(i.IssueType)
 }
 
 // HydrateOwnedStatus is the model-owned boundary that turns persisted row
@@ -159,6 +160,7 @@ func HydrateOwnedStatus(issue Issue, view StatusView) (Issue, error) {
 func (i *Issue) replaceLifecycle(next lifecycle.Lifecycle) {
 	// [LAW:single-enforcer] Lifecycle replacement is centralized inside model so callers cannot grow parallel mutation paths.
 	i.lifecycle = next
+	i.pendingHydration = false
 }
 
 // HydrateAllOf composes child issue lifecycles into a non-actionable container.
@@ -190,11 +192,11 @@ func UpdateStatusCapability(issue Issue, view StatusView) (Issue, error) {
 }
 
 func (i Issue) lifecycleOrError() (lifecycle.Lifecycle, error) {
-	if i.lifecycle == nil {
-		return nil, fmt.Errorf("issue %s has no hydrated lifecycle", i.ID)
+	if i.pendingHydration {
+		return nil, fmt.Errorf("issue %s requires store hydration", i.ID)
 	}
-	if marker, ok := i.lifecycle.(needsStoreHydration); ok {
-		return nil, fmt.Errorf("issue %s requires store hydration", marker.issueID)
+	if i.lifecycle == nil {
+		panic(fmt.Sprintf("issue %q has no lifecycle (constructed without HydrateOwnedStatus/HydrateAllOf)", i.ID))
 	}
 	return i.lifecycle, nil
 }
@@ -215,18 +217,6 @@ type issueJSON struct {
 	ClosedAt    *time.Time `json:"closed_at,omitempty"`
 	ArchivedAt  *time.Time `json:"archived_at,omitempty"`
 	DeletedAt   *time.Time `json:"deleted_at,omitempty"`
-}
-
-type needsStoreHydration struct {
-	issueID string
-}
-
-func (n needsStoreHydration) State() lifecycle.State {
-	return ""
-}
-
-func (n needsStoreHydration) Progress() lifecycle.Progress {
-	return lifecycle.Progress{}
 }
 
 func (i Issue) MarshalJSON() ([]byte, error) {
@@ -284,7 +274,8 @@ func (i *Issue) UnmarshalJSON(data []byte) error {
 	switch {
 	case IsContainerType(payload.IssueType):
 		// [LAW:single-enforcer] JSON cannot synthesize derived container lifecycle; store hydration is the only boundary that may attach child state.
-		i.replaceLifecycle(needsStoreHydration{issueID: i.ID})
+		i.pendingHydration = true
+		i.lifecycle = nil
 	case payload.Status != nil:
 		hydrated, err := HydrateOwnedStatus(*i, StatusView{
 			Value:    *payload.Status,
