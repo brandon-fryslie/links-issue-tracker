@@ -206,6 +206,11 @@ func restoreFromExportPath(ctx context.Context, ap *app.App, path string, force 
 }
 
 func hashExport(export model.Export) (string, error) {
+	for _, issue := range export.Issues {
+		if !issue.IsHydrated() {
+			return "", fmt.Errorf("hash export: issue %s is not hydrated", issue.ID)
+		}
+	}
 	payload, err := json.MarshalIndent(export, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("marshal export: %w", err)

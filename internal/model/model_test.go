@@ -167,3 +167,15 @@ func TestIsContainerUsesIssueTypeNotLifecycle(t *testing.T) {
 		t.Fatalf("unhydrated epic reports IsContainer() = false; want true")
 	}
 }
+
+func TestContainerTypesIsSubsetOfValidTypes(t *testing.T) {
+	valid := map[string]bool{}
+	for _, value := range ValidIssueTypes {
+		valid[value] = true
+	}
+	for _, container := range ContainerIssueTypes {
+		if !valid[container] {
+			t.Fatalf("ContainerIssueTypes contains %q which is not in ValidIssueTypes", container)
+		}
+	}
+}

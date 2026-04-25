@@ -25,8 +25,31 @@ const (
 )
 
 func IsContainerType(issueType string) bool {
-	// [LAW:one-source-of-truth] Container issue-type knowledge lives in one model predicate instead of being re-encoded at each persistence/wire boundary.
-	return strings.TrimSpace(issueType) == "epic"
+	trimmed := strings.TrimSpace(issueType)
+	for _, container := range ContainerIssueTypes {
+		if container == trimmed {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidIssueTypes is the canonical set of issue types. ContainerIssueTypes is
+// the subset that uses container-style lifecycle (no OwnedStatus).
+// [LAW:one-source-of-truth] Issue-type vocabulary lives here; persistence validation and lifecycle dispatch both consult these sets.
+var (
+	ValidIssueTypes     = []string{"task", "feature", "bug", "chore", "epic"}
+	ContainerIssueTypes = []string{"epic"}
+)
+
+func IsValidIssueType(issueType string) bool {
+	trimmed := strings.TrimSpace(issueType)
+	for _, valid := range ValidIssueTypes {
+		if valid == trimmed {
+			return true
+		}
+	}
+	return false
 }
 
 // [LAW:one-type-per-behavior] Issues and epics are one record type; lifecycle
@@ -86,6 +109,10 @@ func (i Issue) AvailableActions() []ActionName {
 	return actionable.AvailableActions()
 }
 
+// Apply is root-only: it only invokes actions exposed by the root lifecycle
+// primitive. Multi-OwnedStatus composition (AllOf containing multiple
+// actionable members) is intentionally unsupported here; that requires a
+// dedicated disambiguation design before AllOf.Apply ever returns non-nil.
 func (i Issue) Apply(action ActionName, actor string, reason string) (Issue, error) {
 	root, err := i.lifecycleOrError()
 	if err != nil {
@@ -139,6 +166,17 @@ func (i Issue) ClosedAtValue() *time.Time {
 
 func (i Issue) IsContainer() bool {
 	return IsContainerType(i.IssueType)
+}
+
+// IsHydrated reports whether this issue carries a fully-hydrated lifecycle.
+// Returns false for issues constructed without HydrateOwnedStatus/HydrateAllOf
+// and for JSON-decoded containers that have not yet passed through store
+// hydration.
+func (i Issue) IsHydrated() bool {
+	if i.pendingHydration {
+		return false
+	}
+	return i.lifecycle != nil
 }
 
 // HydrateOwnedStatus is the model-owned boundary that turns persisted row

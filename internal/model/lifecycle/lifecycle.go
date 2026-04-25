@@ -1,6 +1,13 @@
 // Package lifecycle defines the internal lifecycle expression primitives used
 // by model.Issue. Callers outside internal/model must use the model package
 // hydration, capability, and action APIs instead of importing this package.
+//
+// Container Progress aggregation is leaf-primitive based: AllOf.Progress folds
+// over Progresses(a), which walks through Containers and collects every
+// non-Container descendant's Progress. New primitive kinds that need to
+// contribute to Progress should be leaf primitives or should implement
+// Container so traversal reaches their children. Adding a wrapper primitive
+// without Container semantics will make it contribute only its own Progress.
 package lifecycle
 
 import "fmt"
@@ -47,9 +54,10 @@ type Actionable interface {
 	Apply(name ActionName, actor string, reason string) (Lifecycle, error)
 }
 
-// Walk visits the lifecycle tree depth-first. Policy decisions such as which
-// capabilities or actions an Issue exposes remain root-only in the model
-// package; recursive consumers should use Walk deliberately.
+// Walk visits the lifecycle tree depth-first. Recursion is the substrate;
+// the model package's capability and action APIs deliberately do NOT use
+// Walk because they are root-only by policy. Only call Walk when you know
+// you want full-tree traversal, such as Progresses for progress aggregation.
 // [LAW:dataflow-not-control-flow] Tree traversal is one primitive that receives variable lifecycle data instead of scattering recursive special cases across callers.
 func Walk(l Lifecycle, visit func(Lifecycle) bool) {
 	if l == nil || !visit(l) {
@@ -71,6 +79,9 @@ func ParseState(value string) (State, error) {
 	}
 }
 
+// Progresses collects every non-Container Progress reachable from l by walking
+// through Containers. Used by AllOf.Progress to aggregate container progress;
+// see the package doc for the leaf-primitive aggregation contract.
 func Progresses(l Lifecycle) []Progress {
 	out := []Progress{}
 	Walk(l, func(current Lifecycle) bool {

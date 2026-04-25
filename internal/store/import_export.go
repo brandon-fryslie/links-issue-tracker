@@ -81,6 +81,11 @@ func (s *Store) Export(ctx context.Context) (model.Export, error) {
 	if err != nil {
 		return model.Export{}, err
 	}
+	for _, issue := range issues {
+		if !issue.IsHydrated() {
+			return model.Export{}, fmt.Errorf("export: issue %s is not hydrated; refusing to write a partial wire format", issue.ID)
+		}
+	}
 	return model.Export{Version: 1, WorkspaceID: s.workspaceID, ExportedAt: time.Now().UTC(), Issues: issues, Relations: rels, Comments: comments, Labels: labels, History: history}, nil
 }
 

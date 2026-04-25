@@ -19,8 +19,9 @@ type StatusView struct {
 	ClosedAt *time.Time `json:"closed_at,omitempty"`
 }
 
-// capabilitiesFrom is root-only by design; containers do not inherit member
-// capabilities without a dedicated disambiguation model.
+// capabilitiesFrom is root-only by design: it switches on the root lifecycle
+// primitive only and does not recurse into Containers. Adding capability
+// kinds means extending this switch, not walking deeper.
 // [LAW:one-source-of-truth] Capability presence is derived from the root lifecycle primitive rather than duplicated issue-type checks.
 func capabilitiesFrom(l lifecycle.Lifecycle) Capabilities {
 	switch typed := l.(type) {

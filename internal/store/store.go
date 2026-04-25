@@ -1495,6 +1495,12 @@ func (s *Store) lifecycleChildrenByEpicIDs(ctx context.Context, epicIDs []string
 		args = append(args, epicID)
 	}
 	// [LAW:one-source-of-truth] Active containers derive progress from active children; archived/deleted containers keep a full child snapshot so their lifecycle state does not collapse to empty/open.
+	// Children-of-epic visibility truth table:
+	//   parent live, child live -> include
+	//   parent live, child dead -> exclude (active container shows only active children)
+	//   parent dead, child live -> include (snapshot semantics: container's state at archive)
+	//   parent dead, child dead -> include (snapshot semantics)
+	// The WHERE clause encodes "include if parent is dead OR child is live."
 	rows, err := s.db.QueryContext(ctx, `SELECT r.dst_id, i.id, i.title, i.description, i.status, i.priority, i.issue_type, i.topic, i.assignee, i.item_rank, i.created_at, i.updated_at, i.closed_at, i.archived_at, i.deleted_at
 		FROM relations r
 		JOIN issues i ON i.id = r.src_id
@@ -1572,16 +1578,14 @@ func (s *Store) loadLabelsByIssueIDs(ctx context.Context, issueIDs []string) (ma
 }
 
 func validateIssueType(issueType string) (string, error) {
-	issueType = strings.TrimSpace(strings.ToLower(issueType))
-	switch issueType {
-	case "", "task", "feature", "bug", "chore", "epic":
-		if issueType == "" {
-			return "task", nil
-		}
-		return issueType, nil
-	default:
+	trimmed := strings.TrimSpace(strings.ToLower(issueType))
+	if trimmed == "" {
+		return "task", nil
+	}
+	if !model.IsValidIssueType(trimmed) {
 		return "", errors.New("issue type must be task, feature, bug, chore, or epic")
 	}
+	return trimmed, nil
 }
 
 func validatePriority(priority int) error {

@@ -1348,6 +1348,25 @@ func TestReopenClearsClosedAt(t *testing.T) {
 	}
 }
 
+func TestExportRefusesUnhydratedIssue(t *testing.T) {
+	ctx := context.Background()
+	st := openIssueStore(t, ctx)
+	if _, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Hydrated", Topic: "life", IssueType: "task", Priority: 2}); err != nil {
+		t.Fatalf("CreateIssue() error = %v", err)
+	}
+	export, err := st.Export(ctx)
+	if err != nil {
+		t.Fatalf("Export() error = %v", err)
+	}
+	if len(export.Issues) == 0 {
+		t.Fatalf("Export() returned empty Issues")
+	}
+	export.Issues = append(export.Issues, model.Issue{ID: "unhydrated-x", IssueType: "task"})
+	if export.Issues[len(export.Issues)-1].IsHydrated() {
+		t.Fatalf("unhydrated issue reports IsHydrated() = true")
+	}
+}
+
 func countNonEmptyLines(input string) int {
 	count := 0
 	for _, line := range strings.Split(strings.TrimSpace(input), "\n") {
