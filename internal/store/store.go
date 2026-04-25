@@ -1319,8 +1319,43 @@ func (s *Store) listAllHistory(ctx context.Context) ([]model.IssueHistory, error
 type issueScanner interface{ Scan(dest ...any) error }
 
 type issueRow struct {
-	Issue  model.Issue
+	Issue  partialIssue
 	Status model.StatusView
+}
+
+// partialIssue is row data only; hydrateIssues is the only path that may turn
+// it into a returned model.Issue.
+// [LAW:single-enforcer] Store hydration, not raw row decoding, owns lifecycle construction.
+type partialIssue struct {
+	ID          string
+	Title       string
+	Description string
+	Priority    int
+	IssueType   string
+	Topic       string
+	Rank        string
+	Labels      []string
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+	ArchivedAt  *time.Time
+	DeletedAt   *time.Time
+}
+
+func (p partialIssue) toIssue() model.Issue {
+	return model.Issue{
+		ID:          p.ID,
+		Title:       p.Title,
+		Description: p.Description,
+		Priority:    p.Priority,
+		IssueType:   p.IssueType,
+		Topic:       p.Topic,
+		Rank:        p.Rank,
+		Labels:      p.Labels,
+		CreatedAt:   p.CreatedAt,
+		UpdatedAt:   p.UpdatedAt,
+		ArchivedAt:  p.ArchivedAt,
+		DeletedAt:   p.DeletedAt,
+	}
 }
 
 // nextRankAtBottom returns a rank that sorts after all existing items.
@@ -1338,13 +1373,30 @@ func nextRankAtBottom(ctx context.Context, tx *sql.Tx) (string, error) {
 }
 
 func scanIssue(row issueScanner) (issueRow, error) {
-	var issue model.Issue
+	var issue partialIssue
 	var status, assignee string
 	var createdAt, updatedAt string
 	var closedAt, archivedAt, deletedAt sql.NullString
 	if err := row.Scan(&issue.ID, &issue.Title, &issue.Description, &status, &issue.Priority, &issue.IssueType, &issue.Topic, &assignee, &issue.Rank, &createdAt, &updatedAt, &closedAt, &archivedAt, &deletedAt); err != nil {
 		return issueRow{}, err
 	}
+	return parsedIssueRow(issue, status, assignee, createdAt, updatedAt, closedAt, archivedAt, deletedAt)
+}
+
+func scanIssueWithParent(row issueScanner) (string, issueRow, error) {
+	var parentID string
+	var issue partialIssue
+	var status, assignee string
+	var createdAt, updatedAt string
+	var closedAt, archivedAt, deletedAt sql.NullString
+	if err := row.Scan(&parentID, &issue.ID, &issue.Title, &issue.Description, &status, &issue.Priority, &issue.IssueType, &issue.Topic, &assignee, &issue.Rank, &createdAt, &updatedAt, &closedAt, &archivedAt, &deletedAt); err != nil {
+		return "", issueRow{}, err
+	}
+	parsed, err := parsedIssueRow(issue, status, assignee, createdAt, updatedAt, closedAt, archivedAt, deletedAt)
+	return parentID, parsed, err
+}
+
+func parsedIssueRow(issue partialIssue, status string, assignee string, createdAt string, updatedAt string, closedAt sql.NullString, archivedAt sql.NullString, deletedAt sql.NullString) (issueRow, error) {
 	var err error
 	issue.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt)
 	if err != nil {
@@ -1391,9 +1443,19 @@ func statusForStorage(issue model.Issue) string {
 func (s *Store) hydrateIssues(ctx context.Context, rows []issueRow) ([]model.Issue, error) {
 	issues := make([]model.Issue, 0, len(rows))
 	for _, row := range rows {
-		issues = append(issues, row.Issue)
+		issues = append(issues, row.Issue.toIssue())
 	}
 	labeled, err := s.attachLabels(ctx, issues)
+	if err != nil {
+		return nil, err
+	}
+	epicIDs := make([]string, 0, len(labeled))
+	for _, issue := range labeled {
+		if issue.IssueType == "epic" {
+			epicIDs = append(epicIDs, issue.ID)
+		}
+	}
+	childrenByEpicID, err := s.lifecycleChildrenByEpicIDs(ctx, epicIDs)
 	if err != nil {
 		return nil, err
 	}
@@ -1402,11 +1464,7 @@ func (s *Store) hydrateIssues(ctx context.Context, rows []issueRow) ([]model.Iss
 		issue := labeled[index]
 		// [LAW:single-enforcer] This store hydrator is the only read boundary that turns row status plus child relations into model lifecycle state.
 		if issue.IssueType == "epic" {
-			children, err := s.lifecycleChildren(ctx, issue.ID)
-			if err != nil {
-				return nil, err
-			}
-			issue, err = model.HydrateAllOf(issue, children)
+			issue, err = model.HydrateAllOf(issue, childrenByEpicID[issue.ID])
 			if err != nil {
 				return nil, err
 			}
@@ -1422,28 +1480,45 @@ func (s *Store) hydrateIssues(ctx context.Context, rows []issueRow) ([]model.Iss
 	return hydrated, nil
 }
 
-func (s *Store) lifecycleChildren(ctx context.Context, epicID string) ([]model.Issue, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT i.id, i.title, i.description, i.status, i.priority, i.issue_type, i.topic, i.assignee, i.item_rank, i.created_at, i.updated_at, i.closed_at, i.archived_at, i.deleted_at
+func (s *Store) lifecycleChildrenByEpicIDs(ctx context.Context, epicIDs []string) (map[string][]model.Issue, error) {
+	out := make(map[string][]model.Issue, len(epicIDs))
+	if len(epicIDs) == 0 {
+		return out, nil
+	}
+	placeholders := make([]string, 0, len(epicIDs))
+	args := make([]any, 0, len(epicIDs))
+	for _, epicID := range epicIDs {
+		placeholders = append(placeholders, "?")
+		args = append(args, epicID)
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT r.dst_id, i.id, i.title, i.description, i.status, i.priority, i.issue_type, i.topic, i.assignee, i.item_rank, i.created_at, i.updated_at, i.closed_at, i.archived_at, i.deleted_at
 		FROM relations r
 		JOIN issues i ON i.id = r.src_id
-		WHERE r.dst_id = ? AND r.type = 'parent-child' AND i.archived_at IS NULL AND i.deleted_at IS NULL
-		ORDER BY i.item_rank ASC`, epicID)
+		WHERE r.dst_id IN (`+strings.Join(placeholders, ", ")+`) AND r.type = 'parent-child' AND i.archived_at IS NULL AND i.deleted_at IS NULL
+		ORDER BY r.dst_id ASC, i.item_rank ASC`, args...)
 	if err != nil {
-		return nil, fmt.Errorf("load lifecycle children for %s: %w", epicID, err)
+		return nil, fmt.Errorf("load lifecycle children: %w", err)
 	}
 	defer rows.Close()
-	children := []issueRow{}
+	childRowsByEpicID := make(map[string][]issueRow, len(epicIDs))
 	for rows.Next() {
-		child, err := scanIssue(rows)
+		parentID, child, err := scanIssueWithParent(rows)
 		if err != nil {
 			return nil, err
 		}
-		children = append(children, child)
+		childRowsByEpicID[parentID] = append(childRowsByEpicID[parentID], child)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return s.hydrateIssues(ctx, children)
+	for epicID, childRows := range childRowsByEpicID {
+		hydrated, err := s.hydrateIssues(ctx, childRows)
+		if err != nil {
+			return nil, err
+		}
+		out[epicID] = hydrated
+	}
+	return out, nil
 }
 
 func (s *Store) attachLabels(ctx context.Context, issues []model.Issue) ([]model.Issue, error) {

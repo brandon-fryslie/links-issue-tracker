@@ -44,19 +44,35 @@ type Issue struct {
 }
 
 func (i Issue) State() State {
-	return State(i.requireLifecycle().State())
+	lifecycle, err := i.lifecycleOrError()
+	if err != nil {
+		return ""
+	}
+	return State(lifecycle.State())
 }
 
 func (i Issue) Progress() Progress {
-	return i.requireLifecycle().Progress()
+	lifecycle, err := i.lifecycleOrError()
+	if err != nil {
+		return Progress{}
+	}
+	return lifecycle.Progress()
 }
 
 func (i Issue) Capabilities() Capabilities {
-	return capabilitiesFrom(i.requireLifecycle())
+	lifecycle, err := i.lifecycleOrError()
+	if err != nil {
+		return Capabilities{}
+	}
+	return capabilitiesFrom(lifecycle)
 }
 
 func (i Issue) AvailableActions() []ActionName {
-	actionable, ok := i.requireLifecycle().(lifecycle.Actionable)
+	root, err := i.lifecycleOrError()
+	if err != nil {
+		return nil
+	}
+	actionable, ok := root.(lifecycle.Actionable)
 	if !ok {
 		return nil
 	}
@@ -64,7 +80,11 @@ func (i Issue) AvailableActions() []ActionName {
 }
 
 func (i Issue) Apply(action ActionName, actor string, reason string) (Issue, error) {
-	actionable, ok := i.requireLifecycle().(lifecycle.Actionable)
+	root, err := i.lifecycleOrError()
+	if err != nil {
+		return Issue{}, err
+	}
+	actionable, ok := root.(lifecycle.Actionable)
 	if !ok {
 		return Issue{}, fmt.Errorf("no %s action available on this issue", action)
 	}
@@ -135,7 +155,11 @@ func HydrateOwnedStatus(issue Issue, view StatusView) (Issue, error) {
 func HydrateAllOf(issue Issue, children []Issue) (Issue, error) {
 	members := make([]lifecycle.Lifecycle, 0, len(children))
 	for _, child := range children {
-		members = append(members, child.requireLifecycle())
+		lifecycle, err := child.lifecycleOrError()
+		if err != nil {
+			return Issue{}, err
+		}
+		members = append(members, lifecycle)
 	}
 	issue.lifecycle = lifecycle.AllOf{Members: members}
 	return issue, nil
@@ -144,17 +168,21 @@ func HydrateAllOf(issue Issue, children []Issue) (Issue, error) {
 // UpdateStatusCapability replaces the root status primitive and refuses
 // containers so callers cannot silently corrupt derived lifecycle state.
 func UpdateStatusCapability(issue Issue, view StatusView) (Issue, error) {
-	if _, ok := issue.requireLifecycle().(lifecycle.OwnedStatus); !ok {
+	root, err := issue.lifecycleOrError()
+	if err != nil {
+		return Issue{}, err
+	}
+	if _, ok := root.(lifecycle.OwnedStatus); !ok {
 		return Issue{}, fmt.Errorf("issue %s does not expose a status capability", issue.ID)
 	}
 	return HydrateOwnedStatus(issue, view)
 }
 
-func (i Issue) requireLifecycle() lifecycle.Lifecycle {
+func (i Issue) lifecycleOrError() (lifecycle.Lifecycle, error) {
 	if i.lifecycle == nil {
-		panic(fmt.Sprintf("issue %s has no hydrated lifecycle", i.ID))
+		return nil, fmt.Errorf("issue %s has no hydrated lifecycle", i.ID)
 	}
-	return i.lifecycle
+	return i.lifecycle, nil
 }
 
 type issueJSON struct {
@@ -178,6 +206,9 @@ type issueJSON struct {
 }
 
 func (i Issue) MarshalJSON() ([]byte, error) {
+	if _, err := i.lifecycleOrError(); err != nil {
+		return nil, err
+	}
 	caps := i.Capabilities()
 	var statusValue *State
 	var assignee string

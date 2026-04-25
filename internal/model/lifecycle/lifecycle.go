@@ -71,12 +71,13 @@ func ParseState(value string) (State, error) {
 	}
 }
 
-func Statuses(l Lifecycle) []OwnedStatus {
-	out := []OwnedStatus{}
+func Progresses(l Lifecycle) []Progress {
+	out := []Progress{}
 	Walk(l, func(current Lifecycle) bool {
-		if status, ok := current.(OwnedStatus); ok {
-			out = append(out, status)
+		if _, ok := current.(Container); ok {
+			return true
 		}
+		out = append(out, current.Progress())
 		return true
 	})
 	return out

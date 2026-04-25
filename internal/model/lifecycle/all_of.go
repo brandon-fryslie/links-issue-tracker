@@ -24,9 +24,8 @@ func (a AllOf) State() State {
 
 func (a AllOf) Progress() Progress {
 	var out Progress
-	// [LAW:dataflow-not-control-flow] Container progress is one recursive data fold over owned status primitives, so nested status composition exercises the same traversal path.
-	for _, status := range Statuses(a) {
-		progress := status.Progress()
+	// [LAW:dataflow-not-control-flow] Container progress is one recursive data fold over leaf lifecycle progress values, so future primitive leaves contribute without per-type branches.
+	for _, progress := range Progresses(a) {
 		out.Open += progress.Open
 		out.InProgress += progress.InProgress
 		out.Closed += progress.Closed

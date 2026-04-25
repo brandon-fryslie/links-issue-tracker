@@ -86,23 +86,26 @@ func TestWalkVisitsAllPrimitives(t *testing.T) {
 	}
 }
 
-func TestStatusesRecursesThroughContainers(t *testing.T) {
+type progressOnly struct {
+	progress Progress
+}
+
+func (p progressOnly) State() State {
+	return InProgress
+}
+
+func (p progressOnly) Progress() Progress {
+	return p.progress
+}
+
+func TestAllOfProgressIncludesNonStatusLeafPrimitives(t *testing.T) {
 	tree := AllOf{Members: []Lifecycle{
 		OwnedStatus{Value: Open},
-		AllOf{Members: []Lifecycle{
-			OwnedStatus{Value: InProgress},
-			OwnedStatus{Value: Closed},
-		}},
+		progressOnly{progress: Progress{InProgress: 2, Total: 2}},
 	}}
-	statuses := Statuses(tree)
-	want := []State{Open, InProgress, Closed}
-	if len(statuses) != len(want) {
-		t.Fatalf("Statuses() = %#v, want %d entries", statuses, len(want))
-	}
-	for i := range want {
-		if statuses[i].Value != want[i] {
-			t.Fatalf("Statuses() = %#v, want states %#v", statuses, want)
-		}
+	progress := tree.Progress()
+	if progress.Open != 1 || progress.InProgress != 2 || progress.Total != 3 {
+		t.Fatalf("Progress() = %#v, want open=1 in_progress=2 total=3", progress)
 	}
 }
 

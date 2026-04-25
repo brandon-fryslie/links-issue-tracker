@@ -95,3 +95,29 @@ func TestIssueJSONRejectsLeafWithoutStatus(t *testing.T) {
 		t.Fatalf("Unmarshal() error = %v, want missing status field error", err)
 	}
 }
+
+func TestUnhydratedIssueLifecycleMethodsReturnZeroValues(t *testing.T) {
+	issue := Issue{ID: "task-1", IssueType: "task"}
+	if issue.State() != "" {
+		t.Fatalf("State() = %q, want zero state", issue.State())
+	}
+	if issue.Progress() != (Progress{}) {
+		t.Fatalf("Progress() = %#v, want zero progress", issue.Progress())
+	}
+	if issue.Capabilities() != (Capabilities{}) {
+		t.Fatalf("Capabilities() = %#v, want empty capabilities", issue.Capabilities())
+	}
+	if actions := issue.AvailableActions(); actions != nil {
+		t.Fatalf("AvailableActions() = %#v, want nil", actions)
+	}
+	if _, err := issue.Apply(ActionStart, "tester", ""); err == nil || !strings.Contains(err.Error(), "has no hydrated lifecycle") {
+		t.Fatalf("Apply() error = %v, want hydration error", err)
+	}
+}
+
+func TestUnhydratedIssueMarshalJSONReturnsError(t *testing.T) {
+	_, err := json.Marshal(Issue{ID: "task-1", IssueType: "task"})
+	if err == nil || !strings.Contains(err.Error(), "has no hydrated lifecycle") {
+		t.Fatalf("Marshal() error = %v, want hydration error", err)
+	}
+}
