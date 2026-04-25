@@ -9,24 +9,9 @@ linters:
       rules:
         # [LAW:single-enforcer] lifecycle internals are enforced at the model package boundary instead of by caller convention.
         lifecycle-boundary:
+          list-mode: lax
           files:
-            - "cmd/lit/*.go"
-            - "cmd/lnks/*.go"
-            - "internal/annotation/*.go"
-            - "internal/app/*.go"
-            - "internal/backup/*.go"
-            - "internal/cli/*.go"
-            - "internal/config/*.go"
-            - "internal/doltcli/*.go"
-            - "internal/issueid/*.go"
-            - "internal/legacydolt/*.go"
-            - "internal/merge/*.go"
-            - "internal/query/*.go"
-            - "internal/rank/*.go"
-            - "internal/store/*.go"
-            - "internal/syncfile/*.go"
-            - "internal/templates/*.go"
-            - "internal/workspace/*.go"
+            - "!**/internal/model/**"
           deny:
             - pkg: "github.com/bmf/links-issue-tracker/internal/model/lifecycle"
               desc: "lifecycle internals are owned by internal/model; use model hydration and capability APIs"

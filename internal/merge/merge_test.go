@@ -1,6 +1,7 @@
 package merge
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -16,6 +17,19 @@ func issueWithStatus(t *testing.T, issue model.Issue, status model.State) model.
 	return hydrated
 }
 
+func jsonRoundTripIssue(t *testing.T, issue model.Issue) model.Issue {
+	t.Helper()
+	data, err := json.Marshal(issue)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var decoded model.Issue
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	return decoded
+}
+
 func TestThreeWayDetectsPerIssueConflict(t *testing.T) {
 	base := model.Export{Issues: []model.Issue{issueWithStatus(t, model.Issue{ID: "i1", Title: "issue", Priority: 2, IssueType: "task", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}, model.StateOpen)}}
 	local := model.Export{Issues: append([]model.Issue(nil), base.Issues...)}
@@ -29,6 +43,33 @@ func TestThreeWayDetectsPerIssueConflict(t *testing.T) {
 	}
 	if result.Conflicts[0].IssueID != "i1" {
 		t.Fatalf("issue id = %q", result.Conflicts[0].IssueID)
+	}
+}
+
+func TestThreeWayComparesJSONUnmarshaledEpicData(t *testing.T) {
+	now := time.Now().UTC()
+	hydratedEpic, err := model.HydrateAllOf(model.Issue{
+		ID:        "epic-1",
+		Title:     "base",
+		IssueType: "epic",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}, nil)
+	if err != nil {
+		t.Fatalf("HydrateAllOf() error = %v", err)
+	}
+	baseIssue := jsonRoundTripIssue(t, hydratedEpic)
+	base := model.Export{Issues: []model.Issue{baseIssue}}
+	local := model.Export{Issues: []model.Issue{baseIssue}}
+	remote := model.Export{Issues: []model.Issue{baseIssue}}
+	remote.Issues[0].Title = "remote"
+
+	result := ThreeWay(base, local, remote)
+	if len(result.Conflicts) != 0 {
+		t.Fatalf("unexpected conflicts = %#v", result.Conflicts)
+	}
+	if len(result.Export.Issues) != 1 || result.Export.Issues[0].Title != "remote" {
+		t.Fatalf("merged issues = %#v, want remote title", result.Export.Issues)
 	}
 }
 

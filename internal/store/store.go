@@ -326,7 +326,7 @@ func (s *Store) createIssueOnce(ctx context.Context, in CreateIssueInput) (model
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
-	if issueType == "epic" {
+	if model.IsContainerType(issueType) {
 		issue, err = model.HydrateAllOf(issue, nil)
 	} else {
 		issue, err = model.HydrateOwnedStatus(issue, model.StatusView{Value: model.StateOpen, Assignee: strings.TrimSpace(in.Assignee)})
@@ -1451,7 +1451,7 @@ func (s *Store) hydrateIssues(ctx context.Context, rows []issueRow) ([]model.Iss
 	}
 	epicIDs := make([]string, 0, len(labeled))
 	for _, issue := range labeled {
-		if issue.IssueType == "epic" {
+		if model.IsContainerType(issue.IssueType) {
 			epicIDs = append(epicIDs, issue.ID)
 		}
 	}
@@ -1463,7 +1463,7 @@ func (s *Store) hydrateIssues(ctx context.Context, rows []issueRow) ([]model.Iss
 	for index, row := range rows {
 		issue := labeled[index]
 		// [LAW:single-enforcer] This store hydrator is the only read boundary that turns row status plus child relations into model lifecycle state.
-		if issue.IssueType == "epic" {
+		if model.IsContainerType(issue.IssueType) {
 			issue, err = model.HydrateAllOf(issue, childrenByEpicID[issue.ID])
 			if err != nil {
 				return nil, err

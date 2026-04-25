@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/bmf/links-issue-tracker/internal/model/lifecycle"
@@ -22,6 +23,11 @@ const (
 	ActionClose  = lifecycle.ActionClose
 	ActionReopen = lifecycle.ActionReopen
 )
+
+func IsContainerType(issueType string) bool {
+	// [LAW:one-source-of-truth] Container issue-type knowledge lives in one model predicate instead of being re-encoded at each persistence/wire boundary.
+	return strings.TrimSpace(issueType) == "epic"
+}
 
 // [LAW:one-type-per-behavior] Issues and epics are one record type; lifecycle
 // capability data carries the behavior distinction without splitting shared
@@ -182,6 +188,9 @@ func (i Issue) lifecycleOrError() (lifecycle.Lifecycle, error) {
 	if i.lifecycle == nil {
 		return nil, fmt.Errorf("issue %s has no hydrated lifecycle", i.ID)
 	}
+	if marker, ok := i.lifecycle.(needsStoreHydration); ok {
+		return nil, fmt.Errorf("issue %s requires store hydration", marker.issueID)
+	}
 	return i.lifecycle, nil
 }
 
@@ -201,8 +210,18 @@ type issueJSON struct {
 	ClosedAt    *time.Time `json:"closed_at,omitempty"`
 	ArchivedAt  *time.Time `json:"archived_at,omitempty"`
 	DeletedAt   *time.Time `json:"deleted_at,omitempty"`
-	// Progress is computed for human-readable sync files and is not authoritative on import.
-	Progress Progress `json:"progress"`
+}
+
+type needsStoreHydration struct {
+	issueID string
+}
+
+func (n needsStoreHydration) State() lifecycle.State {
+	return ""
+}
+
+func (n needsStoreHydration) Progress() lifecycle.Progress {
+	return lifecycle.Progress{}
 }
 
 func (i Issue) MarshalJSON() ([]byte, error) {
@@ -235,7 +254,6 @@ func (i Issue) MarshalJSON() ([]byte, error) {
 		ClosedAt:    closedAt,
 		ArchivedAt:  i.ArchivedAt,
 		DeletedAt:   i.DeletedAt,
-		Progress:    i.Progress(),
 	})
 }
 
@@ -259,12 +277,9 @@ func (i *Issue) UnmarshalJSON(data []byte) error {
 		DeletedAt:   payload.DeletedAt,
 	}
 	switch {
-	case payload.IssueType == "epic":
-		hydrated, err := HydrateAllOf(*i, nil)
-		if err != nil {
-			return err
-		}
-		*i = hydrated
+	case IsContainerType(payload.IssueType):
+		// [LAW:single-enforcer] JSON cannot synthesize derived container lifecycle; store hydration is the only boundary that may attach child state.
+		i.lifecycle = needsStoreHydration{issueID: i.ID}
 	case payload.Status != nil:
 		hydrated, err := HydrateOwnedStatus(*i, StatusView{
 			Value:    *payload.Status,

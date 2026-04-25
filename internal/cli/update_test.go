@@ -54,7 +54,7 @@ func TestRunTransitionRefusesEpicAndStartsLeaf(t *testing.T) {
 	}
 }
 
-func TestRunShowEpicJSONHasProgressWithoutStatus(t *testing.T) {
+func TestRunShowEpicJSONOmitsProgressAndStatus(t *testing.T) {
 	ctx := context.Background()
 	ap := newTestCLIApp(t)
 	epic, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
@@ -104,12 +104,8 @@ func TestRunShowEpicJSONHasProgressWithoutStatus(t *testing.T) {
 	if _, ok := payload.Issue["status"]; ok {
 		t.Fatalf("epic JSON issue has status field: %s", stdout.String())
 	}
-	var progress model.Progress
-	if err := json.Unmarshal(payload.Issue["progress"], &progress); err != nil {
-		t.Fatalf("json.Unmarshal(progress) error = %v", err)
-	}
-	if progress.Open != 1 || progress.Closed != 1 || progress.Total != 2 {
-		t.Fatalf("progress = %#v, want open=1 closed=1 total=2", progress)
+	if _, ok := payload.Issue["progress"]; ok {
+		t.Fatalf("epic JSON issue has progress field: %s", stdout.String())
 	}
 }
 

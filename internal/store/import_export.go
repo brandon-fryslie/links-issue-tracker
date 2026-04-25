@@ -406,8 +406,8 @@ func (s *Store) ReplaceFromExport(ctx context.Context, export model.Export) erro
 			closedAt = value.Format(time.RFC3339Nano)
 		}
 		statusValue := issue.StatusValue()
-		if issue.IssueType == "epic" && statusValue == "" {
-			// [LAW:one-source-of-truth] Epic status storage is a row default only; hydrated reads derive container state from child relations.
+		if model.IsContainerType(issue.IssueType) && statusValue == "" {
+			// [LAW:one-source-of-truth] Container status storage is a row default only; hydrated reads derive container state from child relations.
 			statusValue = string(model.StateOpen)
 		}
 		status, err := normalizeStatus(statusValue)

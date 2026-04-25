@@ -29,7 +29,7 @@ func TestApplyRefusesContainerEvenWhenMembersAreActionable(t *testing.T) {
 	}
 }
 
-func TestIssueJSONRoundTripEpicProducesContainer(t *testing.T) {
+func TestIssueJSONRoundTripEpicRequiresStoreHydration(t *testing.T) {
 	epic, err := HydrateAllOf(Issue{
 		ID:        "epic-1",
 		Title:     "Container",
@@ -53,6 +53,12 @@ func TestIssueJSONRoundTripEpicProducesContainer(t *testing.T) {
 	}
 	if decoded.Capabilities().Status != nil {
 		t.Fatalf("Capabilities().Status = %#v, want nil", decoded.Capabilities().Status)
+	}
+	if decoded.State() != "" || decoded.Progress() != (Progress{}) {
+		t.Fatalf("decoded epic state/progress = %q/%#v, want zero values before store hydration", decoded.State(), decoded.Progress())
+	}
+	if _, err := json.Marshal(decoded); err == nil || !strings.Contains(err.Error(), "requires store hydration") {
+		t.Fatalf("Marshal(decoded epic) error = %v, want hydration error", err)
 	}
 }
 
@@ -119,5 +125,20 @@ func TestUnhydratedIssueMarshalJSONReturnsError(t *testing.T) {
 	_, err := json.Marshal(Issue{ID: "task-1", IssueType: "task"})
 	if err == nil || !strings.Contains(err.Error(), "has no hydrated lifecycle") {
 		t.Fatalf("Marshal() error = %v, want hydration error", err)
+	}
+}
+
+func TestIssueJSONOmitsProgress(t *testing.T) {
+	issue := hydratedIssue(t, Issue{ID: "task-1", IssueType: "task"}, StateOpen)
+	data, err := json.Marshal(issue)
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var payload map[string]json.RawMessage
+	if err := json.Unmarshal(data, &payload); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if _, ok := payload["progress"]; ok {
+		t.Fatalf("Marshal() included progress field: %s", data)
 	}
 }
