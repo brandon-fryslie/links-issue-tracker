@@ -1,3 +1,6 @@
+// Package lifecycle defines the internal lifecycle expression primitives used
+// by model.Issue. Callers outside internal/model must use the model package
+// hydration, capability, and action APIs instead of importing this package.
 package lifecycle
 
 import "fmt"
@@ -31,6 +34,13 @@ type Lifecycle interface {
 	Progress() Progress
 }
 
+// Container marks lifecycle combinators that own child lifecycle expressions.
+// [LAW:one-type-per-behavior] Recursive traversal depends on one container contract instead of ad hoc structural assertions per combinator.
+type Container interface {
+	Lifecycle
+	Children() []Lifecycle
+}
+
 type Actionable interface {
 	Lifecycle
 	AvailableActions() []ActionName
@@ -45,7 +55,7 @@ func Walk(l Lifecycle, visit func(Lifecycle) bool) {
 	if l == nil || !visit(l) {
 		return
 	}
-	if container, ok := l.(interface{ Children() []Lifecycle }); ok {
+	if container, ok := l.(Container); ok {
 		for _, child := range container.Children() {
 			Walk(child, visit)
 		}
@@ -66,17 +76,6 @@ func Statuses(l Lifecycle) []OwnedStatus {
 	Walk(l, func(current Lifecycle) bool {
 		if status, ok := current.(OwnedStatus); ok {
 			out = append(out, status)
-		}
-		return true
-	})
-	return out
-}
-
-func Actionables(l Lifecycle) []Actionable {
-	out := []Actionable{}
-	Walk(l, func(current Lifecycle) bool {
-		if actionable, ok := current.(Actionable); ok {
-			out = append(out, actionable)
 		}
 		return true
 	})

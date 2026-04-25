@@ -46,8 +46,10 @@ func TestAllOfState(t *testing.T) {
 func TestAllOfProgressAndActions(t *testing.T) {
 	all := AllOf{Members: []Lifecycle{
 		OwnedStatus{Value: Open},
-		OwnedStatus{Value: InProgress},
-		OwnedStatus{Value: Closed},
+		AllOf{Members: []Lifecycle{
+			OwnedStatus{Value: InProgress},
+			OwnedStatus{Value: Closed},
+		}},
 	}}
 	progress := all.Progress()
 	if progress.Open != 1 || progress.InProgress != 1 || progress.Closed != 1 || progress.Total != 3 {
@@ -80,6 +82,26 @@ func TestWalkVisitsAllPrimitives(t *testing.T) {
 	for i := range want {
 		if states[i] != want[i] {
 			t.Fatalf("visited states = %#v, want %#v", states, want)
+		}
+	}
+}
+
+func TestStatusesRecursesThroughContainers(t *testing.T) {
+	tree := AllOf{Members: []Lifecycle{
+		OwnedStatus{Value: Open},
+		AllOf{Members: []Lifecycle{
+			OwnedStatus{Value: InProgress},
+			OwnedStatus{Value: Closed},
+		}},
+	}}
+	statuses := Statuses(tree)
+	want := []State{Open, InProgress, Closed}
+	if len(statuses) != len(want) {
+		t.Fatalf("Statuses() = %#v, want %d entries", statuses, len(want))
+	}
+	for i := range want {
+		if statuses[i].Value != want[i] {
+			t.Fatalf("Statuses() = %#v, want states %#v", statuses, want)
 		}
 	}
 }
