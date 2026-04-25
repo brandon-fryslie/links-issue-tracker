@@ -19,7 +19,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/bmf/links-issue-tracker/internal/lifecycle"
 	"github.com/bmf/links-issue-tracker/internal/model"
 	"github.com/bmf/links-issue-tracker/internal/rank"
 )
@@ -328,9 +327,12 @@ func (s *Store) createIssueOnce(ctx context.Context, in CreateIssueInput) (model
 		UpdatedAt:   now,
 	}
 	if issueType == "epic" {
-		issue.SetLifecycle(lifecycle.AllOf{})
+		issue, err = model.HydrateAllOf(issue, nil)
 	} else {
-		issue.SetLifecycle(lifecycle.OwnedStatus{Value: lifecycle.Open, Assignee: strings.TrimSpace(in.Assignee)})
+		issue, err = model.HydrateOwnedStatus(issue, model.StatusView{Value: model.StateOpen, Assignee: strings.TrimSpace(in.Assignee)})
+	}
+	if err != nil {
+		return model.Issue{}, err
 	}
 	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
 	if err != nil {
@@ -391,9 +393,6 @@ func (s *Store) createIssueOnce(ctx context.Context, in CreateIssueInput) (model
 	}
 	if err := s.smoothRanksIfNeeded(ctx, issue.Rank); err != nil {
 		return model.Issue{}, err
-	}
-	if issue.IssueType == "epic" {
-		issue.SetLifecycle(lifecycle.AllOf{})
 	}
 	return issue, nil
 }
@@ -537,22 +536,18 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 		return nil, fmt.Errorf("list issues: %w (query=%s)", err, query)
 	}
 	defer rows.Close()
-	issues := []model.Issue{}
+	rowsOut := []issueRow{}
 	for rows.Next() {
 		issue, err := scanIssue(rows)
 		if err != nil {
 			return nil, err
 		}
-		issues = append(issues, issue)
+		rowsOut = append(rowsOut, issue)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	issues, err = s.attachLabels(ctx, issues)
-	if err != nil {
-		return nil, err
-	}
-	return s.populateLifecycles(ctx, issues)
+	return s.hydrateIssues(ctx, rowsOut)
 }
 
 func (s *Store) GetIssueDetail(ctx context.Context, id string) (model.IssueDetail, error) {
@@ -660,22 +655,18 @@ func (s *Store) GetIssueDetail(ctx context.Context, id string) (model.IssueDetai
 
 func (s *Store) GetIssue(ctx context.Context, id string) (model.Issue, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT id, title, description, status, priority, issue_type, topic, assignee, item_rank, created_at, updated_at, closed_at, archived_at, deleted_at FROM issues WHERE id = ?`, id)
-	issue, err := scanIssue(row)
+	scanned, err := scanIssue(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return model.Issue{}, NotFoundError{Entity: "issue", ID: id}
 		}
 		return model.Issue{}, err
 	}
-	labeled, err := s.attachLabels(ctx, []model.Issue{issue})
+	hydrated, err := s.hydrateIssues(ctx, []issueRow{scanned})
 	if err != nil {
 		return model.Issue{}, err
 	}
-	labeled, err = s.populateLifecycles(ctx, labeled)
-	if err != nil {
-		return model.Issue{}, err
-	}
-	return labeled[0], nil
+	return hydrated[0], nil
 }
 
 func (s *Store) UpdateIssue(ctx context.Context, id string, in UpdateIssueInput) (model.Issue, error) {
@@ -709,7 +700,19 @@ func (s *Store) UpdateIssue(ctx context.Context, id string, in UpdateIssueInput)
 		issue.Priority = *in.Priority
 	}
 	if in.Assignee != nil {
-		issue = issue.WithAssignee(strings.TrimSpace(*in.Assignee))
+		caps := issue.Capabilities()
+		if caps.Status == nil {
+			return model.Issue{}, fmt.Errorf("issue %s does not expose a status capability", issue.ID)
+		}
+		updated, err := model.UpdateStatusCapability(issue, model.StatusView{
+			Value:    caps.Status.Value,
+			Assignee: strings.TrimSpace(*in.Assignee),
+			ClosedAt: caps.Status.ClosedAt,
+		})
+		if err != nil {
+			return model.Issue{}, err
+		}
+		issue = updated
 	}
 	if in.Labels != nil {
 		labels, err := canonicalizeLabels(*in.Labels)
@@ -833,35 +836,13 @@ func (s *Store) transitionIssueOnce(ctx context.Context, in TransitionIssueInput
 		actor = "unknown"
 	}
 	switch action {
-	case "start":
-		return s.transitionStatusAtomic(ctx, issue, actor, reason, action, "open", "in_progress")
-	case "done":
-		return s.transitionStatusAtomic(ctx, issue, actor, reason, action, "in_progress", "closed")
+	case "start", "done", "close", "reopen":
+		return s.writeStatusTransition(ctx, issue, actor, reason, action)
 	}
 	now := time.Now().UTC()
 	fromStatus := issue.StatusValue()
 	toStatus := issue.StatusValue()
 	switch action {
-	case "close":
-		if issue.DeletedAt != nil || issue.ArchivedAt != nil {
-			return model.Issue{}, errors.New("cannot close archived or deleted issue")
-		}
-		updated, err := issue.Apply(model.ActionClose, actor, reason)
-		if err != nil {
-			return model.Issue{}, err
-		}
-		issue = updated
-		toStatus = "closed"
-	case "reopen":
-		if issue.DeletedAt != nil || issue.ArchivedAt != nil {
-			return model.Issue{}, errors.New("cannot reopen archived or deleted issue")
-		}
-		updated, err := issue.Apply(model.ActionReopen, actor, reason)
-		if err != nil {
-			return model.Issue{}, err
-		}
-		issue = updated
-		toStatus = "open"
 	case "archive":
 		if issue.DeletedAt != nil {
 			return model.Issue{}, errors.New("cannot archive deleted issue")
@@ -915,10 +896,10 @@ func (s *Store) transitionIssueOnce(ctx context.Context, in TransitionIssueInput
 	if err := s.commitWorkingSet(ctx, "transition issue"); err != nil {
 		return model.Issue{}, err
 	}
-	return issue, nil
+	return s.GetIssue(ctx, issue.ID)
 }
 
-func (s *Store) transitionStatusAtomic(ctx context.Context, issue model.Issue, actor string, reason string, action string, fromStatus string, toStatus string) (model.Issue, error) {
+func (s *Store) writeStatusTransition(ctx context.Context, issue model.Issue, actor string, reason string, action string) (model.Issue, error) {
 	if issue.DeletedAt != nil || issue.ArchivedAt != nil {
 		return model.Issue{}, fmt.Errorf("cannot %s archived or deleted issue", action)
 	}
@@ -926,6 +907,8 @@ func (s *Store) transitionStatusAtomic(ctx context.Context, issue model.Issue, a
 	if err != nil {
 		return model.Issue{}, err
 	}
+	fromStatus := issue.StatusValue()
+	toStatus := updated.StatusValue()
 	now := time.Now().UTC()
 	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
 	if err != nil {
@@ -938,10 +921,10 @@ func (s *Store) transitionStatusAtomic(ctx context.Context, issue model.Issue, a
 	}
 	defer tx.Rollback()
 	var closedAt any
-	if toStatus == "closed" {
-		closedAt = now.Format(time.RFC3339Nano)
+	if value := updated.ClosedAtValue(); value != nil {
+		closedAt = value.Format(time.RFC3339Nano)
 	}
-	// [LAW:dataflow-not-control-flow] Claim/done transitions always execute one guarded write; contention is modeled by affected row count.
+	// [LAW:dataflow-not-control-flow] Status transitions always execute one guarded write; contention is modeled by affected row count.
 	result, err := tx.ExecContext(ctx, `UPDATE issues SET status = ?, updated_at = ?, closed_at = ? WHERE id = ? AND status = ?`,
 		toStatus, now.Format(time.RFC3339Nano), closedAt, issue.ID, fromStatus)
 	if err != nil {
@@ -1335,6 +1318,11 @@ func (s *Store) listAllHistory(ctx context.Context) ([]model.IssueHistory, error
 
 type issueScanner interface{ Scan(dest ...any) error }
 
+type issueRow struct {
+	Issue  model.Issue
+	Status model.StatusView
+}
+
 // nextRankAtBottom returns a rank that sorts after all existing items.
 // Called within a transaction to ensure consistency.
 func nextRankAtBottom(ctx context.Context, tx *sql.Tx) (string, error) {
@@ -1349,82 +1337,89 @@ func nextRankAtBottom(ctx context.Context, tx *sql.Tx) (string, error) {
 	return rank.After(lastRank.String), nil
 }
 
-func scanIssue(row issueScanner) (model.Issue, error) {
+func scanIssue(row issueScanner) (issueRow, error) {
 	var issue model.Issue
 	var status, assignee string
 	var createdAt, updatedAt string
 	var closedAt, archivedAt, deletedAt sql.NullString
 	if err := row.Scan(&issue.ID, &issue.Title, &issue.Description, &status, &issue.Priority, &issue.IssueType, &issue.Topic, &assignee, &issue.Rank, &createdAt, &updatedAt, &closedAt, &archivedAt, &deletedAt); err != nil {
-		return model.Issue{}, err
+		return issueRow{}, err
 	}
 	var err error
 	issue.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt)
 	if err != nil {
-		return model.Issue{}, err
+		return issueRow{}, err
 	}
 	issue.UpdatedAt, err = time.Parse(time.RFC3339Nano, updatedAt)
 	if err != nil {
-		return model.Issue{}, err
+		return issueRow{}, err
 	}
+	statusView := model.StatusView{Value: model.State(status), Assignee: assignee}
 	if closedAt.Valid {
 		t, err := time.Parse(time.RFC3339Nano, closedAt.String)
 		if err != nil {
-			return model.Issue{}, err
+			return issueRow{}, err
 		}
-		parsed, err := lifecycle.ParseState(status)
-		if err != nil {
-			return model.Issue{}, err
-		}
-		issue.SetLifecycle(lifecycle.OwnedStatus{Value: parsed, Assignee: assignee, ClosedAt: &t})
-	} else {
-		parsed, err := lifecycle.ParseState(status)
-		if err != nil {
-			return model.Issue{}, err
-		}
-		issue.SetLifecycle(lifecycle.OwnedStatus{Value: parsed, Assignee: assignee})
+		statusView.ClosedAt = &t
 	}
 	if archivedAt.Valid {
 		t, err := time.Parse(time.RFC3339Nano, archivedAt.String)
 		if err != nil {
-			return model.Issue{}, err
+			return issueRow{}, err
 		}
 		issue.ArchivedAt = &t
 	}
 	if deletedAt.Valid {
 		t, err := time.Parse(time.RFC3339Nano, deletedAt.String)
 		if err != nil {
-			return model.Issue{}, err
+			return issueRow{}, err
 		}
 		issue.DeletedAt = &t
 	}
 	issue.Labels = []string{}
-	return issue, nil
+	return issueRow{Issue: issue, Status: statusView}, nil
 }
 
 func statusForStorage(issue model.Issue) string {
 	status := issue.StatusValue()
 	if status == "" {
-		return string(lifecycle.Open)
+		return string(model.StateOpen)
 	}
 	return status
 }
 
-func (s *Store) populateLifecycles(ctx context.Context, issues []model.Issue) ([]model.Issue, error) {
-	for index := range issues {
-		if issues[index].IssueType != "epic" {
+func (s *Store) hydrateIssues(ctx context.Context, rows []issueRow) ([]model.Issue, error) {
+	issues := make([]model.Issue, 0, len(rows))
+	for _, row := range rows {
+		issues = append(issues, row.Issue)
+	}
+	labeled, err := s.attachLabels(ctx, issues)
+	if err != nil {
+		return nil, err
+	}
+	hydrated := make([]model.Issue, 0, len(rows))
+	for index, row := range rows {
+		issue := labeled[index]
+		// [LAW:single-enforcer] This store hydrator is the only read boundary that turns row status plus child relations into model lifecycle state.
+		if issue.IssueType == "epic" {
+			children, err := s.lifecycleChildren(ctx, issue.ID)
+			if err != nil {
+				return nil, err
+			}
+			issue, err = model.HydrateAllOf(issue, children)
+			if err != nil {
+				return nil, err
+			}
+			hydrated = append(hydrated, issue)
 			continue
 		}
-		children, err := s.lifecycleChildren(ctx, issues[index].ID)
+		issue, err = model.HydrateOwnedStatus(issue, row.Status)
 		if err != nil {
 			return nil, err
 		}
-		members := make([]lifecycle.Lifecycle, 0, len(children))
-		for _, child := range children {
-			members = append(members, child.Lifecycle())
-		}
-		issues[index].SetLifecycle(lifecycle.AllOf{Members: members})
+		hydrated = append(hydrated, issue)
 	}
-	return issues, nil
+	return hydrated, nil
 }
 
 func (s *Store) lifecycleChildren(ctx context.Context, epicID string) ([]model.Issue, error) {
@@ -1437,7 +1432,7 @@ func (s *Store) lifecycleChildren(ctx context.Context, epicID string) ([]model.I
 		return nil, fmt.Errorf("load lifecycle children for %s: %w", epicID, err)
 	}
 	defer rows.Close()
-	children := []model.Issue{}
+	children := []issueRow{}
 	for rows.Next() {
 		child, err := scanIssue(rows)
 		if err != nil {
@@ -1448,11 +1443,7 @@ func (s *Store) lifecycleChildren(ctx context.Context, epicID string) ([]model.I
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	children, err = s.attachLabels(ctx, children)
-	if err != nil {
-		return nil, err
-	}
-	return s.populateLifecycles(ctx, children)
+	return s.hydrateIssues(ctx, children)
 }
 
 func (s *Store) attachLabels(ctx context.Context, issues []model.Issue) ([]model.Issue, error) {

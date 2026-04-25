@@ -3,9 +3,12 @@ package model
 import (
 	"time"
 
-	"github.com/bmf/links-issue-tracker/internal/lifecycle"
+	"github.com/bmf/links-issue-tracker/internal/model/lifecycle"
 )
 
+// Capabilities reports optional behavior exposed by an issue's root lifecycle
+// primitive. To add a capability kind: define a view DTO, add an optional field
+// here, then extend capabilitiesFrom's root switch.
 type Capabilities struct {
 	Status *StatusView `json:"status,omitempty"`
 }
@@ -16,17 +19,20 @@ type StatusView struct {
 	ClosedAt *time.Time `json:"closed_at,omitempty"`
 }
 
+// capabilitiesFrom is root-only by design; containers do not inherit member
+// capabilities without a dedicated disambiguation model.
+// [LAW:one-source-of-truth] Capability presence is derived from the root lifecycle primitive rather than duplicated issue-type checks.
 func capabilitiesFrom(l lifecycle.Lifecycle) Capabilities {
-	statuses := lifecycle.Statuses(l)
-	if len(statuses) == 0 {
+	switch typed := l.(type) {
+	case lifecycle.OwnedStatus:
+		return Capabilities{Status: &StatusView{
+			Value:    State(typed.Value),
+			Assignee: typed.Assignee,
+			ClosedAt: cloneTime(typed.ClosedAt),
+		}}
+	default:
 		return Capabilities{}
 	}
-	status := statuses[0]
-	return Capabilities{Status: &StatusView{
-		Value:    State(status.Value),
-		Assignee: status.Assignee,
-		ClosedAt: cloneTime(status.ClosedAt),
-	}}
 }
 
 func cloneTime(value *time.Time) *time.Time {

@@ -197,7 +197,7 @@ func isRequiredFieldSet(value any) bool {
 func enrichWithParentEpic(rows []annotation.AnnotatedIssue, details map[string]model.IssueDetail) {
 	for i := range rows {
 		detail := details[rows[i].ID]
-		if detail.Parent == nil || detail.Parent.IssueType != "epic" {
+		if detail.Parent == nil || !detail.Parent.IsContainer() {
 			continue
 		}
 		rows[i].ParentEpic = &annotation.ParentEpicRef{
@@ -219,7 +219,7 @@ func enrichWithParentEpic(rows []annotation.AnnotatedIssue, details map[string]m
 func sortByCompositeRank(rows []annotation.AnnotatedIssue, details map[string]model.IssueDetail) {
 	epicRank := func(issue model.Issue) string {
 		parent := details[issue.ID].Parent
-		if parent != nil && parent.IssueType == "epic" {
+		if parent != nil && parent.IsContainer() {
 			return parent.Rank
 		}
 		return issue.Rank

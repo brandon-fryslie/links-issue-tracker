@@ -52,9 +52,11 @@ func printIssueDetail(w io.Writer, detail model.IssueDetail) error {
 			return err
 		}
 	}
-	progress := issue.Progress()
-	if _, err := fmt.Fprintf(w, "progress: %d/%d closed (open: %d, in_progress: %d, closed: %d)\n", progress.Closed, progress.Total, progress.Open, progress.InProgress, progress.Closed); err != nil {
-		return err
+	if caps.Status == nil {
+		progress := issue.Progress()
+		if _, err := fmt.Fprintf(w, "progress: %d/%d closed (open: %d, in_progress: %d, closed: %d)\n", progress.Closed, progress.Total, progress.Open, progress.InProgress, progress.Closed); err != nil {
+			return err
+		}
 	}
 	// [LAW:dataflow-not-control-flow] Parent block precedes the leaf description
 	// so an agent reading top-to-bottom encounters containing context before

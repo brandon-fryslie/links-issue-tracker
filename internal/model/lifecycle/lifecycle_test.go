@@ -58,6 +58,32 @@ func TestAllOfProgressAndActions(t *testing.T) {
 	}
 }
 
+func TestWalkVisitsAllPrimitives(t *testing.T) {
+	tree := AllOf{Members: []Lifecycle{
+		OwnedStatus{Value: Open},
+		AllOf{Members: []Lifecycle{
+			OwnedStatus{Value: InProgress},
+			OwnedStatus{Value: Closed},
+		}},
+	}}
+	var states []State
+	Walk(tree, func(current Lifecycle) bool {
+		if status, ok := current.(OwnedStatus); ok {
+			states = append(states, status.Value)
+		}
+		return true
+	})
+	want := []State{Open, InProgress, Closed}
+	if len(states) != len(want) {
+		t.Fatalf("visited states = %#v, want %#v", states, want)
+	}
+	for i := range want {
+		if states[i] != want[i] {
+			t.Fatalf("visited states = %#v, want %#v", states, want)
+		}
+	}
+}
+
 func assertActions(t *testing.T, got []ActionName, want []ActionName) {
 	t.Helper()
 	if len(got) != len(want) {

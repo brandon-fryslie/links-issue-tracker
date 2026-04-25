@@ -6,6 +6,10 @@ type AllOf struct {
 	Members []Lifecycle
 }
 
+func (a AllOf) Children() []Lifecycle {
+	return append([]Lifecycle(nil), a.Members...)
+}
+
 func (a AllOf) State() State {
 	progress := a.Progress()
 	switch {

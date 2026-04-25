@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/bmf/links-issue-tracker/internal/lifecycle"
+	"github.com/bmf/links-issue-tracker/internal/model/lifecycle"
 )
 
 type State = lifecycle.State
@@ -44,58 +44,46 @@ type Issue struct {
 }
 
 func (i Issue) State() State {
-	return State(i.lifecycleOrDefault().State())
+	return State(i.requireLifecycle().State())
 }
 
 func (i Issue) Progress() Progress {
-	return i.lifecycleOrDefault().Progress()
+	return i.requireLifecycle().Progress()
 }
 
 func (i Issue) Capabilities() Capabilities {
-	return capabilitiesFrom(i.lifecycle)
+	return capabilitiesFrom(i.requireLifecycle())
 }
 
 func (i Issue) AvailableActions() []ActionName {
-	var out []ActionName
-	for _, actionable := range lifecycle.Actionables(i.lifecycle) {
-		out = append(out, actionable.AvailableActions()...)
+	actionable, ok := i.requireLifecycle().(lifecycle.Actionable)
+	if !ok {
+		return nil
 	}
-	return out
+	return actionable.AvailableActions()
 }
 
 func (i Issue) Apply(action ActionName, actor string, reason string) (Issue, error) {
-	actionables := lifecycle.Actionables(i.lifecycle)
-	var matches []lifecycle.Actionable
-	for _, actionable := range actionables {
-		for _, available := range actionable.AvailableActions() {
-			if available == lifecycle.ActionName(action) {
-				matches = append(matches, actionable)
-			}
-		}
-	}
-	if len(matches) == 0 {
+	actionable, ok := i.requireLifecycle().(lifecycle.Actionable)
+	if !ok {
 		return Issue{}, fmt.Errorf("no %s action available on this issue", action)
 	}
-	if len(matches) > 1 {
-		return Issue{}, fmt.Errorf("ambiguous %s action available on this issue", action)
+	available := false
+	for _, candidate := range actionable.AvailableActions() {
+		if candidate == lifecycle.ActionName(action) {
+			available = true
+			break
+		}
 	}
-	next, err := matches[0].Apply(lifecycle.ActionName(action), actor, reason)
+	if !available {
+		return Issue{}, fmt.Errorf("no %s action available on this issue", action)
+	}
+	next, err := actionable.Apply(lifecycle.ActionName(action), actor, reason)
 	if err != nil {
 		return Issue{}, err
 	}
-	i.SetLifecycle(next)
+	i.lifecycle = next
 	return i, nil
-}
-
-// SetLifecycle is the store/model boundary for synthesized lifecycle data.
-// [LAW:single-enforcer] Store hydration is the only caller that turns persisted
-// columns and relations into an Issue lifecycle expression.
-func (i *Issue) SetLifecycle(l lifecycle.Lifecycle) {
-	i.lifecycle = l
-}
-
-func (i Issue) Lifecycle() lifecycle.Lifecycle {
-	return i.lifecycleOrDefault()
 }
 
 func (i Issue) StatusValue() string {
@@ -122,33 +110,51 @@ func (i Issue) ClosedAtValue() *time.Time {
 	return cloneTime(status.ClosedAt)
 }
 
-func (i Issue) WithAssignee(assignee string) Issue {
-	status := i.Capabilities().Status
-	if status == nil {
-		return i
-	}
-	i.SetLifecycle(lifecycle.OwnedStatus{
-		Value:    lifecycle.State(status.Value),
-		Assignee: assignee,
-		ClosedAt: cloneTime(status.ClosedAt),
-	})
-	return i
+func (i Issue) IsContainer() bool {
+	return i.Capabilities().Status == nil
 }
 
-func (i Issue) WithStatus(value State, assignee string, closedAt *time.Time) Issue {
-	i.SetLifecycle(lifecycle.OwnedStatus{
-		Value:    lifecycle.State(value),
-		Assignee: assignee,
-		ClosedAt: cloneTime(closedAt),
-	})
-	return i
+// HydrateOwnedStatus is the model-owned boundary that turns persisted row
+// status fields into the lifecycle expression stored inside Issue.
+// [LAW:single-enforcer] Row status fields become lifecycle state only through this model API.
+func HydrateOwnedStatus(issue Issue, view StatusView) (Issue, error) {
+	state, err := lifecycle.ParseState(string(view.Value))
+	if err != nil {
+		return Issue{}, err
+	}
+	issue.lifecycle = lifecycle.OwnedStatus{
+		Value:    state,
+		Assignee: view.Assignee,
+		ClosedAt: cloneTime(view.ClosedAt),
+	}
+	return issue, nil
 }
 
-func (i Issue) lifecycleOrDefault() lifecycle.Lifecycle {
-	if i.lifecycle != nil {
-		return i.lifecycle
+// HydrateAllOf composes child issue lifecycles into a non-actionable container.
+// [LAW:one-source-of-truth] Container state is derived from child lifecycles, never copied into another persisted field.
+func HydrateAllOf(issue Issue, children []Issue) (Issue, error) {
+	members := make([]lifecycle.Lifecycle, 0, len(children))
+	for _, child := range children {
+		members = append(members, child.requireLifecycle())
 	}
-	return lifecycle.OwnedStatus{Value: lifecycle.Open}
+	issue.lifecycle = lifecycle.AllOf{Members: members}
+	return issue, nil
+}
+
+// UpdateStatusCapability replaces the root status primitive and refuses
+// containers so callers cannot silently corrupt derived lifecycle state.
+func UpdateStatusCapability(issue Issue, view StatusView) (Issue, error) {
+	if _, ok := issue.requireLifecycle().(lifecycle.OwnedStatus); !ok {
+		return Issue{}, fmt.Errorf("issue %s does not expose a status capability", issue.ID)
+	}
+	return HydrateOwnedStatus(issue, view)
+}
+
+func (i Issue) requireLifecycle() lifecycle.Lifecycle {
+	if i.lifecycle == nil {
+		panic(fmt.Sprintf("issue %s has no hydrated lifecycle", i.ID))
+	}
+	return i.lifecycle
 }
 
 type issueJSON struct {
@@ -167,7 +173,8 @@ type issueJSON struct {
 	ClosedAt    *time.Time `json:"closed_at,omitempty"`
 	ArchivedAt  *time.Time `json:"archived_at,omitempty"`
 	DeletedAt   *time.Time `json:"deleted_at,omitempty"`
-	Progress    Progress   `json:"progress"`
+	// Progress is computed for human-readable sync files and is not authoritative on import.
+	Progress Progress `json:"progress"`
 }
 
 func (i Issue) MarshalJSON() ([]byte, error) {
@@ -220,12 +227,25 @@ func (i *Issue) UnmarshalJSON(data []byte) error {
 		ArchivedAt:  payload.ArchivedAt,
 		DeletedAt:   payload.DeletedAt,
 	}
-	if payload.Status != nil {
-		i.SetLifecycle(lifecycle.OwnedStatus{
-			Value:    lifecycle.State(*payload.Status),
+	switch {
+	case payload.IssueType == "epic":
+		hydrated, err := HydrateAllOf(*i, nil)
+		if err != nil {
+			return err
+		}
+		*i = hydrated
+	case payload.Status != nil:
+		hydrated, err := HydrateOwnedStatus(*i, StatusView{
+			Value:    *payload.Status,
 			Assignee: payload.Assignee,
 			ClosedAt: cloneTime(payload.ClosedAt),
 		})
+		if err != nil {
+			return err
+		}
+		*i = hydrated
+	default:
+		return fmt.Errorf("issue %s: cannot hydrate lifecycle from JSON (missing status field on non-epic)", payload.ID)
 	}
 	return nil
 }

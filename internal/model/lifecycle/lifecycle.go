@@ -37,6 +37,21 @@ type Actionable interface {
 	Apply(name ActionName, actor string, reason string) (Lifecycle, error)
 }
 
+// Walk visits the lifecycle tree depth-first. Policy decisions such as which
+// capabilities or actions an Issue exposes remain root-only in the model
+// package; recursive consumers should use Walk deliberately.
+// [LAW:dataflow-not-control-flow] Tree traversal is one primitive that receives variable lifecycle data instead of scattering recursive special cases across callers.
+func Walk(l Lifecycle, visit func(Lifecycle) bool) {
+	if l == nil || !visit(l) {
+		return
+	}
+	if container, ok := l.(interface{ Children() []Lifecycle }); ok {
+		for _, child := range container.Children() {
+			Walk(child, visit)
+		}
+	}
+}
+
 func ParseState(value string) (State, error) {
 	switch State(value) {
 	case Open, InProgress, Closed:
@@ -47,27 +62,23 @@ func ParseState(value string) (State, error) {
 }
 
 func Statuses(l Lifecycle) []OwnedStatus {
-	switch typed := l.(type) {
-	case nil:
-		return nil
-	case OwnedStatus:
-		return []OwnedStatus{typed}
-	case AllOf:
-		return nil
-	default:
-		return nil
-	}
+	out := []OwnedStatus{}
+	Walk(l, func(current Lifecycle) bool {
+		if status, ok := current.(OwnedStatus); ok {
+			out = append(out, status)
+		}
+		return true
+	})
+	return out
 }
 
 func Actionables(l Lifecycle) []Actionable {
-	switch typed := l.(type) {
-	case nil:
-		return nil
-	case AllOf:
-		return nil
-	case Actionable:
-		return []Actionable{typed}
-	default:
-		return nil
-	}
+	out := []Actionable{}
+	Walk(l, func(current Lifecycle) bool {
+		if actionable, ok := current.(Actionable); ok {
+			out = append(out, actionable)
+		}
+		return true
+	})
+	return out
 }
