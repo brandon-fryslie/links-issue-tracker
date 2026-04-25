@@ -1,0 +1,71 @@
+package lifecycle
+
+import "testing"
+
+func TestOwnedStatusStateAndActions(t *testing.T) {
+	tests := []struct {
+		name    string
+		status  OwnedStatus
+		actions []ActionName
+	}{
+		{name: "open", status: OwnedStatus{Value: Open}, actions: []ActionName{ActionStart, ActionClose}},
+		{name: "in progress", status: OwnedStatus{Value: InProgress}, actions: []ActionName{ActionDone, ActionClose}},
+		{name: "closed", status: OwnedStatus{Value: Closed}, actions: []ActionName{ActionReopen}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.status.State() != tt.status.Value {
+				t.Fatalf("State() = %q, want %q", tt.status.State(), tt.status.Value)
+			}
+			assertActions(t, tt.status.AvailableActions(), tt.actions)
+		})
+	}
+}
+
+func TestAllOfState(t *testing.T) {
+	tests := []struct {
+		name    string
+		members []Lifecycle
+		want    State
+	}{
+		{name: "all open", members: []Lifecycle{OwnedStatus{Value: Open}, OwnedStatus{Value: Open}}, want: Open},
+		{name: "mixed closed", members: []Lifecycle{OwnedStatus{Value: Open}, OwnedStatus{Value: Closed}}, want: InProgress},
+		{name: "in progress", members: []Lifecycle{OwnedStatus{Value: Open}, OwnedStatus{Value: InProgress}}, want: InProgress},
+		{name: "all closed", members: []Lifecycle{OwnedStatus{Value: Closed}, OwnedStatus{Value: Closed}}, want: Closed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := AllOf{Members: tt.members}.State()
+			if got != tt.want {
+				t.Fatalf("State() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestAllOfProgressAndActions(t *testing.T) {
+	all := AllOf{Members: []Lifecycle{
+		OwnedStatus{Value: Open},
+		OwnedStatus{Value: InProgress},
+		OwnedStatus{Value: Closed},
+	}}
+	progress := all.Progress()
+	if progress.Open != 1 || progress.InProgress != 1 || progress.Closed != 1 || progress.Total != 3 {
+		t.Fatalf("Progress() = %#v, want 1/1/1 total 3", progress)
+	}
+	if actions := all.AvailableActions(); len(actions) != 0 {
+		t.Fatalf("AvailableActions() = %#v, want empty", actions)
+	}
+}
+
+func assertActions(t *testing.T, got []ActionName, want []ActionName) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("actions = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("actions = %#v, want %#v", got, want)
+		}
+	}
+}

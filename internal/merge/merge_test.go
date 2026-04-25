@@ -8,7 +8,7 @@ import (
 )
 
 func TestThreeWayDetectsPerIssueConflict(t *testing.T) {
-	base := model.Export{Issues: []model.Issue{{ID: "i1", Title: "issue", Status: "open", Priority: 2, IssueType: "task", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}}}
+	base := model.Export{Issues: []model.Issue{model.Issue{ID: "i1", Title: "issue", Priority: 2, IssueType: "task", CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}.WithStatus(model.StateOpen, "", nil)}}
 	local := model.Export{Issues: append([]model.Issue(nil), base.Issues...)}
 	remote := model.Export{Issues: append([]model.Issue(nil), base.Issues...)}
 	local.Issues[0].Title = "local-change"
@@ -28,8 +28,8 @@ func TestThreeWayMergesNonConflictingIssueChanges(t *testing.T) {
 	base := model.Export{
 		WorkspaceID: "ws",
 		Issues: []model.Issue{
-			{ID: "i1", Title: "one", Status: "open", Priority: 2, IssueType: "task", CreatedAt: now, UpdatedAt: now},
-			{ID: "i2", Title: "two", Status: "open", Priority: 2, IssueType: "task", CreatedAt: now, UpdatedAt: now},
+			model.Issue{ID: "i1", Title: "one", Priority: 2, IssueType: "task", CreatedAt: now, UpdatedAt: now}.WithStatus(model.StateOpen, "", nil),
+			model.Issue{ID: "i2", Title: "two", Priority: 2, IssueType: "task", CreatedAt: now, UpdatedAt: now}.WithStatus(model.StateOpen, "", nil),
 		},
 	}
 	local := model.Export{WorkspaceID: base.WorkspaceID, Issues: append([]model.Issue(nil), base.Issues...)}

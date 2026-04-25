@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/bmf/links-issue-tracker/internal/lifecycle"
 	"github.com/bmf/links-issue-tracker/internal/model"
 	"github.com/bmf/links-issue-tracker/internal/rank"
 )
@@ -319,14 +320,17 @@ func (s *Store) createIssueOnce(ctx context.Context, in CreateIssueInput) (model
 	issue := model.Issue{
 		Title:       strings.TrimSpace(in.Title),
 		Description: strings.TrimSpace(in.Description),
-		Status:      "open",
 		Priority:    priority,
 		IssueType:   issueType,
 		Topic:       topic,
-		Assignee:    strings.TrimSpace(in.Assignee),
 		Labels:      labels,
 		CreatedAt:   now,
 		UpdatedAt:   now,
+	}
+	if issueType == "epic" {
+		issue.SetLifecycle(lifecycle.AllOf{})
+	} else {
+		issue.SetLifecycle(lifecycle.OwnedStatus{Value: lifecycle.Open, Assignee: strings.TrimSpace(in.Assignee)})
 	}
 	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
 	if err != nil {
@@ -362,8 +366,8 @@ func (s *Store) createIssueOnce(ctx context.Context, in CreateIssueInput) (model
 	_, err = tx.ExecContext(ctx, `INSERT INTO issues(
 		id, title, description, status, priority, issue_type, topic, assignee, item_rank, created_at, updated_at, closed_at, archived_at, deleted_at
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
-		issue.ID, issue.Title, issue.Description, issue.Status, issue.Priority, issue.IssueType, issue.Topic,
-		issue.Assignee, issue.Rank, issue.CreatedAt.Format(time.RFC3339Nano), issue.UpdatedAt.Format(time.RFC3339Nano))
+		issue.ID, issue.Title, issue.Description, statusForStorage(issue), issue.Priority, issue.IssueType, issue.Topic,
+		issue.AssigneeValue(), issue.Rank, issue.CreatedAt.Format(time.RFC3339Nano), issue.UpdatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return model.Issue{}, fmt.Errorf("insert issue: %w", err)
 	}
@@ -387,6 +391,9 @@ func (s *Store) createIssueOnce(ctx context.Context, in CreateIssueInput) (model
 	}
 	if err := s.smoothRanksIfNeeded(ctx, issue.Rank); err != nil {
 		return model.Issue{}, err
+	}
+	if issue.IssueType == "epic" {
+		issue.SetLifecycle(lifecycle.AllOf{})
 	}
 	return issue, nil
 }
@@ -541,7 +548,11 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	return s.attachLabels(ctx, issues)
+	issues, err = s.attachLabels(ctx, issues)
+	if err != nil {
+		return nil, err
+	}
+	return s.populateLifecycles(ctx, issues)
 }
 
 func (s *Store) GetIssueDetail(ctx context.Context, id string) (model.IssueDetail, error) {
@@ -660,6 +671,10 @@ func (s *Store) GetIssue(ctx context.Context, id string) (model.Issue, error) {
 	if err != nil {
 		return model.Issue{}, err
 	}
+	labeled, err = s.populateLifecycles(ctx, labeled)
+	if err != nil {
+		return model.Issue{}, err
+	}
 	return labeled[0], nil
 }
 
@@ -694,7 +709,7 @@ func (s *Store) UpdateIssue(ctx context.Context, id string, in UpdateIssueInput)
 		issue.Priority = *in.Priority
 	}
 	if in.Assignee != nil {
-		issue.Assignee = strings.TrimSpace(*in.Assignee)
+		issue = issue.WithAssignee(strings.TrimSpace(*in.Assignee))
 	}
 	if in.Labels != nil {
 		labels, err := canonicalizeLabels(*in.Labels)
@@ -705,8 +720,8 @@ func (s *Store) UpdateIssue(ctx context.Context, id string, in UpdateIssueInput)
 	}
 	issue.UpdatedAt = time.Now().UTC()
 	var closedAt any
-	if issue.ClosedAt != nil {
-		closedAt = issue.ClosedAt.Format(time.RFC3339Nano)
+	if value := issue.ClosedAtValue(); value != nil {
+		closedAt = value.Format(time.RFC3339Nano)
 	}
 	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
 	if err != nil {
@@ -720,7 +735,7 @@ func (s *Store) UpdateIssue(ctx context.Context, id string, in UpdateIssueInput)
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `UPDATE issues SET
 		title = ?, description = ?, status = ?, priority = ?, issue_type = ?, assignee = ?, updated_at = ?, closed_at = ?, archived_at = ?, deleted_at = ?
-		WHERE id = ?`, issue.Title, issue.Description, issue.Status, issue.Priority, issue.IssueType, issue.Assignee, issue.UpdatedAt.Format(time.RFC3339Nano), closedAt, nullableTime(issue.ArchivedAt), nullableTime(issue.DeletedAt), issue.ID)
+		WHERE id = ?`, issue.Title, issue.Description, statusForStorage(issue), issue.Priority, issue.IssueType, issue.AssigneeValue(), issue.UpdatedAt.Format(time.RFC3339Nano), closedAt, nullableTime(issue.ArchivedAt), nullableTime(issue.DeletedAt), issue.ID)
 	if err != nil {
 		return model.Issue{}, fmt.Errorf("update issue: %w", err)
 	}
@@ -735,7 +750,7 @@ func (s *Store) UpdateIssue(ctx context.Context, id string, in UpdateIssueInput)
 	if err := s.commitWorkingSet(ctx, "update issue"); err != nil {
 		return model.Issue{}, err
 	}
-	return issue, nil
+	return s.GetIssue(ctx, issue.ID)
 }
 
 // RankToTop moves an issue to rank above all other issues.
@@ -824,31 +839,28 @@ func (s *Store) transitionIssueOnce(ctx context.Context, in TransitionIssueInput
 		return s.transitionStatusAtomic(ctx, issue, actor, reason, action, "in_progress", "closed")
 	}
 	now := time.Now().UTC()
-	fromStatus := issue.Status
-	toStatus := issue.Status
+	fromStatus := issue.StatusValue()
+	toStatus := issue.StatusValue()
 	switch action {
 	case "close":
 		if issue.DeletedAt != nil || issue.ArchivedAt != nil {
 			return model.Issue{}, errors.New("cannot close archived or deleted issue")
 		}
-		if issue.Status == "closed" {
-			return model.Issue{}, errors.New("issue is already closed")
+		updated, err := issue.Apply(model.ActionClose, actor, reason)
+		if err != nil {
+			return model.Issue{}, err
 		}
-		issue.Status = "closed"
-		issue.ClosedAt = &now
+		issue = updated
 		toStatus = "closed"
 	case "reopen":
 		if issue.DeletedAt != nil || issue.ArchivedAt != nil {
 			return model.Issue{}, errors.New("cannot reopen archived or deleted issue")
 		}
-		if issue.Status == "open" {
-			return model.Issue{}, errors.New("issue is already open")
+		updated, err := issue.Apply(model.ActionReopen, actor, reason)
+		if err != nil {
+			return model.Issue{}, err
 		}
-		if issue.Status != "closed" {
-			return model.Issue{}, errors.New("issue is not closed")
-		}
-		issue.Status = "open"
-		issue.ClosedAt = nil
+		issue = updated
 		toStatus = "open"
 	case "archive":
 		if issue.DeletedAt != nil {
@@ -891,7 +903,7 @@ func (s *Store) transitionIssueOnce(ctx context.Context, in TransitionIssueInput
 	}
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, `UPDATE issues SET status = ?, updated_at = ?, closed_at = ?, archived_at = ?, deleted_at = ? WHERE id = ?`,
-		issue.Status, issue.UpdatedAt.Format(time.RFC3339Nano), nullableTime(issue.ClosedAt), nullableTime(issue.ArchivedAt), nullableTime(issue.DeletedAt), issue.ID); err != nil {
+		statusForStorage(issue), issue.UpdatedAt.Format(time.RFC3339Nano), nullableTime(issue.ClosedAtValue()), nullableTime(issue.ArchivedAt), nullableTime(issue.DeletedAt), issue.ID); err != nil {
 		return model.Issue{}, fmt.Errorf("update issue lifecycle: %w", err)
 	}
 	if err := s.insertHistoryTx(ctx, tx, issue.ID, action, reason, fromStatus, toStatus, actor); err != nil {
@@ -909,6 +921,10 @@ func (s *Store) transitionIssueOnce(ctx context.Context, in TransitionIssueInput
 func (s *Store) transitionStatusAtomic(ctx context.Context, issue model.Issue, actor string, reason string, action string, fromStatus string, toStatus string) (model.Issue, error) {
 	if issue.DeletedAt != nil || issue.ArchivedAt != nil {
 		return model.Issue{}, fmt.Errorf("cannot %s archived or deleted issue", action)
+	}
+	updated, err := issue.Apply(model.ActionName(action), actor, reason)
+	if err != nil {
+		return model.Issue{}, err
 	}
 	now := time.Now().UTC()
 	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
@@ -951,12 +967,8 @@ func (s *Store) transitionStatusAtomic(ctx context.Context, issue model.Issue, a
 	if err := s.commitWorkingSet(ctx, "transition issue"); err != nil {
 		return model.Issue{}, err
 	}
-	issue.Status = toStatus
-	issue.UpdatedAt = now
-	if toStatus == "closed" {
-		issue.ClosedAt = &now
-	}
-	return issue, nil
+	updated.UpdatedAt = now
+	return updated, nil
 }
 
 func currentStatusTx(ctx context.Context, tx *sql.Tx, issueID string) (string, error) {
@@ -1339,9 +1351,10 @@ func nextRankAtBottom(ctx context.Context, tx *sql.Tx) (string, error) {
 
 func scanIssue(row issueScanner) (model.Issue, error) {
 	var issue model.Issue
+	var status, assignee string
 	var createdAt, updatedAt string
 	var closedAt, archivedAt, deletedAt sql.NullString
-	if err := row.Scan(&issue.ID, &issue.Title, &issue.Description, &issue.Status, &issue.Priority, &issue.IssueType, &issue.Topic, &issue.Assignee, &issue.Rank, &createdAt, &updatedAt, &closedAt, &archivedAt, &deletedAt); err != nil {
+	if err := row.Scan(&issue.ID, &issue.Title, &issue.Description, &status, &issue.Priority, &issue.IssueType, &issue.Topic, &assignee, &issue.Rank, &createdAt, &updatedAt, &closedAt, &archivedAt, &deletedAt); err != nil {
 		return model.Issue{}, err
 	}
 	var err error
@@ -1358,7 +1371,17 @@ func scanIssue(row issueScanner) (model.Issue, error) {
 		if err != nil {
 			return model.Issue{}, err
 		}
-		issue.ClosedAt = &t
+		parsed, err := lifecycle.ParseState(status)
+		if err != nil {
+			return model.Issue{}, err
+		}
+		issue.SetLifecycle(lifecycle.OwnedStatus{Value: parsed, Assignee: assignee, ClosedAt: &t})
+	} else {
+		parsed, err := lifecycle.ParseState(status)
+		if err != nil {
+			return model.Issue{}, err
+		}
+		issue.SetLifecycle(lifecycle.OwnedStatus{Value: parsed, Assignee: assignee})
 	}
 	if archivedAt.Valid {
 		t, err := time.Parse(time.RFC3339Nano, archivedAt.String)
@@ -1376,6 +1399,60 @@ func scanIssue(row issueScanner) (model.Issue, error) {
 	}
 	issue.Labels = []string{}
 	return issue, nil
+}
+
+func statusForStorage(issue model.Issue) string {
+	status := issue.StatusValue()
+	if status == "" {
+		return string(lifecycle.Open)
+	}
+	return status
+}
+
+func (s *Store) populateLifecycles(ctx context.Context, issues []model.Issue) ([]model.Issue, error) {
+	for index := range issues {
+		if issues[index].IssueType != "epic" {
+			continue
+		}
+		children, err := s.lifecycleChildren(ctx, issues[index].ID)
+		if err != nil {
+			return nil, err
+		}
+		members := make([]lifecycle.Lifecycle, 0, len(children))
+		for _, child := range children {
+			members = append(members, child.Lifecycle())
+		}
+		issues[index].SetLifecycle(lifecycle.AllOf{Members: members})
+	}
+	return issues, nil
+}
+
+func (s *Store) lifecycleChildren(ctx context.Context, epicID string) ([]model.Issue, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT i.id, i.title, i.description, i.status, i.priority, i.issue_type, i.topic, i.assignee, i.item_rank, i.created_at, i.updated_at, i.closed_at, i.archived_at, i.deleted_at
+		FROM relations r
+		JOIN issues i ON i.id = r.src_id
+		WHERE r.dst_id = ? AND r.type = 'parent-child' AND i.archived_at IS NULL AND i.deleted_at IS NULL
+		ORDER BY i.item_rank ASC`, epicID)
+	if err != nil {
+		return nil, fmt.Errorf("load lifecycle children for %s: %w", epicID, err)
+	}
+	defer rows.Close()
+	children := []model.Issue{}
+	for rows.Next() {
+		child, err := scanIssue(rows)
+		if err != nil {
+			return nil, err
+		}
+		children = append(children, child)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	children, err = s.attachLabels(ctx, children)
+	if err != nil {
+		return nil, err
+	}
+	return s.populateLifecycles(ctx, children)
 }
 
 func (s *Store) attachLabels(ctx context.Context, issues []model.Issue) ([]model.Issue, error) {

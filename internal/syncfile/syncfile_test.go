@@ -14,16 +14,15 @@ func TestWriteAndReadAtomicExport(t *testing.T) {
 		Version:     1,
 		WorkspaceID: "workspace-test",
 		ExportedAt:  time.Now().UTC(),
-		Issues: []model.Issue{{
+		Issues: []model.Issue{model.Issue{
 			ID:        "issue-1",
 			Title:     "Renderer cleanup",
-			Status:    "open",
 			Priority:  1,
 			IssueType: "task",
 			Labels:    []string{"renderer"},
 			CreatedAt: time.Now().UTC(),
 			UpdatedAt: time.Now().UTC(),
-		}},
+		}.WithStatus(model.StateOpen, "", nil)},
 	}
 	hash, err := WriteAtomic(path, export)
 	if err != nil {
