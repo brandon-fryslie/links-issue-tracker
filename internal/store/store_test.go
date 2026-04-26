@@ -150,6 +150,83 @@ func TestEpicLifecycleCapabilitiesAndProgress(t *testing.T) {
 	}
 }
 
+// Epic state is derived from children; ListIssues filters by that derived state
+// rather than the dead i.status DB column. This regression test pins the three
+// epic shapes against the canonical default and explicit status filters.
+func TestListIssuesStatusFilterUsesDerivedEpicState(t *testing.T) {
+	ctx := context.Background()
+	st := openIssueStore(t, ctx)
+
+	openEpic, err := st.CreateIssue(ctx, CreateIssueInput{Title: "All open", Topic: "derived", IssueType: "epic", Priority: 1})
+	if err != nil {
+		t.Fatalf("CreateIssue(openEpic) error = %v", err)
+	}
+	if _, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Open child", Topic: "derived", IssueType: "task", Priority: 2, ParentID: openEpic.ID}); err != nil {
+		t.Fatalf("CreateIssue(openEpic child) error = %v", err)
+	}
+
+	mixedEpic, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Mixed children", Topic: "derived", IssueType: "epic", Priority: 1})
+	if err != nil {
+		t.Fatalf("CreateIssue(mixedEpic) error = %v", err)
+	}
+	if _, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Mixed open", Topic: "derived", IssueType: "task", Priority: 2, ParentID: mixedEpic.ID}); err != nil {
+		t.Fatalf("CreateIssue(mixedEpic open child) error = %v", err)
+	}
+	mixedClosedChild, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Mixed closed", Topic: "derived", IssueType: "task", Priority: 2, ParentID: mixedEpic.ID})
+	if err != nil {
+		t.Fatalf("CreateIssue(mixedEpic closed child) error = %v", err)
+	}
+	if _, err := st.TransitionIssue(ctx, TransitionIssueInput{IssueID: mixedClosedChild.ID, Action: "start", CreatedBy: "tester"}); err != nil {
+		t.Fatalf("TransitionIssue(mixed closed start) error = %v", err)
+	}
+	if _, err := st.TransitionIssue(ctx, TransitionIssueInput{IssueID: mixedClosedChild.ID, Action: "done", CreatedBy: "tester"}); err != nil {
+		t.Fatalf("TransitionIssue(mixed closed done) error = %v", err)
+	}
+
+	closedEpic, err := st.CreateIssue(ctx, CreateIssueInput{Title: "All closed", Topic: "derived", IssueType: "epic", Priority: 1})
+	if err != nil {
+		t.Fatalf("CreateIssue(closedEpic) error = %v", err)
+	}
+	closedChild, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Closed child", Topic: "derived", IssueType: "task", Priority: 2, ParentID: closedEpic.ID})
+	if err != nil {
+		t.Fatalf("CreateIssue(closedEpic child) error = %v", err)
+	}
+	if _, err := st.TransitionIssue(ctx, TransitionIssueInput{IssueID: closedChild.ID, Action: "start", CreatedBy: "tester"}); err != nil {
+		t.Fatalf("TransitionIssue(closed child start) error = %v", err)
+	}
+	if _, err := st.TransitionIssue(ctx, TransitionIssueInput{IssueID: closedChild.ID, Action: "done", CreatedBy: "tester"}); err != nil {
+		t.Fatalf("TransitionIssue(closed child done) error = %v", err)
+	}
+
+	cases := []struct {
+		name     string
+		statuses []string
+		want     map[string]bool
+	}{
+		{name: "default open+in_progress", statuses: []string{"open", "in_progress"}, want: map[string]bool{openEpic.ID: true, mixedEpic.ID: true, closedEpic.ID: false}},
+		{name: "open only", statuses: []string{"open"}, want: map[string]bool{openEpic.ID: true, mixedEpic.ID: false, closedEpic.ID: false}},
+		{name: "in_progress only", statuses: []string{"in_progress"}, want: map[string]bool{openEpic.ID: false, mixedEpic.ID: true, closedEpic.ID: false}},
+		{name: "closed only", statuses: []string{"closed"}, want: map[string]bool{openEpic.ID: false, mixedEpic.ID: false, closedEpic.ID: true}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			issues, err := st.ListIssues(ctx, ListIssuesFilter{Statuses: tc.statuses, IssueTypes: []string{"epic"}})
+			if err != nil {
+				t.Fatalf("ListIssues(%v) error = %v", tc.statuses, err)
+			}
+			got := map[string]bool{}
+			for _, issue := range issues {
+				got[issue.ID] = true
+			}
+			for id, expect := range tc.want {
+				if got[id] != expect {
+					t.Fatalf("ListIssues(%v) epic %s present=%v, want %v (got ids=%v)", tc.statuses, id, got[id], expect, issueIDs(issues))
+				}
+			}
+		})
+	}
+}
+
 func TestFixRankInversionsConvergesWhenDependencyBlocksMultipleIssues(t *testing.T) {
 	ctx := context.Background()
 	st := openIssueStore(t, ctx)
