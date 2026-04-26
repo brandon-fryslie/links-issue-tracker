@@ -250,6 +250,52 @@ func applyLimit(issues []annotation.AnnotatedIssue, limit int) []annotation.Anno
 	return issues[:limit]
 }
 
+// sortByContinueBias is a stable sort that pulls leaves whose parent epic is
+// currently in_progress to the front, preserving composite-rank order within
+// each group. The bias absorbs "what is the agent's current focus" as a sort
+// key over data, not as a branch in the consumer.
+// [LAW:dataflow-not-control-flow] Same comparator runs over every pair; the
+// parent-epic state decides ordering, not whether the comparator runs.
+func sortByContinueBias(rows []annotation.AnnotatedIssue, details map[string]model.IssueDetail) {
+	inProgressEpic := func(row annotation.AnnotatedIssue) bool {
+		parent := details[row.ID].Parent
+		return parent != nil && parent.IsContainer() && parent.State() == model.StateInProgress
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		return inProgressEpic(rows[i]) && !inProgressEpic(rows[j])
+	})
+}
+
+// pickFirstReady returns the first row in the ready partition: open status and
+// no blocking annotations. In-progress and blocked rows are skipped because the
+// agent should not `lit start` them — they need `lit done` or unblocking first.
+func pickFirstReady(rows []annotation.AnnotatedIssue) (annotation.AnnotatedIssue, bool) {
+	for _, row := range rows {
+		if row.State() == model.StateInProgress {
+			continue
+		}
+		if isReadyBlocked(row.Annotations) {
+			continue
+		}
+		return row, true
+	}
+	return annotation.AnnotatedIssue{}, false
+}
+
+// printNextSummary renders one workable leaf for `lit next` text output: the
+// standard id+state+topic+title line, indented epic context if any, and inline
+// dependency annotations so the agent knows what context to load before
+// `lit start`.
+func printNextSummary(w io.Writer, v any) error {
+	row := v.(annotation.AnnotatedIssue)
+	columns := resolveColumns(nil)
+	line := formatIssueColumns(row.Issue, columns, "  ")
+	if _, err := fmt.Fprintln(w, line); err != nil {
+		return err
+	}
+	return printInlineDeps(w, row, nil)
+}
+
 // readyPreamble is printed before the ready list to give agents context about
 // how to interpret and act on the backlog.
 // [LAW:one-source-of-truth] Single definition of ready preamble text.
