@@ -266,12 +266,16 @@ func sortByContinueBias(rows []annotation.AnnotatedIssue, details map[string]mod
 	})
 }
 
-// pickFirstReady returns the first row in the ready partition: open status and
-// no blocking annotations. In-progress and blocked rows are skipped because the
-// agent should not `lit start` them — they need `lit done` or unblocking first.
+// pickFirstReady returns the first row in the ready partition: open status
+// and no blocking annotations. The predicate is stated positively (StateOpen)
+// rather than as "not in_progress and not blocked" so the implementation
+// matches the docstring literally and stays correct if the upstream filter
+// ever widens the set of statuses it lets through. The agent should not
+// `lit start` an in-progress or blocked leaf — those need `lit done` or
+// unblocking first.
 func pickFirstReady(rows []annotation.AnnotatedIssue) (annotation.AnnotatedIssue, bool) {
 	for _, row := range rows {
-		if row.State() == model.StateInProgress {
+		if row.State() != model.StateOpen {
 			continue
 		}
 		if isReadyBlocked(row.Annotations) {

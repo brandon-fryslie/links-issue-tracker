@@ -61,20 +61,22 @@ func TestRunNextSkipsInProgressLeaf(t *testing.T) {
 }
 
 // Blocked leaves (open dependency) are skipped just as `lit ready` partitions
-// them out of the ready section.
+// them out of the ready section. With deterministic creation-order ranking the
+// blocker (rank 1, no parent epic, no own dependencies) is unambiguously top,
+// so the assertion pins both "dependent skipped" and the exact expected pick.
 func TestRunNextSkipsBlockedLeaf(t *testing.T) {
 	h := newReadyTestHarness(t)
 	blocker := h.createIssue(store.CreateIssueInput{Title: "Blocker", Topic: "next", IssueType: "task", Priority: 1})
 	dependent := h.createIssue(store.CreateIssueInput{Title: "Dependent", Topic: "next", IssueType: "task", Priority: 2})
 	h.addDependency(dependent.ID, blocker.ID)
-	clear := h.createIssue(store.CreateIssueInput{Title: "Unblocked third", Topic: "next", IssueType: "task", Priority: 3})
+	h.createIssue(store.CreateIssueInput{Title: "Unblocked third", Topic: "next", IssueType: "task", Priority: 3})
 
 	got := h.runNextJSON()
-	if got.ID != blocker.ID && got.ID != clear.ID {
-		t.Fatalf("next.ID = %q, want blocker %q or clear %q (the dependent must be skipped)", got.ID, blocker.ID, clear.ID)
-	}
 	if got.ID == dependent.ID {
 		t.Fatalf("next.ID = %q (dependent), want a non-blocked leaf", got.ID)
+	}
+	if got.ID != blocker.ID {
+		t.Fatalf("next.ID = %q, want %q (top of ready order after skipping blocked dependent)", got.ID, blocker.ID)
 	}
 }
 
