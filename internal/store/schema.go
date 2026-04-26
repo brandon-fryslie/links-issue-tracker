@@ -14,8 +14,11 @@ import (
 // NULL status (state is derived from children) and leaf rows carry one of the
 // known states. Single source of truth used by both the fresh-table CREATE
 // (via createIssuesTableStmt) and the upgrade-path ALTER (ensureStatusConstraint)
-// so they cannot diverge.
-const canonicalStatusCheckClause = `(issue_type IN ('epic') AND status IS NULL) OR (issue_type NOT IN ('epic') AND status IN ('open','in_progress','closed'))`
+// so they cannot diverge. The leaf branch carries an explicit `status IS NOT
+// NULL`: `IN (...)` against NULL evaluates to NULL, and MySQL/Dolt CHECK
+// treats NULL as not-violated, so without this clause a leaf row with NULL
+// status would slip through the very constraint it is supposed to forbid.
+const canonicalStatusCheckClause = `(issue_type IN ('epic') AND status IS NULL) OR (issue_type NOT IN ('epic') AND status IS NOT NULL AND status IN ('open','in_progress','closed'))`
 
 func createIssuesTableStmt() string {
 	return fmt.Sprintf(`CREATE TABLE issues (

@@ -1409,6 +1409,26 @@ func TestSchemaRejectsEpicWithNonNullStatus(t *testing.T) {
 	}
 }
 
+// The other half of the CHECK invariant: leaf rows must carry a non-NULL
+// status. `status IN (...)` against NULL evaluates to NULL, and MySQL/Dolt
+// CHECK treats NULL as not-violated — so without an explicit `status IS NOT
+// NULL` term in the canonical clause, a leaf row with NULL status would slip
+// through. This test pins the schema-level rejection so any future drift in
+// Dolt's CHECK-NULL semantics or in the clause itself fails loudly.
+func TestSchemaRejectsLeafWithNullStatus(t *testing.T) {
+	ctx := context.Background()
+	st := openIssueStore(t, ctx)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	err := st.ExecRawForTest(ctx,
+		`INSERT INTO issues(id, title, description, status, priority, issue_type, topic, assignee, item_rank, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"test-illegal-leaf", "Illegal", "", nil, 1, "task", "schema", "", "ZZZ", now, now,
+	)
+	if err == nil {
+		t.Fatal("INSERT task with status=NULL succeeded; CHECK constraint should reject it")
+	}
+}
+
 func TestSyncRoundTripIncludingEpic(t *testing.T) {
 	ctx := context.Background()
 	source := openIssueStore(t, ctx)
