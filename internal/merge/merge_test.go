@@ -73,6 +73,18 @@ func TestThreeWayComparesJSONUnmarshaledEpicData(t *testing.T) {
 	}
 }
 
+func TestIssueEqualTreatsNilAndEmptyLabelsAsEquivalent(t *testing.T) {
+	now := time.Now().UTC()
+	base := issueWithStatus(t, model.Issue{ID: "i1", Title: "label test", Priority: 2, IssueType: "task", CreatedAt: now, UpdatedAt: now}, model.StateOpen)
+	withNil := base
+	withNil.Labels = nil
+	withEmpty := base
+	withEmpty.Labels = []string{}
+	if !issueEqual(&withNil, &withEmpty) {
+		t.Fatalf("issueEqual(nil, []) = false; nil and empty Labels must compare equal so JSON wire round-trip drift does not synthesize spurious changes")
+	}
+}
+
 func TestThreeWayMergesNonConflictingIssueChanges(t *testing.T) {
 	now := time.Now().UTC()
 	base := model.Export{

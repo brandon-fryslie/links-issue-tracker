@@ -166,7 +166,7 @@ func issueProjectionFrom(issue model.Issue) issueProjection {
 		Topic:       issue.Topic,
 		Assignee:    issue.AssigneeValue(),
 		Rank:        issue.Rank,
-		Labels:      append([]string(nil), issue.Labels...),
+		Labels:      append([]string{}, issue.Labels...),
 		CreatedAt:   issue.CreatedAt,
 		UpdatedAt:   issue.UpdatedAt,
 		ClosedAt:    issue.ClosedAtValue(),
