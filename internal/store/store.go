@@ -871,7 +871,10 @@ func (s *Store) transitionIssueOnce(ctx context.Context, in TransitionIssueInput
 	}
 	reloaded, err := s.GetIssue(ctx, issue.ID)
 	if err != nil {
-		return model.Issue{}, fmt.Errorf("%s committed but post-write hydration failed: %w", action, err)
+		// [LAW:dataflow-not-control-flow] Write succeeded; surface the in-memory
+		// post-mutation state so callers don't see a write+error combo and retry
+		// an already-applied transition.
+		return issue, nil
 	}
 	return reloaded, nil
 }

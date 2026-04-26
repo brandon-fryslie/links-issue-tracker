@@ -1357,19 +1357,40 @@ func TestReopenClearsClosedAt(t *testing.T) {
 func TestExportRefusesUnhydratedIssue(t *testing.T) {
 	ctx := context.Background()
 	st := openIssueStore(t, ctx)
-	if _, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Hydrated", Topic: "life", IssueType: "task", Priority: 2}); err != nil {
+	hydrated, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Hydrated", Topic: "life", IssueType: "task", Priority: 2})
+	if err != nil {
 		t.Fatalf("CreateIssue() error = %v", err)
 	}
 	export, err := st.Export(ctx)
 	if err != nil {
 		t.Fatalf("Export() error = %v", err)
 	}
-	if len(export.Issues) == 0 {
-		t.Fatalf("Export() returned empty Issues")
+	if len(export.Issues) == 0 || export.Issues[0].ID != hydrated.ID {
+		t.Fatalf("Export() returned %#v, want hydrated issue", export.Issues)
 	}
 	export.Issues = append(export.Issues, model.Issue{ID: "unhydrated-x", IssueType: "task"})
-	if export.Issues[len(export.Issues)-1].IsHydrated() {
-		t.Fatalf("unhydrated issue reports IsHydrated() = true")
+	if _, err := json.MarshalIndent(export, "", "  "); err == nil {
+		t.Fatalf("MarshalIndent of export with unhydrated issue did not error")
+	}
+}
+
+func TestArchiveSecondCallErrorsAlreadyArchived(t *testing.T) {
+	ctx := context.Background()
+	st := openIssueStore(t, ctx)
+	epic, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Archive me", Topic: "life", IssueType: "epic", Priority: 1})
+	if err != nil {
+		t.Fatalf("CreateIssue() error = %v", err)
+	}
+	archived, err := st.TransitionIssue(ctx, TransitionIssueInput{IssueID: epic.ID, Action: "archive", CreatedBy: "tester"})
+	if err != nil {
+		t.Fatalf("TransitionIssue(archive) error = %v", err)
+	}
+	if archived.ArchivedAt == nil {
+		t.Fatalf("archived issue has nil ArchivedAt")
+	}
+	_, err = st.TransitionIssue(ctx, TransitionIssueInput{IssueID: epic.ID, Action: "archive", CreatedBy: "tester"})
+	if err == nil || err.Error() != "issue is already archived" {
+		t.Fatalf("re-archive error = %v, want already archived", err)
 	}
 }
 

@@ -258,10 +258,18 @@ type issueJSON struct {
 }
 
 func (i Issue) MarshalJSON() ([]byte, error) {
+	if i.pendingHydration {
+		return nil, fmt.Errorf("issue %s requires store hydration", i.ID)
+	}
+	if i.lifecycle == nil {
+		// [LAW:single-enforcer] JSON serialization is the boundary that turns
+		// unhydrated issue values into errors instead of process panics.
+		return nil, fmt.Errorf("issue %s has no hydrated lifecycle", i.ID)
+	}
+	caps := capabilitiesFrom(i.lifecycle)
 	if _, err := i.lifecycleOrError(); err != nil {
 		return nil, err
 	}
-	caps := i.Capabilities()
 	var statusValue *State
 	var assignee string
 	var closedAt *time.Time

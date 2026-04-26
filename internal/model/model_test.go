@@ -133,13 +133,11 @@ func TestNeedsStoreHydrationLifecycleMethodsReturnZero(t *testing.T) {
 	}
 }
 
-func TestNilLifecycleIssueMarshalJSONPanics(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Fatal("Marshal() on nil-lifecycle Issue did not panic")
-		}
-	}()
-	_, _ = json.Marshal(Issue{ID: "task-1", IssueType: "task"})
+func TestNilLifecycleIssueMarshalJSONErrors(t *testing.T) {
+	_, err := json.Marshal(Issue{ID: "task-1", IssueType: "task"})
+	if err == nil || !strings.Contains(err.Error(), "has no hydrated lifecycle") {
+		t.Fatalf("Marshal() error = %v, want no hydrated lifecycle error", err)
+	}
 }
 
 func TestIssueJSONOmitsProgress(t *testing.T) {
