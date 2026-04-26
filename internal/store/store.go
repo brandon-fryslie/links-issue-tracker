@@ -408,16 +408,12 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 		where = append(where, "i.deleted_at IS NULL")
 	}
 	// [LAW:one-source-of-truth] Container DB status is dead data; the lifecycle
-	// derivation in hydrateIssues is the only truth source for epic state. So the
-	// status filter is applied post-hydration via Issue.State() rather than against
-	// i.status. Normalize the requested values up front to fail early on bad input.
-	normalizedStatuses := make([]model.State, 0, len(filter.Statuses))
-	for _, s := range filter.Statuses {
-		normalized, err := normalizeStatus(s)
-		if err != nil {
-			return nil, err
-		}
-		normalizedStatuses = append(normalizedStatuses, model.State(normalized))
+	// derivation in hydrateIssues is the only truth source for epic state. The
+	// status filter therefore lives entirely past the hydration boundary; here we
+	// only validate the requested tokens so bad input fails before the query runs.
+	allowedStates, err := parseStatusFilter(filter.Statuses)
+	if err != nil {
+		return nil, err
 	}
 	if len(filter.IssueTypes) > 0 {
 		var placeholders []string
@@ -528,11 +524,6 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 		return nil, err
 	}
 	query += " ORDER BY " + orderClause
-	// SQL LIMIT is suppressed when a status filter is present so the post-hydration
-	// derived-state filter never under-fetches the user's requested page size.
-	if filter.Limit > 0 && len(normalizedStatuses) == 0 {
-		query += fmt.Sprintf(" LIMIT %d", filter.Limit)
-	}
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list issues: %w (query=%s)", err, query)
@@ -553,20 +544,29 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 	if err != nil {
 		return nil, err
 	}
-	hydrated = filterIssuesByDerivedState(hydrated, normalizedStatuses)
-	if filter.Limit > 0 && len(hydrated) > filter.Limit {
-		hydrated = hydrated[:filter.Limit]
-	}
-	return hydrated, nil
+	// [LAW:dataflow-not-control-flow] Filter and cap always run; the helpers absorb
+	// "no filter" and "no limit" as data so the body stays a straight pipe.
+	return capLimit(filterByState(hydrated, allowedStates), filter.Limit), nil
 }
 
-// filterIssuesByDerivedState removes issues whose lifecycle State() is not in
-// the requested set. Empty allow-list returns the input unchanged so callers
-// can route every list through this single boundary.
-// [LAW:single-enforcer] Status filter is applied here against derived lifecycle
-// state, mirroring how hydrateIssues derives it — instead of duplicating that
-// logic in SQL where the i.status column is dead data for containers.
-func filterIssuesByDerivedState(issues []model.Issue, allowed []model.State) []model.Issue {
+func parseStatusFilter(input []string) ([]model.State, error) {
+	out := make([]model.State, 0, len(input))
+	for _, raw := range input {
+		normalized, err := normalizeStatus(raw)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, model.State(normalized))
+	}
+	return out, nil
+}
+
+// filterByState keeps only issues whose lifecycle State() is in allowed; an
+// empty allow-list passes everything through so callers can route every list
+// through one boundary that always reads State(), never the DB column.
+// [LAW:single-enforcer] Status filtering happens against derived lifecycle
+// state because container DB status is dead data; hydration is the truth source.
+func filterByState(issues []model.Issue, allowed []model.State) []model.Issue {
 	if len(allowed) == 0 {
 		return issues
 	}
@@ -581,6 +581,17 @@ func filterIssuesByDerivedState(issues []model.Issue, allowed []model.State) []m
 		}
 	}
 	return out
+}
+
+// capLimit truncates issues to the first n entries. limit <= 0 means uncapped,
+// matching the existing ListIssuesFilter.Limit convention; the helper exists so
+// the LIMIT semantic is one expression at the boundary rather than a branch in
+// the body.
+func capLimit(issues []model.Issue, limit int) []model.Issue {
+	if limit <= 0 || len(issues) <= limit {
+		return issues
+	}
+	return issues[:limit]
 }
 
 func (s *Store) GetIssueDetail(ctx context.Context, id string) (model.IssueDetail, error) {
