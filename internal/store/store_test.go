@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"os"
@@ -1289,6 +1290,54 @@ func TestEpicAsDependencyDerivedState(t *testing.T) {
 	}
 	if len(detail.DependsOn) != 1 || detail.DependsOn[0].State() != model.StateClosed {
 		t.Fatalf("DependsOn = %#v, want epic dependency with closed derived state", detail.DependsOn)
+	}
+}
+
+// (links-agent-epic-model-uew.7) After the schema cleanup, container rows
+// persist NULL in the status column instead of the invented "open". The
+// dead-data write is gone; any future code that reads i.status on an epic
+// will get NULL and fail loudly instead of silently lying.
+func TestCreateEpicPersistsNullStatusColumn(t *testing.T) {
+	ctx := context.Background()
+	st := openIssueStore(t, ctx)
+	epic, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Container", Topic: "schema", IssueType: "epic", Priority: 1})
+	if err != nil {
+		t.Fatalf("CreateIssue(epic) error = %v", err)
+	}
+	leaf, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Leaf", Topic: "schema", IssueType: "task", Priority: 2})
+	if err != nil {
+		t.Fatalf("CreateIssue(leaf) error = %v", err)
+	}
+	var epicStatus, leafStatus sql.NullString
+	if err := st.db.QueryRowContext(ctx, "SELECT status FROM issues WHERE id = ?", epic.ID).Scan(&epicStatus); err != nil {
+		t.Fatalf("query epic status error = %v", err)
+	}
+	if err := st.db.QueryRowContext(ctx, "SELECT status FROM issues WHERE id = ?", leaf.ID).Scan(&leafStatus); err != nil {
+		t.Fatalf("query leaf status error = %v", err)
+	}
+	if epicStatus.Valid {
+		t.Fatalf("epic.status = %q (Valid=true), want NULL", epicStatus.String)
+	}
+	if !leafStatus.Valid || leafStatus.String != string(model.StateOpen) {
+		t.Fatalf("leaf.status = %#v, want Valid open", leafStatus)
+	}
+}
+
+// (links-agent-epic-model-uew.7) The CHECK constraint encodes the invariant
+// at the schema level: any attempt to write a non-NULL status on an epic row
+// is rejected at INSERT time, mechanically — no future code path can quietly
+// re-introduce the dead-data lie.
+func TestSchemaRejectsEpicWithNonNullStatus(t *testing.T) {
+	ctx := context.Background()
+	st := openIssueStore(t, ctx)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	err := st.ExecRawForTest(ctx,
+		`INSERT INTO issues(id, title, description, status, priority, issue_type, topic, assignee, item_rank, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		"test-illegal-epic", "Illegal", "", "open", 1, "epic", "schema", "", "ZZZ", now, now,
+	)
+	if err == nil {
+		t.Fatal("INSERT epic with status='open' succeeded; CHECK constraint should reject it")
 	}
 }
 

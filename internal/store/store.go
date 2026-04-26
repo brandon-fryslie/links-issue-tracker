@@ -1381,7 +1381,8 @@ func nextRankAtBottom(ctx context.Context, tx *sql.Tx) (string, error) {
 
 func scanIssue(row issueScanner) (issueRow, error) {
 	var issue partialIssue
-	var status, assignee string
+	var status sql.NullString
+	var assignee string
 	var createdAt, updatedAt string
 	var closedAt, archivedAt, deletedAt sql.NullString
 	if err := row.Scan(&issue.ID, &issue.Title, &issue.Description, &status, &issue.Priority, &issue.IssueType, &issue.Topic, &assignee, &issue.Rank, &createdAt, &updatedAt, &closedAt, &archivedAt, &deletedAt); err != nil {
@@ -1393,7 +1394,8 @@ func scanIssue(row issueScanner) (issueRow, error) {
 func scanIssueWithParent(row issueScanner) (string, issueRow, error) {
 	var parentID string
 	var issue partialIssue
-	var status, assignee string
+	var status sql.NullString
+	var assignee string
 	var createdAt, updatedAt string
 	var closedAt, archivedAt, deletedAt sql.NullString
 	if err := row.Scan(&parentID, &issue.ID, &issue.Title, &issue.Description, &status, &issue.Priority, &issue.IssueType, &issue.Topic, &assignee, &issue.Rank, &createdAt, &updatedAt, &closedAt, &archivedAt, &deletedAt); err != nil {
@@ -1403,7 +1405,7 @@ func scanIssueWithParent(row issueScanner) (string, issueRow, error) {
 	return parentID, parsed, err
 }
 
-func parsedIssueRow(issue partialIssue, status string, assignee string, createdAt string, updatedAt string, closedAt sql.NullString, archivedAt sql.NullString, deletedAt sql.NullString) (issueRow, error) {
+func parsedIssueRow(issue partialIssue, status sql.NullString, assignee string, createdAt string, updatedAt string, closedAt sql.NullString, archivedAt sql.NullString, deletedAt sql.NullString) (issueRow, error) {
 	var err error
 	issue.CreatedAt, err = time.Parse(time.RFC3339Nano, createdAt)
 	if err != nil {
@@ -1413,7 +1415,11 @@ func parsedIssueRow(issue partialIssue, status string, assignee string, createdA
 	if err != nil {
 		return issueRow{}, err
 	}
-	statusView := model.StatusView{Value: model.State(status), Assignee: assignee}
+	// Container rows store NULL status; hydrateIssues ignores StatusView for them
+	// and constructs the lifecycle via HydrateAllOf instead.
+	// [LAW:single-enforcer] The decision "use StatusView vs derive from children"
+	// lives in hydrateIssues; here we just carry the row data as it appears.
+	statusView := model.StatusView{Value: model.State(status.String), Assignee: assignee}
 	if closedAt.Valid {
 		t, err := time.Parse(time.RFC3339Nano, closedAt.String)
 		if err != nil {
@@ -1439,12 +1445,36 @@ func parsedIssueRow(issue partialIssue, status string, assignee string, createdA
 	return issueRow{Issue: issue, Status: statusView}, nil
 }
 
-func statusForStorage(issue model.Issue) string {
-	status := issue.StatusValue()
-	if status == "" {
-		return string(model.StateOpen)
+// statusForStorage returns the value to persist in the issues.status column.
+// Container issues store NULL because their state derives from children;
+// hydrateIssues never reads this column for them. Leaf issues persist their
+// owned status string. The schema CHECK constraint enforces this invariant —
+// the function does not have to defend against bad inputs because the type
+// system upstream (OwnedStatus vs AllOf) already does.
+// [LAW:one-source-of-truth] Container state lives in the AllOf lifecycle, not
+// the DB column. Writing NULL keeps the column from lying about what it owns.
+func statusForStorage(issue model.Issue) sql.NullString {
+	if issue.IsContainer() {
+		return sql.NullString{}
 	}
-	return status
+	return sql.NullString{String: issue.StatusValue(), Valid: true}
+}
+
+// statusForStorageRaw is the issueType+status equivalent of statusForStorage
+// for write paths that don't have a hydrated Issue (import / restore). Same
+// container/leaf decision; for leaves it validates the status token through
+// the canonical normalizer.
+// [LAW:single-enforcer] One rule for "what goes in the status column" applies
+// to every write path; the hydrated and raw entrypoints share it.
+func statusForStorageRaw(issueType string, status string) (sql.NullString, error) {
+	if model.IsContainerType(issueType) {
+		return sql.NullString{}, nil
+	}
+	normalized, err := normalizeStatus(status)
+	if err != nil {
+		return sql.NullString{}, err
+	}
+	return sql.NullString{String: normalized, Valid: true}, nil
 }
 
 func (s *Store) hydrateIssues(ctx context.Context, rows []issueRow) ([]model.Issue, error) {

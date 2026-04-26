@@ -21,7 +21,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			id VARCHAR(191) PRIMARY KEY,
 			title TEXT NOT NULL,
 			description TEXT NOT NULL,
-			status VARCHAR(32) NOT NULL,
+			status VARCHAR(32) NULL,
 			priority INT NOT NULL,
 			issue_type VARCHAR(32) NOT NULL,
 			topic VARCHAR(191) NOT NULL,
@@ -31,7 +31,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			closed_at VARCHAR(64) NULL,
 			archived_at VARCHAR(64) NULL,
 			deleted_at VARCHAR(64) NULL,
-			CHECK(status IN ('open','in_progress','closed')),
+			CHECK((issue_type IN ('epic') AND status IS NULL) OR (issue_type NOT IN ('epic') AND status IN ('open','in_progress','closed'))),
 			CHECK(priority >= 0 AND priority <= 4),
 			CHECK(issue_type IN ('task','feature','bug','chore','epic'))
 		);`,
@@ -144,8 +144,18 @@ type issueCheckConstraint struct {
 }
 
 func (s *Store) ensureUnifiedStatusSchema(ctx context.Context) (bool, error) {
-	// [LAW:one-source-of-truth] `status` is the canonical workflow state.
+	// [LAW:one-source-of-truth] `status` is the canonical workflow state for
+	// non-container issues. Containers derive state from children and store NULL.
 	changed := false
+	// Existing workspaces created before status was nullable still have the
+	// column declared NOT NULL. Relax it before any backfill that needs to
+	// write NULL. Dolt rejects MODIFY on a column that already matches, so
+	// the helper swallows "already" errors via execIgnoreAlreadyExists.
+	relaxedChanged, err := execIgnoreAlreadyExists(ctx, s.db, `ALTER TABLE issues MODIFY status VARCHAR(32) NULL`)
+	if err != nil {
+		return false, err
+	}
+	changed = changed || relaxedChanged
 	legacyStatusUpdates := []struct {
 		probe   string
 		stmt    string
@@ -180,6 +190,15 @@ func (s *Store) ensureUnifiedStatusSchema(ctx context.Context) (bool, error) {
 			probe:   `SELECT 1 FROM issues WHERE status <> 'closed' AND closed_at IS NOT NULL LIMIT 1`,
 			stmt:    `UPDATE issues SET closed_at = NULL WHERE status <> 'closed'`,
 			context: "normalize non-closed closed_at",
+		},
+		{
+			// [LAW:one-source-of-truth] Containers derive state from children;
+			// any persisted status on an epic row is dead data left over from
+			// the pre-derivation schema. NULL it so the column stops lying and
+			// future readers that touch i.status on an epic fail loudly.
+			probe:   `SELECT 1 FROM issues WHERE issue_type IN ('epic') AND status IS NOT NULL LIMIT 1`,
+			stmt:    `UPDATE issues SET status = NULL WHERE issue_type IN ('epic')`,
+			context: "null out container status",
 		},
 	}
 	for _, update := range legacyStatusUpdates {
@@ -240,6 +259,12 @@ func (s *Store) ensureIssueRanks(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+// canonicalStatusCheckClause encodes the invariant that container rows store
+// NULL status (state is derived from children) and leaf rows carry one of the
+// known states. Single source of truth used by both the fresh-table CREATE and
+// the upgrade-path ALTER so they cannot diverge.
+const canonicalStatusCheckClause = `(issue_type IN ('epic') AND status IS NULL) OR (issue_type NOT IN ('epic') AND status IN ('open','in_progress','closed'))`
+
 func (s *Store) ensureStatusConstraint(ctx context.Context) (bool, error) {
 	checks, err := s.listIssueStatusCheckConstraints(ctx)
 	if err != nil {
@@ -253,7 +278,7 @@ func (s *Store) ensureStatusConstraint(ctx context.Context) (bool, error) {
 			return false, fmt.Errorf("drop status check %s: %w", constraint.name, err)
 		}
 	}
-	if _, err := s.db.ExecContext(ctx, `ALTER TABLE issues ADD CONSTRAINT issues_status_check CHECK (status IN ('open','in_progress','closed'))`); err != nil {
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE issues ADD CONSTRAINT issues_status_check CHECK (`+canonicalStatusCheckClause+`)`); err != nil {
 		return false, fmt.Errorf("add canonical status check: %w", err)
 	}
 	return true, nil
@@ -293,7 +318,7 @@ func hasCanonicalStatusConstraint(constraints []issueCheckConstraint) bool {
 	if len(constraints) != 1 {
 		return false
 	}
-	return strings.Contains(normalizeConstraintClause(constraints[0].clause), "statusin('open','in_progress','closed')")
+	return normalizeConstraintClause(constraints[0].clause) == normalizeConstraintClause(canonicalStatusCheckClause)
 }
 
 func normalizeConstraintClause(clause string) string {
