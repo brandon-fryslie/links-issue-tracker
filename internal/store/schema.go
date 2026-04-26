@@ -10,14 +10,15 @@ import (
 	"github.com/bmf/links-issue-tracker/internal/rank"
 )
 
-func (s *Store) migrate(ctx context.Context) error {
-	changed := false
-	schema := []string{
-		`CREATE TABLE meta (
-			meta_key VARCHAR(191) PRIMARY KEY,
-			meta_value TEXT NOT NULL
-		);`,
-		`CREATE TABLE issues (
+// canonicalStatusCheckClause encodes the invariant that container rows store
+// NULL status (state is derived from children) and leaf rows carry one of the
+// known states. Single source of truth used by both the fresh-table CREATE
+// (via createIssuesTableStmt) and the upgrade-path ALTER (ensureStatusConstraint)
+// so they cannot diverge.
+const canonicalStatusCheckClause = `(issue_type IN ('epic') AND status IS NULL) OR (issue_type NOT IN ('epic') AND status IN ('open','in_progress','closed'))`
+
+func createIssuesTableStmt() string {
+	return fmt.Sprintf(`CREATE TABLE issues (
 			id VARCHAR(191) PRIMARY KEY,
 			title TEXT NOT NULL,
 			description TEXT NOT NULL,
@@ -31,10 +32,20 @@ func (s *Store) migrate(ctx context.Context) error {
 			closed_at VARCHAR(64) NULL,
 			archived_at VARCHAR(64) NULL,
 			deleted_at VARCHAR(64) NULL,
-			CHECK((issue_type IN ('epic') AND status IS NULL) OR (issue_type NOT IN ('epic') AND status IN ('open','in_progress','closed'))),
+			CHECK(%s),
 			CHECK(priority >= 0 AND priority <= 4),
 			CHECK(issue_type IN ('task','feature','bug','chore','epic'))
+		);`, canonicalStatusCheckClause)
+}
+
+func (s *Store) migrate(ctx context.Context) error {
+	changed := false
+	schema := []string{
+		`CREATE TABLE meta (
+			meta_key VARCHAR(191) PRIMARY KEY,
+			meta_value TEXT NOT NULL
 		);`,
+		createIssuesTableStmt(),
 		`CREATE TABLE relations (
 			src_id VARCHAR(191) NOT NULL,
 			dst_id VARCHAR(191) NOT NULL,
@@ -259,12 +270,6 @@ func (s *Store) ensureIssueRanks(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-// canonicalStatusCheckClause encodes the invariant that container rows store
-// NULL status (state is derived from children) and leaf rows carry one of the
-// known states. Single source of truth used by both the fresh-table CREATE and
-// the upgrade-path ALTER so they cannot diverge.
-const canonicalStatusCheckClause = `(issue_type IN ('epic') AND status IS NULL) OR (issue_type NOT IN ('epic') AND status IN ('open','in_progress','closed'))`
-
 func (s *Store) ensureStatusConstraint(ctx context.Context) (bool, error) {
 	checks, err := s.listIssueStatusCheckConstraints(ctx)
 	if err != nil {
@@ -318,7 +323,14 @@ func hasCanonicalStatusConstraint(constraints []issueCheckConstraint) bool {
 	if len(constraints) != 1 {
 		return false
 	}
-	return normalizeConstraintClause(constraints[0].clause) == normalizeConstraintClause(canonicalStatusCheckClause)
+	// Dolt's information_schema.check_clauses may report the clause with or
+	// without an outer wrapping pair of parentheses depending on how the
+	// constraint was added. Tolerate either side wrapping the other so the
+	// migration stays idempotent across normalization differences. Drift past
+	// this is caught by TestMigrationIsIdempotentOnSecondOpen.
+	actual := normalizeConstraintClause(constraints[0].clause)
+	expected := normalizeConstraintClause(canonicalStatusCheckClause)
+	return strings.Contains(actual, expected) || strings.Contains(expected, actual)
 }
 
 func normalizeConstraintClause(clause string) string {

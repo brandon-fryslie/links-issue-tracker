@@ -1323,6 +1323,74 @@ func TestCreateEpicPersistsNullStatusColumn(t *testing.T) {
 	}
 }
 
+// (links-agent-epic-model-uew.7) Container ↔ non-container IssueType changes
+// would orphan the lifecycle expression: an epic carries an AllOf lifecycle
+// that derives state from children, and a leaf carries an OwnedStatus carrying
+// status/assignee/closed_at. Crossing that boundary via UpdateIssue would
+// either drop the leaf's status or leave AllOf attached to a row whose schema
+// requires owned status. Refused at the trust boundary instead of patched up
+// downstream with an invented default.
+func TestUpdateIssueRefusesContainerLeafTypeChange(t *testing.T) {
+	ctx := context.Background()
+	st := openIssueStore(t, ctx)
+	epic, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Container", Topic: "schema", IssueType: "epic", Priority: 1})
+	if err != nil {
+		t.Fatalf("CreateIssue(epic) error = %v", err)
+	}
+	leaf, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Leaf", Topic: "schema", IssueType: "task", Priority: 2})
+	if err != nil {
+		t.Fatalf("CreateIssue(leaf) error = %v", err)
+	}
+	taskType := "task"
+	if _, err := st.UpdateIssue(ctx, epic.ID, UpdateIssueInput{IssueType: &taskType}); err == nil {
+		t.Fatal("UpdateIssue(epic -> task) succeeded; container ↔ leaf type changes must be refused")
+	}
+	epicType := "epic"
+	if _, err := st.UpdateIssue(ctx, leaf.ID, UpdateIssueInput{IssueType: &epicType}); err == nil {
+		t.Fatal("UpdateIssue(task -> epic) succeeded; container ↔ leaf type changes must be refused")
+	}
+	bugType := "bug"
+	if _, err := st.UpdateIssue(ctx, leaf.ID, UpdateIssueInput{IssueType: &bugType}); err != nil {
+		t.Fatalf("UpdateIssue(task -> bug) error = %v; same-kind type changes must remain legal", err)
+	}
+}
+
+// (links-agent-epic-model-uew.7) ensureStatusConstraint compares Dolt's
+// reported CHECK clause against canonicalStatusCheckClause. If Dolt's
+// normalization ever drifts from ours, the comparison would silently fail and
+// every Open() would drop+re-add the constraint, producing a fresh schema
+// commit each time. This test pins migration idempotence at the observable
+// boundary — the Dolt commit log — so any future drift is loud.
+func TestMigrationIsIdempotentOnSecondOpen(t *testing.T) {
+	ctx := context.Background()
+	doltRoot := filepath.Join(t.TempDir(), "dolt")
+	first, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open(first) error = %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close(first) error = %v", err)
+	}
+	commitsBefore, err := doltcli.Run(ctx, filepath.Join(doltRoot, "links"), "log", "--oneline")
+	if err != nil {
+		t.Fatalf("dolt log before reopen error = %v", err)
+	}
+	second, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open(second) error = %v", err)
+	}
+	if err := second.Close(); err != nil {
+		t.Fatalf("Close(second) error = %v", err)
+	}
+	commitsAfter, err := doltcli.Run(ctx, filepath.Join(doltRoot, "links"), "log", "--oneline")
+	if err != nil {
+		t.Fatalf("dolt log after reopen error = %v", err)
+	}
+	if countNonEmptyLines(commitsAfter) != countNonEmptyLines(commitsBefore) {
+		t.Fatalf("migration produced extra commit on second Open():\nbefore:\n%s\nafter:\n%s", commitsBefore, commitsAfter)
+	}
+}
+
 // (links-agent-epic-model-uew.7) The CHECK constraint encodes the invariant
 // at the schema level: any attempt to write a non-NULL status on an epic row
 // is rejected at INSERT time, mechanically — no future code path can quietly

@@ -705,6 +705,15 @@ func (s *Store) UpdateIssue(ctx context.Context, id string, in UpdateIssueInput)
 		if err != nil {
 			return model.Issue{}, err
 		}
+		// [LAW:single-enforcer] Container vs leaf is encoded in the lifecycle
+		// expression at hydration time. Switching across that boundary would
+		// orphan the lifecycle: epic → leaf would leave AllOf attached to a
+		// row whose schema requires an OwnedStatus, and leaf → epic would
+		// silently drop the leaf's status/assignee/closed_at. Refuse here
+		// instead of patching it up downstream with an invented default.
+		if model.IsContainerType(issue.IssueType) != model.IsContainerType(issueType) {
+			return model.Issue{}, fmt.Errorf("cannot change issue_type between container (%v) and leaf types: lifecycle capability would change", model.ContainerIssueTypes)
+		}
 		issue.IssueType = issueType
 	}
 	if in.Status != nil {
