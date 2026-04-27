@@ -695,6 +695,11 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 func runReady(ctx context.Context, stdout io.Writer, stderr io.Writer, ap *app.App, args []string) error {
 	fs := newCobraFlagSet("ready")
 	assignee := fs.String("assignee", "", "Filter by assignee")
+	issueType := fs.String("type", "", "Filter by issue type")
+	status := fs.String("status", "", "Filter by status: open|in_progress (closed excludes everything)")
+	labels := fs.String("labels", "", "Comma-separated labels all of which must match")
+	priorityMin := fs.Int("priority-min", -1, "Minimum priority 0..4")
+	priorityMax := fs.Int("priority-max", -1, "Maximum priority 0..4")
 	limit := fs.Int("limit", 0, "Limit results")
 	columnsExpr := fs.String("columns", "", "Comma-separated output columns")
 	jsonOut := fs.Bool("json", false, "Output JSON")
@@ -702,9 +707,25 @@ func runReady(ctx context.Context, stdout io.Writer, stderr io.Writer, ap *app.A
 		return err
 	}
 	if fs.NArg() != 0 {
-		return errors.New("usage: lit ready [--assignee <user>] [--limit N] [--columns ...] [--json]")
+		return errors.New("usage: lit ready [--type ...] [--status ...] [--labels ...] [--assignee <user>] [--priority-min N] [--priority-max N] [--limit N] [--columns ...] [--json]")
 	}
-	annotated, _, err := gatherReadyAnnotated(ctx, ap, *assignee)
+	visited := map[string]bool{}
+	fs.Visit(func(f *pflag.Flag) { visited[f.Name] = true })
+	rf := readyFilter{
+		Assignee:  strings.TrimSpace(*assignee),
+		IssueType: strings.TrimSpace(*issueType),
+		Status:    strings.TrimSpace(*status),
+		Labels:    splitCSV(*labels),
+	}
+	if visited["priority-min"] {
+		v := *priorityMin
+		rf.PriorityMin = &v
+	}
+	if visited["priority-max"] {
+		v := *priorityMax
+		rf.PriorityMax = &v
+	}
+	annotated, _, err := gatherReadyAnnotated(ctx, ap, rf)
 	if err != nil {
 		return err
 	}
@@ -724,6 +745,18 @@ func runReady(ctx context.Context, stdout io.Writer, stderr io.Writer, ap *app.A
 	})
 }
 
+// readyFilter carries the user-supplied narrowing options for `lit ready` and
+// `lit next`. Empty fields mean "no narrowing"; the workable definition
+// (open/in_progress, leaves only) is layered on top by gatherReadyAnnotated.
+type readyFilter struct {
+	Assignee    string
+	IssueType   string
+	Status      string
+	Labels      []string
+	PriorityMin *int
+	PriorityMax *int
+}
+
 // gatherReadyAnnotated runs the shared ready pipeline: list workable leaves,
 // fetch details, annotate, sort by composite rank then readiness, enrich with
 // parent epic refs. Returns the prepared rows and the details map so callers
@@ -731,20 +764,33 @@ func runReady(ctx context.Context, stdout io.Writer, stderr io.Writer, ap *app.A
 // fetch round-trip.
 // [LAW:single-enforcer] Both `lit ready` and `lit next` read from this single
 // pipeline so their "what is workable, in what order" model cannot drift.
-func gatherReadyAnnotated(ctx context.Context, ap *app.App, assignee string) ([]annotation.AnnotatedIssue, map[string]model.IssueDetail, error) {
+func gatherReadyAnnotated(ctx context.Context, ap *app.App, rf readyFilter) ([]annotation.AnnotatedIssue, map[string]model.IssueDetail, error) {
 	cfg, err := config.Load(ap.Workspace.RootDir)
 	if err != nil {
 		return nil, nil, err
 	}
+	statuses := []string{"open", "in_progress"}
+	if rf.Status != "" {
+		// User-supplied status overrides the workable default. The intersection
+		// with leaf-only filtering still applies via filterWorkableIssues below;
+		// a user asking for closed items here gets none, which is the honest
+		// answer rather than silently substituting a different status.
+		statuses = []string{rf.Status}
+	}
 	// [LAW:one-source-of-truth] rank is the canonical ordering; no explicit SortBy
 	// needed — the store default is item_rank ASC.
-	issues, err := ap.Store.ListIssues(ctx, store.ListIssuesFilter{
-		Statuses:        []string{"open", "in_progress"},
-		Assignees:       toSlice(strings.TrimSpace(assignee)),
+	listFilter := store.ListIssuesFilter{
+		Statuses:        statuses,
+		IssueTypes:      toSlice(rf.IssueType),
+		Assignees:       toSlice(rf.Assignee),
+		LabelsAll:       rf.Labels,
+		PriorityMin:     rf.PriorityMin,
+		PriorityMax:     rf.PriorityMax,
 		IncludeArchived: false,
 		IncludeDeleted:  false,
 		Limit:           0,
-	})
+	}
+	issues, err := ap.Store.ListIssues(ctx, listFilter)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -787,7 +833,7 @@ func runNext(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	if fs.NArg() != 0 {
 		return errors.New("usage: lit next [--continue] [--assignee <user>] [--json]")
 	}
-	annotated, details, err := gatherReadyAnnotated(ctx, ap, *assignee)
+	annotated, details, err := gatherReadyAnnotated(ctx, ap, readyFilter{Assignee: strings.TrimSpace(*assignee)})
 	if err != nil {
 		return err
 	}
