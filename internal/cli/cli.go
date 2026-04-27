@@ -179,12 +179,12 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 			return runTransition(commandCtx, stdout, ap, args, "start")
 		})
 	})
-	addGroupedPassthrough(root, "operations", "done", "Mark claimed work complete", func(args []string) error {
+	addGroupedPassthrough(root, "operations", "done", "Finish claimed work (success path; requires in_progress)", func(args []string) error {
 		return runWithApp(ctx, appAccessWrite, append([]string{"done"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runTransition(commandCtx, stdout, ap, args, "done")
 		})
 	})
-	addGroupedPassthrough(root, "operations", "close", "Close issue(s)", func(args []string) error {
+	addGroupedPassthrough(root, "operations", "close", "Close without finishing (wontfix / obsolete / duplicate; from any non-closed state)", func(args []string) error {
 		return runWithApp(ctx, appAccessWrite, append([]string{"close"}, args...), func(commandCtx context.Context, ap *app.App) error {
 			return runTransition(commandCtx, stdout, ap, args, "close")
 		})
