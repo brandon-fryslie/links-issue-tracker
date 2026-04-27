@@ -260,6 +260,11 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 			return runExport(commandCtx, stdout, ap, args)
 		})
 	})
+	addGroupedPassthrough(root, "data", "import", "Bulk-create issues from a JSON tree spec", func(args []string) error {
+		return runWithApp(ctx, appAccessWrite, append([]string{"import"}, args...), func(commandCtx context.Context, ap *app.App) error {
+			return runImportTree(commandCtx, stdout, ap, args)
+		})
+	})
 	addGroupedPassthrough(root, "maintenance", "workspace", "Show workspace metadata", func(args []string) error {
 		return runWithWorkspace(append([]string{"workspace"}, args...), func(ws workspace.Info) error {
 			return runWorkspace(stdout, ws, args)
@@ -1170,6 +1175,57 @@ func runExport(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 	}
 	// Export is JSON-only — there is no text representation of a full database export.
 	return writeJSON(stdout, export)
+}
+
+// runImportTree consumes a JSON tree spec and creates issues atomically.
+// The spec is an array of records; each carries a local_id used inside the
+// spec to wire parent/depends_on refs. Real issue IDs are generated at create
+// time and returned in the id_map result.
+//
+// JSON shape (see store.ImportTreeSpec):
+//
+//	[
+//	  {"local_id": "epic-x", "title": "Build X", "type": "epic", "topic": "x", "priority": 2},
+//	  {"local_id": "task-1", "parent": "epic-x", "title": "Design", "type": "task", "topic": "x", "priority": 2},
+//	  {"local_id": "task-2", "parent": "epic-x", "depends_on": ["task-1"], "title": "Build", "type": "task", "topic": "x", "priority": 2}
+//	]
+//
+// YAML support is a follow-up — the indirect yaml.v3 dep would have to become
+// direct, and the spec types already carry yaml struct tags.
+func runImportTree(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
+	fs := newCobraFlagSet("import")
+	path := fs.String("path", "", "Path to JSON tree spec file")
+	jsonOut := fs.Bool("json", false, "Output JSON")
+	if err := parseFlagSet(fs, args, stdout); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*path) == "" {
+		return errors.New("usage: lit import --path <file.json>")
+	}
+	data, err := os.ReadFile(*path)
+	if err != nil {
+		return fmt.Errorf("read import spec: %w", err)
+	}
+	var specs []store.ImportTreeSpec
+	if err := json.Unmarshal(data, &specs); err != nil {
+		return fmt.Errorf("parse import spec: %w", err)
+	}
+	result, err := ap.Store.ImportTree(ctx, specs)
+	if err != nil {
+		return err
+	}
+	return printValue(stdout, result, *jsonOut, func(w io.Writer, v any) error {
+		r := v.(store.ImportTreeResult)
+		if _, err := fmt.Fprintf(w, "imported %d issues\n", len(r.IDMap)); err != nil {
+			return err
+		}
+		for local, real := range r.IDMap {
+			if _, err := fmt.Fprintf(w, "  %s -> %s\n", local, real); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 func runWorkspace(stdout io.Writer, ws workspace.Info, args []string) error {
