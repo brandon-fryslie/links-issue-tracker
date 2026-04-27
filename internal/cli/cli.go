@@ -1000,6 +1000,12 @@ func runUpdate(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 }
 
 func runRank(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
+	// Subcommand dispatch: 'lit rank set <id1> <id2> ...' is a separate verb
+	// that establishes absolute order across N issues atomically. Issue IDs
+	// always carry the 'links-' prefix so the literal 'set' is unambiguous.
+	if len(args) > 0 && args[0] == "set" {
+		return runRankSet(ctx, stdout, ap, args[1:])
+	}
 	positional, flagArgs := splitArgs(args, 1)
 	fs := newCobraFlagSet("rank")
 	_ = fs.Bool("top", false, "Move to highest rank")
@@ -1051,6 +1057,28 @@ func runRank(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 		return err
 	}
 	return printValue(stdout, issue, *jsonOut, printIssueSummary)
+}
+
+// runRankSet establishes absolute order across N issues by stacking them at
+// the top in the given sequence: id1 becomes the topmost, id2 ranks just
+// below, etc. Atomic: the store either applies all or none.
+func runRankSet(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
+	positional, flagArgs := splitArgs(args, len(args))
+	fs := newCobraFlagSet("rank set")
+	jsonOut := fs.Bool("json", false, "Output JSON")
+	if err := parseFlagSet(fs, flagArgs, stdout); err != nil {
+		return err
+	}
+	if len(positional) < 2 {
+		return errors.New("usage: lit rank set <id1> <id2> [<id3> ...]")
+	}
+	if err := ap.Store.RankSet(ctx, positional); err != nil {
+		return err
+	}
+	return printValue(stdout, map[string]any{"status": "ok", "ranked": positional}, *jsonOut, func(w io.Writer, _ any) error {
+		_, err := fmt.Fprintf(w, "ranked %d issues at top in order: %s\n", len(positional), strings.Join(positional, ", "))
+		return err
+	})
 }
 
 func statusTransitionActionsForUpdate(fromStatus string, toStatus string) ([]string, error) {
