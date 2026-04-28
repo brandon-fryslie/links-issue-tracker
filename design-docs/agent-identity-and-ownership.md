@@ -18,7 +18,7 @@ deferred until phase 1 is in use.
 
 ## Problem
 
-`internal/cli/ready_state.go:111` defines orphan as:
+`newOrphanedAnnotator` in `internal/cli/ready_state.go` defines orphan as:
 
 ```
 in_progress AND time.Since(UpdatedAt) >= threshold
@@ -55,7 +55,8 @@ signal we layer on, not a definition.
 
 **1. Canonical assignee shape: `claude_<sessionId>`**
 
-The help text at `cli.go:1134` already hints this. Make it a
+The `--assignee` help text on transition commands (see `runTransition`
+in `internal/cli/cli.go`) already hints this. Make it a
 recommendation, not a hard validation — humans still need to assign
 things to themselves (`bmf`, etc.), and agents on other tools (Cursor,
 Codex) need a slot too. Document the convention:
@@ -71,7 +72,7 @@ free-form column.
 
 Add `lit heartbeat <id>` that emits a field-history event of kind
 `heartbeat` carrying `(actor, timestamp)` and no field changes. The
-field-history table (commit 68100d2) is already the right substrate —
+field-history `issue_events` table is already the right substrate —
 it's an append-only event log keyed on issue.
 
 Orphan detection becomes:
@@ -91,7 +92,8 @@ already exists.
 
 **3. Ownership transfer is `lit assign`**
 
-Already shipped (commit f89816b). Document it as the canonical handoff
+Already shipped (`lit assign` on the field-history branch). Document
+it as the canonical handoff
 mechanism. No new command.
 
 ### Phase 2 — process liveness (deferred)
@@ -115,7 +117,8 @@ remaining false-positive rate justifies the integration cost.
 2. **How do we encode ownership?** `assignee = claude_<sessionId>` as
    convention. Free-form column unchanged.
 3. **How do we enforce ownership?** `lit start --assignee` already
-   stamps it (cli.go:1151). Phase 1 adds heartbeat events; phase 2
+   stamps it (`runTransition` rejects `start` without `--assignee`).
+   Phase 1 adds heartbeat events; phase 2
    adds process-level liveness.
 4. **What about compaction?** Same session, same owner. Heartbeat
    continues uninterrupted across compaction boundaries.
