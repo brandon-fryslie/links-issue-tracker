@@ -110,3 +110,41 @@ func TestRunOrphanedTextEmpty(t *testing.T) {
 		t.Fatalf("expected 'No orphaned issues' message, got: %q", stdout.String())
 	}
 }
+
+func TestRunOrphanedAssigneeFilter(t *testing.T) {
+	h := newReadyTestHarness(t)
+
+	mine := h.createIssue(store.CreateIssueInput{Title: "Mine", Topic: "topic", IssueType: "task", Assignee: "alice"})
+	theirs := h.createIssue(store.CreateIssueInput{Title: "Theirs", Topic: "topic", IssueType: "task", Assignee: "bob"})
+	startIssueForTest(t, h, mine.ID)
+	startIssueForTest(t, h, theirs.ID)
+	h.backdateUpdatedAt(mine.ID, 7*time.Hour)
+	h.backdateUpdatedAt(theirs.ID, 7*time.Hour)
+
+	got := runOrphanedJSON(t, h, "--assignee", "alice")
+	if len(got) != 1 || got[0].ID != mine.ID {
+		t.Fatalf("--assignee=alice: got %d rows, want 1 (alice's only): %+v", len(got), got)
+	}
+}
+
+func TestRunOrphanedExcludesContainerEpics(t *testing.T) {
+	h := newReadyTestHarness(t)
+
+	epic := h.createIssue(store.CreateIssueInput{Title: "Epic", Topic: "topic", IssueType: "epic"})
+	leaf := h.createIssue(store.CreateIssueInput{Title: "Leaf", Topic: "topic", IssueType: "task", ParentID: epic.ID})
+	startIssueForTest(t, h, leaf.ID)
+	// Epic's State() derives from the leaf and is in_progress, but its
+	// own UpdatedAt is irrelevant — orphan is a leaf-only concept.
+	h.backdateUpdatedAt(epic.ID, 48*time.Hour)
+	h.backdateUpdatedAt(leaf.ID, 7*time.Hour)
+
+	got := runOrphanedJSON(t, h)
+	for _, entry := range got {
+		if entry.ID == epic.ID {
+			t.Fatalf("epic %q should not appear in lit orphaned (containers excluded)", epic.ID)
+		}
+	}
+	if len(got) != 1 || got[0].ID != leaf.ID {
+		t.Fatalf("expected the leaf %q only, got: %+v", leaf.ID, got)
+	}
+}

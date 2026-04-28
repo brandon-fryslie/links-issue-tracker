@@ -890,6 +890,11 @@ func runOrphaned(ctx context.Context, stdout io.Writer, ap *app.App, args []stri
 	if err != nil {
 		return err
 	}
+	// Containers (epics) derive state from children; their own UpdatedAt
+	// has no relationship to whether any agent is working on them, so
+	// orphaning them based on it is meaningless. Drop them — orphan is
+	// a leaf-only concept here, same as in `lit ready`/`lit next`.
+	issues = filterWorkableIssues(issues)
 	annotated, err := annotation.Annotate(ctx, issues, newOrphanedAnnotator(orphanedThreshold))
 	if err != nil {
 		return err
