@@ -55,7 +55,7 @@ func (s *Store) RankToTop(ctx context.Context, issueID string) error {
 // or none does. Validates IDs exist and rejects duplicates before any write.
 // [LAW:single-enforcer] Multi-issue rank reassignment lives in this one
 // transaction so partial-application states cannot occur.
-func RankSetValidateIDs(ids []string) error {
+func rankSetValidateIDs(ids []string) error {
 	if len(ids) < 2 {
 		return errors.New("rank set: need at least 2 IDs to establish order")
 	}
@@ -73,7 +73,7 @@ func RankSetValidateIDs(ids []string) error {
 }
 
 func (s *Store) RankSet(ctx context.Context, ids []string) error {
-	if err := RankSetValidateIDs(ids); err != nil {
+	if err := rankSetValidateIDs(ids); err != nil {
 		return err
 	}
 	for _, id := range ids {

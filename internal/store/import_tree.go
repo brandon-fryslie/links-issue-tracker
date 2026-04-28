@@ -114,6 +114,9 @@ func validateImportTreeSpecs(specs []ImportTreeSpec) error {
 		if strings.TrimSpace(spec.LocalID) == "" {
 			return fmt.Errorf("import: spec %d missing local_id", i)
 		}
+		if spec.LocalID != strings.TrimSpace(spec.LocalID) {
+			return fmt.Errorf("import: spec %d local_id %q has surrounding whitespace", i, spec.LocalID)
+		}
 		if strings.TrimSpace(spec.Title) == "" {
 			return fmt.Errorf("import: spec %q missing title", spec.LocalID)
 		}
@@ -127,11 +130,17 @@ func validateImportTreeSpecs(specs []ImportTreeSpec) error {
 	}
 	for _, spec := range specs {
 		if spec.Parent != "" {
+			if spec.Parent != strings.TrimSpace(spec.Parent) {
+				return fmt.Errorf("import: spec %q parent %q has surrounding whitespace", spec.LocalID, spec.Parent)
+			}
 			if _, ok := seen[spec.Parent]; !ok {
 				return fmt.Errorf("import: spec %q references missing parent %q", spec.LocalID, spec.Parent)
 			}
 		}
 		for _, dep := range spec.DependsOn {
+			if dep != strings.TrimSpace(dep) {
+				return fmt.Errorf("import: spec %q depends_on entry %q has surrounding whitespace", spec.LocalID, dep)
+			}
 			if _, ok := seen[dep]; !ok {
 				return fmt.Errorf("import: spec %q references missing depends_on %q", spec.LocalID, dep)
 			}

@@ -1007,7 +1007,8 @@ func runUpdate(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 func runRank(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
 	// Subcommand dispatch: 'lit rank set <id1> <id2> ...' is a separate verb
 	// that establishes absolute order across N issues atomically. Issue IDs
-	// always carry the 'links-' prefix so the literal 'set' is unambiguous.
+	// always carry a workspace-configured prefix (e.g. <prefix>-<n>), so the
+	// literal 'set' is unambiguous.
 	if len(args) > 0 && args[0] == "set" {
 		return runRankSet(ctx, stdout, ap, args[1:])
 	}
@@ -1177,10 +1178,12 @@ func runExport(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 	return writeJSON(stdout, export)
 }
 
-// runImportTree consumes a JSON tree spec and creates issues atomically.
-// The spec is an array of records; each carries a local_id used inside the
-// spec to wire parent/depends_on refs. Real issue IDs are generated at create
-// time and returned in the id_map result.
+// runImportTree consumes a JSON tree spec and creates issues in dependency
+// order with best-effort rollback on failure (see Store.ImportTree). The spec
+// is an array of records; each carries a local_id used inside the spec to
+// wire parent/depends_on refs. Real issue IDs are generated at create time
+// and returned in the id_map result. Run `lit doctor` after a failed import
+// to detect any orphans left if rollback itself failed.
 //
 // JSON shape (see store.ImportTreeSpec):
 //
@@ -1200,6 +1203,9 @@ func runImportTree(ctx context.Context, stdout io.Writer, ap *app.App, args []st
 		return err
 	}
 	if strings.TrimSpace(*path) == "" {
+		return errors.New("usage: lit import --path <file.json>")
+	}
+	if fs.NArg() != 0 {
 		return errors.New("usage: lit import --path <file.json>")
 	}
 	data, err := os.ReadFile(*path)
