@@ -33,8 +33,8 @@ const NeedsDesignLabel = "needs-design"
 // newNeedsDesignAnnotator returns an annotator that emits a NeedsDesign
 // annotation for any issue carrying NeedsDesignLabel.
 // [LAW:dataflow-not-control-flow] The annotator runs unconditionally for
-// every issue; absence of the label produces an empty slice, not a skipped
-// operation.
+// every issue; absence of the label produces a nil slice (Annotate
+// normalizes to an empty slice at the row level), not a skipped operation.
 func newNeedsDesignAnnotator() annotation.Annotator {
 	return func(_ context.Context, issue model.Issue) ([]annotation.Annotation, error) {
 		for _, label := range issue.Labels {
