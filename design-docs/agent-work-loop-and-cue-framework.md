@@ -4,8 +4,8 @@ Status: design (2026-04-28)
 
 Related issues:
 
-- Original placeholder ticket: `lit-c5519f81-233d205f` — Docs IA: rebuild docs around agent-native lifecycle stages (this design supersedes that ticket's stage model)
-- Parent epic: `lit-c5519f81-93c728d5` — Agent-native alignment: docs, UX, and workflow context injection
+- `lit-c5519f81-233d205f` Original placeholder ticket: Docs IA: rebuild docs around agent-native lifecycle stages (this design supersedes its stage model)
+- `lit-c5519f81-93c728d5` Parent epic: Agent-native alignment: docs, UX, and workflow context injection
 
 Companion design docs:
 
@@ -121,7 +121,7 @@ A real session, drawn from the kind of interconnected work this framework is bui
 1. Agent pulls a ticket and starts implementing.
 2. Mid-implementation, the proposed approach reveals a better one. The cue at the appropriate position has already taught the agent to ask *is an abstraction emerging here that wants to exist?* The agent shifts tactics — same work, better path. (Response scope: the implementation.)
 3. The shift changes inputs to the next ticket. The agent updates that ticket's description before proceeding. (Response scope: adjacent ticket.)
-4. The next-next ticket becomes unnecessary because the new abstraction subsumes it. The agent closes it. (Response scope: one ticket.) But noticing it, the agent also files a follow-up for the abstraction opportunity exposed. (Response scope: emergent primitive.)
+4. The ticket after next becomes unnecessary because the new abstraction subsumes it. The agent closes it. (Response scope: one ticket.) But noticing it, the agent also files a follow-up for the abstraction opportunity exposed. (Response scope: emergent primitive.)
 5. The new abstraction reframes the deliverable. The agent updates the epic — or, if the reshape is bigger than solo authority, surfaces it. (Response scope: epic; escalation rule applied.)
 
 Each step matches the response scope to the signal scope. The agent never enters "audit mode" or "design mode" — they continue the throughline, take the right-scoped response to each signal, and resume. The cues at each position are what keep the right questions alive in the agent's head as the work moves.
