@@ -366,7 +366,7 @@ func (s *Store) createIssueOnce(ctx context.Context, in CreateIssueInput) (model
 		return model.Issue{}, err
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO issues(
-		id, title, description, prompt, status, priority, issue_type, topic, assignee, item_rank, created_at, updated_at, closed_at, archived_at, deleted_at
+		id, title, description, agent_prompt, status, priority, issue_type, topic, assignee, item_rank, created_at, updated_at, closed_at, archived_at, deleted_at
 	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
 		issue.ID, issue.Title, issue.Description, nullableString(issue.Prompt), statusForStorage(issue), issue.Priority, issue.IssueType, issue.Topic,
 		issue.AssigneeValue(), issue.Rank, issue.CreatedAt.Format(time.RFC3339Nano), issue.UpdatedAt.Format(time.RFC3339Nano))
@@ -398,7 +398,7 @@ func (s *Store) createIssueOnce(ctx context.Context, in CreateIssueInput) (model
 }
 
 func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]model.Issue, error) {
-	query := `SELECT i.id, i.title, i.description, i.prompt, i.status, i.priority, i.issue_type, i.topic, i.assignee, i.item_rank, i.created_at, i.updated_at, i.closed_at, i.archived_at, i.deleted_at FROM issues i`
+	query := `SELECT i.id, i.title, i.description, i.agent_prompt, i.status, i.priority, i.issue_type, i.topic, i.assignee, i.item_rank, i.created_at, i.updated_at, i.closed_at, i.archived_at, i.deleted_at FROM issues i`
 	var where []string
 	var args []any
 	if !filter.IncludeArchived {
@@ -512,7 +512,7 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 		if trimmed == "" {
 			continue
 		}
-		where = append(where, "(LOWER(i.title) LIKE ? OR LOWER(i.description) LIKE ? OR LOWER(COALESCE(i.prompt, '')) LIKE ? OR LOWER(i.topic) LIKE ?)")
+		where = append(where, "(LOWER(i.title) LIKE ? OR LOWER(i.description) LIKE ? OR LOWER(COALESCE(i.agent_prompt, '')) LIKE ? OR LOWER(i.topic) LIKE ?)")
 		like := "%" + trimmed + "%"
 		args = append(args, like, like, like, like)
 	}
@@ -709,7 +709,7 @@ func (s *Store) getIssuesByIDs(ctx context.Context, ids []string) (map[string]mo
 		placeholders[i] = "?"
 		args[i] = id
 	}
-	query := fmt.Sprintf(`SELECT id, title, description, prompt, status, priority, issue_type, topic, assignee, item_rank, created_at, updated_at, closed_at, archived_at, deleted_at FROM issues WHERE id IN (%s)`, strings.Join(placeholders, ","))
+	query := fmt.Sprintf(`SELECT id, title, description, agent_prompt, status, priority, issue_type, topic, assignee, item_rank, created_at, updated_at, closed_at, archived_at, deleted_at FROM issues WHERE id IN (%s)`, strings.Join(placeholders, ","))
 	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("batch load issues: %w", err)
@@ -738,7 +738,7 @@ func (s *Store) getIssuesByIDs(ctx context.Context, ids []string) (map[string]mo
 }
 
 func (s *Store) GetIssue(ctx context.Context, id string) (model.Issue, error) {
-	row := s.db.QueryRowContext(ctx, `SELECT id, title, description, prompt, status, priority, issue_type, topic, assignee, item_rank, created_at, updated_at, closed_at, archived_at, deleted_at FROM issues WHERE id = ?`, id)
+	row := s.db.QueryRowContext(ctx, `SELECT id, title, description, agent_prompt, status, priority, issue_type, topic, assignee, item_rank, created_at, updated_at, closed_at, archived_at, deleted_at FROM issues WHERE id = ?`, id)
 	scanned, err := scanIssue(row)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -833,7 +833,7 @@ func (s *Store) UpdateIssue(ctx context.Context, id string, in UpdateIssueInput)
 	}
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `UPDATE issues SET
-		title = ?, description = ?, prompt = ?, status = ?, priority = ?, issue_type = ?, assignee = ?, updated_at = ?, closed_at = ?, archived_at = ?, deleted_at = ?
+		title = ?, description = ?, agent_prompt = ?, status = ?, priority = ?, issue_type = ?, assignee = ?, updated_at = ?, closed_at = ?, archived_at = ?, deleted_at = ?
 		WHERE id = ?`, issue.Title, issue.Description, nullableString(issue.Prompt), statusForStorage(issue), issue.Priority, issue.IssueType, issue.AssigneeValue(), issue.UpdatedAt.Format(time.RFC3339Nano), closedAt, nullableTime(issue.ArchivedAt), nullableTime(issue.DeletedAt), issue.ID)
 	if err != nil {
 		return model.Issue{}, fmt.Errorf("update issue: %w", err)
@@ -1652,7 +1652,7 @@ func (s *Store) lifecycleChildrenByEpicIDs(ctx context.Context, epicIDs []string
 	//   parent dead, child live -> include (snapshot semantics: container's state at archive)
 	//   parent dead, child dead -> include (snapshot semantics)
 	// The WHERE clause encodes "include if parent is dead OR child is live."
-	rows, err := s.db.QueryContext(ctx, `SELECT r.dst_id, i.id, i.title, i.description, i.prompt, i.status, i.priority, i.issue_type, i.topic, i.assignee, i.item_rank, i.created_at, i.updated_at, i.closed_at, i.archived_at, i.deleted_at
+	rows, err := s.db.QueryContext(ctx, `SELECT r.dst_id, i.id, i.title, i.description, i.agent_prompt, i.status, i.priority, i.issue_type, i.topic, i.assignee, i.item_rank, i.created_at, i.updated_at, i.closed_at, i.archived_at, i.deleted_at
 		FROM relations r
 		JOIN issues i ON i.id = r.src_id
 		JOIN issues p ON p.id = r.dst_id
@@ -1758,7 +1758,7 @@ func nullableTime(value *time.Time) any {
 	return value.Format(time.RFC3339Nano)
 }
 
-// nullableString stores empty strings as SQL NULL so the prompt column reads
+// nullableString stores empty strings as SQL NULL so the agent_prompt column reads
 // back as "" via sql.NullString.String regardless of whether the row predates
 // the column add.
 func nullableString(value string) any {

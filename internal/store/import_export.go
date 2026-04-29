@@ -211,12 +211,12 @@ func (s *Store) ImportIssue(ctx context.Context, in ImportIssue) error {
 		}
 	}
 	_, err = tx.ExecContext(ctx, `INSERT INTO issues(
-			id, title, description, prompt, status, priority, issue_type, topic, assignee, item_rank, created_at, updated_at, closed_at, archived_at, deleted_at
+			id, title, description, agent_prompt, status, priority, issue_type, topic, assignee, item_rank, created_at, updated_at, closed_at, archived_at, deleted_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), 'misc'), ?, ?, ?, ?, ?, NULL, NULL)
 		ON DUPLICATE KEY UPDATE
 			title = VALUES(title),
 			description = VALUES(description),
-			prompt = VALUES(prompt),
+			agent_prompt = VALUES(agent_prompt),
 			status = VALUES(status),
 			priority = VALUES(priority),
 			issue_type = VALUES(issue_type),
@@ -416,7 +416,7 @@ func (s *Store) ReplaceFromExport(ctx context.Context, export model.Export) erro
 		// decision; the import path inherits it instead of inventing its own
 		// default for containers.
 		status := statusForStorage(issue)
-		if _, err := tx.ExecContext(ctx, `INSERT INTO issues(id, title, description, prompt, status, priority, issue_type, topic, assignee, item_rank, created_at, updated_at, closed_at, archived_at, deleted_at)
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issues(id, title, description, agent_prompt, status, priority, issue_type, topic, assignee, item_rank, created_at, updated_at, closed_at, archived_at, deleted_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?, COALESCE(NULLIF(?, ''), 'misc'), ?, ?, ?, ?, ?, ?, ?)`,
 			issue.ID, issue.Title, issue.Description, nullableString(issue.Prompt), status, issue.Priority, issue.IssueType, issueid.NormalizeSlug(issue.Topic), issue.AssigneeValue(), issue.Rank, issue.CreatedAt.Format(time.RFC3339Nano), issue.UpdatedAt.Format(time.RFC3339Nano), closedAt, nullableTime(issue.ArchivedAt), nullableTime(issue.DeletedAt)); err != nil {
 			return fmt.Errorf("restore issue %s: %w", issue.ID, err)
