@@ -15,38 +15,24 @@ func (s *Store) RankToTop(ctx context.Context, issueID string) error {
 	if _, err := s.GetIssue(ctx, issueID); err != nil {
 		return err
 	}
-	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
-	if err != nil {
-		return err
-	}
-	defer releaseCommitLock()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin rank-to-top tx: %w", err)
-	}
-	defer tx.Rollback()
-	var firstRank sql.NullString
-	err = tx.QueryRowContext(ctx, "SELECT item_rank FROM issues WHERE deleted_at IS NULL AND item_rank != '' AND id != ? ORDER BY item_rank ASC LIMIT 1", issueID).Scan(&firstRank)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("rank-to-top: query first: %w", err)
-	}
-	var newRank string
-	if !firstRank.Valid || firstRank.String == "" {
-		newRank = rank.Initial()
-	} else {
-		newRank = rank.Before(firstRank.String)
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.ExecContext(ctx, "UPDATE issues SET item_rank = ?, updated_at = ? WHERE id = ?", newRank, now, issueID); err != nil {
-		return fmt.Errorf("rank-to-top: update: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit rank-to-top: %w", err)
-	}
-	if err := s.commitWorkingSet(ctx, "rank to top"); err != nil {
-		return err
-	}
-	return s.smoothRanksIfNeeded(ctx, newRank)
+	return s.withMutation(ctx, "rank to top", func(ctx context.Context, tx *sql.Tx) error {
+		var firstRank sql.NullString
+		err := tx.QueryRowContext(ctx, "SELECT item_rank FROM issues WHERE deleted_at IS NULL AND item_rank != '' AND id != ? ORDER BY item_rank ASC LIMIT 1", issueID).Scan(&firstRank)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("rank-to-top: query first: %w", err)
+		}
+		var newRank string
+		if !firstRank.Valid || firstRank.String == "" {
+			newRank = rank.Initial()
+		} else {
+			newRank = rank.Before(firstRank.String)
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if _, err := tx.ExecContext(ctx, "UPDATE issues SET item_rank = ?, updated_at = ? WHERE id = ?", newRank, now, issueID); err != nil {
+			return fmt.Errorf("rank-to-top: update: %w", err)
+		}
+		return smoothRanksIfNeededTx(ctx, tx, newRank)
+	})
 }
 
 // RankSet establishes absolute order across the given IDs by stacking them at
@@ -81,65 +67,50 @@ func (s *Store) RankSet(ctx context.Context, ids []string) error {
 			return err
 		}
 	}
-	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
-	if err != nil {
-		return err
-	}
-	defer releaseCommitLock()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin rank-set tx: %w", err)
-	}
-	defer tx.Rollback()
-
-	// Find the current topmost rank, excluding any of the IDs being reassigned
-	// (so we anchor against rows that aren't moving).
-	excludeIDs := make([]any, 0, len(ids))
-	placeholders := make([]string, 0, len(ids))
-	for _, id := range ids {
-		excludeIDs = append(excludeIDs, id)
-		placeholders = append(placeholders, "?")
-	}
-	query := fmt.Sprintf(`SELECT item_rank FROM issues WHERE deleted_at IS NULL AND item_rank != '' AND id NOT IN (%s) ORDER BY item_rank ASC LIMIT 1`, strings.Join(placeholders, ","))
-	var topRank sql.NullString
-	if err := tx.QueryRowContext(ctx, query, excludeIDs...).Scan(&topRank); err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("rank-set: query top: %w", err)
-	}
-
-	// Walk IDs in reverse, assigning each a rank just above the previous one.
-	// The last ID (idx N-1) is anchored just above the existing top; each
-	// earlier ID is anchored just above the previously-assigned rank, so the
-	// final order is ids[0] < ids[1] < ... < ids[N-1] < (existing top).
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	cursor := topRank.String
-	hasCursor := topRank.Valid && topRank.String != ""
-	newRanks := make([]string, len(ids))
-	for i := len(ids) - 1; i >= 0; i-- {
-		var newRank string
-		if !hasCursor {
-			newRank = rank.Initial()
-			hasCursor = true
-		} else {
-			newRank = rank.Before(cursor)
+	return s.withMutation(ctx, "rank set", func(ctx context.Context, tx *sql.Tx) error {
+		// Find the current topmost rank, excluding any of the IDs being reassigned
+		// (so we anchor against rows that aren't moving).
+		excludeIDs := make([]any, 0, len(ids))
+		placeholders := make([]string, 0, len(ids))
+		for _, id := range ids {
+			excludeIDs = append(excludeIDs, id)
+			placeholders = append(placeholders, "?")
 		}
-		newRanks[i] = newRank
-		cursor = newRank
-	}
-	for i, id := range ids {
-		if _, err := tx.ExecContext(ctx, `UPDATE issues SET item_rank = ?, updated_at = ? WHERE id = ?`, newRanks[i], now, id); err != nil {
-			return fmt.Errorf("rank-set: update %s: %w", id, err)
+		query := fmt.Sprintf(`SELECT item_rank FROM issues WHERE deleted_at IS NULL AND item_rank != '' AND id NOT IN (%s) ORDER BY item_rank ASC LIMIT 1`, strings.Join(placeholders, ","))
+		var topRank sql.NullString
+		if err := tx.QueryRowContext(ctx, query, excludeIDs...).Scan(&topRank); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("rank-set: query top: %w", err)
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit rank-set: %w", err)
-	}
-	if err := s.commitWorkingSet(ctx, "rank set"); err != nil {
-		return err
-	}
-	if len(newRanks) > 0 {
-		return s.smoothRanksIfNeeded(ctx, newRanks[0])
-	}
-	return nil
+
+		// Walk IDs in reverse, assigning each a rank just above the previous one.
+		// The last ID (idx N-1) is anchored just above the existing top; each
+		// earlier ID is anchored just above the previously-assigned rank, so the
+		// final order is ids[0] < ids[1] < ... < ids[N-1] < (existing top).
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		cursor := topRank.String
+		hasCursor := topRank.Valid && topRank.String != ""
+		newRanks := make([]string, len(ids))
+		for i := len(ids) - 1; i >= 0; i-- {
+			var newRank string
+			if !hasCursor {
+				newRank = rank.Initial()
+				hasCursor = true
+			} else {
+				newRank = rank.Before(cursor)
+			}
+			newRanks[i] = newRank
+			cursor = newRank
+		}
+		for i, id := range ids {
+			if _, err := tx.ExecContext(ctx, `UPDATE issues SET item_rank = ?, updated_at = ? WHERE id = ?`, newRanks[i], now, id); err != nil {
+				return fmt.Errorf("rank-set: update %s: %w", id, err)
+			}
+		}
+		if len(newRanks) > 0 {
+			return smoothRanksIfNeededTx(ctx, tx, newRanks[0])
+		}
+		return nil
+	})
 }
 
 // RankToBottom moves an issue to rank below all other issues.
@@ -147,38 +118,24 @@ func (s *Store) RankToBottom(ctx context.Context, issueID string) error {
 	if _, err := s.GetIssue(ctx, issueID); err != nil {
 		return err
 	}
-	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
-	if err != nil {
-		return err
-	}
-	defer releaseCommitLock()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin rank-to-bottom tx: %w", err)
-	}
-	defer tx.Rollback()
-	var lastRank sql.NullString
-	err = tx.QueryRowContext(ctx, "SELECT item_rank FROM issues WHERE deleted_at IS NULL AND item_rank != '' AND id != ? ORDER BY item_rank DESC LIMIT 1", issueID).Scan(&lastRank)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("rank-to-bottom: query last: %w", err)
-	}
-	var newRank string
-	if !lastRank.Valid || lastRank.String == "" {
-		newRank = rank.Initial()
-	} else {
-		newRank = rank.After(lastRank.String)
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.ExecContext(ctx, "UPDATE issues SET item_rank = ?, updated_at = ? WHERE id = ?", newRank, now, issueID); err != nil {
-		return fmt.Errorf("rank-to-bottom: update: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit rank-to-bottom: %w", err)
-	}
-	if err := s.commitWorkingSet(ctx, "rank to bottom"); err != nil {
-		return err
-	}
-	return s.smoothRanksIfNeeded(ctx, newRank)
+	return s.withMutation(ctx, "rank to bottom", func(ctx context.Context, tx *sql.Tx) error {
+		var lastRank sql.NullString
+		err := tx.QueryRowContext(ctx, "SELECT item_rank FROM issues WHERE deleted_at IS NULL AND item_rank != '' AND id != ? ORDER BY item_rank DESC LIMIT 1", issueID).Scan(&lastRank)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("rank-to-bottom: query last: %w", err)
+		}
+		var newRank string
+		if !lastRank.Valid || lastRank.String == "" {
+			newRank = rank.Initial()
+		} else {
+			newRank = rank.After(lastRank.String)
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if _, err := tx.ExecContext(ctx, "UPDATE issues SET item_rank = ?, updated_at = ? WHERE id = ?", newRank, now, issueID); err != nil {
+			return fmt.Errorf("rank-to-bottom: update: %w", err)
+		}
+		return smoothRanksIfNeededTx(ctx, tx, newRank)
+	})
 }
 
 // RankAbove moves an issue to rank immediately above the target issue.
@@ -193,41 +150,27 @@ func (s *Store) RankAbove(ctx context.Context, issueID, targetID string) error {
 	if _, err := s.GetIssue(ctx, issueID); err != nil {
 		return err
 	}
-	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
-	if err != nil {
-		return err
-	}
-	defer releaseCommitLock()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin rank-above tx: %w", err)
-	}
-	defer tx.Rollback()
-	var aboveRank sql.NullString
-	err = tx.QueryRowContext(ctx, "SELECT item_rank FROM issues WHERE item_rank < ? AND deleted_at IS NULL AND id != ? ORDER BY item_rank DESC LIMIT 1", target.Rank, issueID).Scan(&aboveRank)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("rank-above: query neighbor: %w", err)
-	}
-	var newRank string
-	if !aboveRank.Valid || aboveRank.String == "" {
-		newRank = rank.Before(target.Rank)
-	} else {
-		newRank, err = rank.Midpoint(aboveRank.String, target.Rank)
-		if err != nil {
-			return fmt.Errorf("rank-above: midpoint: %w", err)
+	return s.withMutation(ctx, "rank above", func(ctx context.Context, tx *sql.Tx) error {
+		var aboveRank sql.NullString
+		err := tx.QueryRowContext(ctx, "SELECT item_rank FROM issues WHERE item_rank < ? AND deleted_at IS NULL AND id != ? ORDER BY item_rank DESC LIMIT 1", target.Rank, issueID).Scan(&aboveRank)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("rank-above: query neighbor: %w", err)
 		}
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.ExecContext(ctx, "UPDATE issues SET item_rank = ?, updated_at = ? WHERE id = ?", newRank, now, issueID); err != nil {
-		return fmt.Errorf("rank-above: update: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit rank-above: %w", err)
-	}
-	if err := s.commitWorkingSet(ctx, "rank above"); err != nil {
-		return err
-	}
-	return s.smoothRanksIfNeeded(ctx, newRank)
+		var newRank string
+		if !aboveRank.Valid || aboveRank.String == "" {
+			newRank = rank.Before(target.Rank)
+		} else {
+			newRank, err = rank.Midpoint(aboveRank.String, target.Rank)
+			if err != nil {
+				return fmt.Errorf("rank-above: midpoint: %w", err)
+			}
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if _, err := tx.ExecContext(ctx, "UPDATE issues SET item_rank = ?, updated_at = ? WHERE id = ?", newRank, now, issueID); err != nil {
+			return fmt.Errorf("rank-above: update: %w", err)
+		}
+		return smoothRanksIfNeededTx(ctx, tx, newRank)
+	})
 }
 
 // RankBelow moves an issue to rank immediately below the target issue.
@@ -242,41 +185,27 @@ func (s *Store) RankBelow(ctx context.Context, issueID, targetID string) error {
 	if _, err := s.GetIssue(ctx, issueID); err != nil {
 		return err
 	}
-	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
-	if err != nil {
-		return err
-	}
-	defer releaseCommitLock()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin rank-below tx: %w", err)
-	}
-	defer tx.Rollback()
-	var belowRank sql.NullString
-	err = tx.QueryRowContext(ctx, "SELECT item_rank FROM issues WHERE item_rank > ? AND deleted_at IS NULL AND id != ? ORDER BY item_rank ASC LIMIT 1", target.Rank, issueID).Scan(&belowRank)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("rank-below: query neighbor: %w", err)
-	}
-	var newRank string
-	if !belowRank.Valid || belowRank.String == "" {
-		newRank = rank.After(target.Rank)
-	} else {
-		newRank, err = rank.Midpoint(target.Rank, belowRank.String)
-		if err != nil {
-			return fmt.Errorf("rank-below: midpoint: %w", err)
+	return s.withMutation(ctx, "rank below", func(ctx context.Context, tx *sql.Tx) error {
+		var belowRank sql.NullString
+		err := tx.QueryRowContext(ctx, "SELECT item_rank FROM issues WHERE item_rank > ? AND deleted_at IS NULL AND id != ? ORDER BY item_rank ASC LIMIT 1", target.Rank, issueID).Scan(&belowRank)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("rank-below: query neighbor: %w", err)
 		}
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err := tx.ExecContext(ctx, "UPDATE issues SET item_rank = ?, updated_at = ? WHERE id = ?", newRank, now, issueID); err != nil {
-		return fmt.Errorf("rank-below: update: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit rank-below: %w", err)
-	}
-	if err := s.commitWorkingSet(ctx, "rank below"); err != nil {
-		return err
-	}
-	return s.smoothRanksIfNeeded(ctx, newRank)
+		var newRank string
+		if !belowRank.Valid || belowRank.String == "" {
+			newRank = rank.After(target.Rank)
+		} else {
+			newRank, err = rank.Midpoint(target.Rank, belowRank.String)
+			if err != nil {
+				return fmt.Errorf("rank-below: midpoint: %w", err)
+			}
+		}
+		now := time.Now().UTC().Format(time.RFC3339Nano)
+		if _, err := tx.ExecContext(ctx, "UPDATE issues SET item_rank = ?, updated_at = ? WHERE id = ?", newRank, now, issueID); err != nil {
+			return fmt.Errorf("rank-below: update: %w", err)
+		}
+		return smoothRanksIfNeededTx(ctx, tx, newRank)
+	})
 }
 
 // smoothRanksIfNeeded checks whether the given rank string has grown past the
@@ -384,26 +313,6 @@ func smoothRanksIfNeededTx(ctx context.Context, tx *sql.Tx, triggerRank string) 
 	return nil
 }
 
-func (s *Store) smoothRanksIfNeeded(ctx context.Context, triggerRank string) error {
-	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
-	if err != nil {
-		return err
-	}
-	defer releaseCommitLock()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin smooth tx: %w", err)
-	}
-	defer tx.Rollback()
-	if err := smoothRanksIfNeededTx(ctx, tx, triggerRank); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit smooth: %w", err)
-	}
-	return s.commitWorkingSet(ctx, "smooth ranks")
-}
-
 // [LAW:one-source-of-truth] Rank inversion detection uses one shared relation clause for both counting and remediation.
 const rankInversionsRelationClause = `FROM relations r
 	JOIN issues src ON src.id = r.src_id
@@ -450,83 +359,68 @@ func (s *Store) FixRankInversions(ctx context.Context) (int, error) {
 		}
 		return strings.Join(parts, "|")
 	}
-	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("fix rank inversions: acquire lock: %w", err)
-	}
-	defer releaseCommitLock()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return 0, fmt.Errorf("fix rank inversions: begin tx: %w", err)
-	}
-	defer tx.Rollback()
 	rerankedCount := 0
-	seenSnapshots := map[string]struct{}{}
-	for {
-		inversions, err := loadInversions(ctx, tx)
-		if err != nil {
-			return 0, fmt.Errorf("fix rank inversions: %w", err)
-		}
-		if len(inversions) == 0 {
-			break
-		}
-		snapshot := serializeInversions(inversions)
-		if _, seen := seenSnapshots[snapshot]; seen {
-			return 0, fmt.Errorf("fix rank inversions: unable to converge in one run; remaining inversions=%d", len(inversions))
-		}
-		seenSnapshots[snapshot] = struct{}{}
-
-		// [LAW:dataflow-not-control-flow] Every pass applies one deterministic update per dependency;
-		// selected target dependents come from ordered inversion data rather than branch-specific handling.
-		targets := make([]rankInversion, 0, len(inversions))
-		seenDeps := map[string]struct{}{}
-		for _, inv := range inversions {
-			if _, seen := seenDeps[inv.depID]; seen {
-				continue
-			}
-			seenDeps[inv.depID] = struct{}{}
-			targets = append(targets, inv)
-		}
-		for _, target := range targets {
-			// Place the dependency just above the highest-priority dependent by
-			// computing a rank between the dependent's predecessor and the dependent itself.
-			var targetRank string
-			if err := tx.QueryRowContext(ctx, "SELECT item_rank FROM issues WHERE id = ?", target.dependentID).Scan(&targetRank); err != nil {
-				return 0, fmt.Errorf("fix rank inversions: read target rank %s: %w", target.dependentID, err)
-			}
-			var aboveRank sql.NullString
-			err := tx.QueryRowContext(ctx, "SELECT item_rank FROM issues WHERE item_rank < ? AND deleted_at IS NULL AND id != ? ORDER BY item_rank DESC LIMIT 1", targetRank, target.depID).Scan(&aboveRank)
+	if err := s.withMutation(ctx, "fix rank inversions", func(ctx context.Context, tx *sql.Tx) error {
+		seenSnapshots := map[string]struct{}{}
+		for {
+			inversions, err := loadInversions(ctx, tx)
 			if err != nil {
-				if !errors.Is(err, sql.ErrNoRows) {
-					return 0, fmt.Errorf("fix rank inversions: query neighbor: %w", err)
-				}
+				return fmt.Errorf("fix rank inversions: %w", err)
 			}
-			var newRank string
-			if !aboveRank.Valid || aboveRank.String == "" {
-				newRank = rank.Before(targetRank)
-			} else {
-				newRank, err = rank.Midpoint(aboveRank.String, targetRank)
+			if len(inversions) == 0 {
+				return nil
+			}
+			snapshot := serializeInversions(inversions)
+			if _, seen := seenSnapshots[snapshot]; seen {
+				return fmt.Errorf("fix rank inversions: unable to converge in one run; remaining inversions=%d", len(inversions))
+			}
+			seenSnapshots[snapshot] = struct{}{}
+
+			// [LAW:dataflow-not-control-flow] Every pass applies one deterministic update per dependency;
+			// selected target dependents come from ordered inversion data rather than branch-specific handling.
+			targets := make([]rankInversion, 0, len(inversions))
+			seenDeps := map[string]struct{}{}
+			for _, inv := range inversions {
+				if _, seen := seenDeps[inv.depID]; seen {
+					continue
+				}
+				seenDeps[inv.depID] = struct{}{}
+				targets = append(targets, inv)
+			}
+			for _, target := range targets {
+				// Place the dependency just above the highest-priority dependent by
+				// computing a rank between the dependent's predecessor and the dependent itself.
+				var targetRank string
+				if err := tx.QueryRowContext(ctx, "SELECT item_rank FROM issues WHERE id = ?", target.dependentID).Scan(&targetRank); err != nil {
+					return fmt.Errorf("fix rank inversions: read target rank %s: %w", target.dependentID, err)
+				}
+				var aboveRank sql.NullString
+				err := tx.QueryRowContext(ctx, "SELECT item_rank FROM issues WHERE item_rank < ? AND deleted_at IS NULL AND id != ? ORDER BY item_rank DESC LIMIT 1", targetRank, target.depID).Scan(&aboveRank)
 				if err != nil {
-					return 0, fmt.Errorf("fix rank inversions: midpoint: %w", err)
+					if !errors.Is(err, sql.ErrNoRows) {
+						return fmt.Errorf("fix rank inversions: query neighbor: %w", err)
+					}
 				}
+				var newRank string
+				if !aboveRank.Valid || aboveRank.String == "" {
+					newRank = rank.Before(targetRank)
+				} else {
+					newRank, err = rank.Midpoint(aboveRank.String, targetRank)
+					if err != nil {
+						return fmt.Errorf("fix rank inversions: midpoint: %w", err)
+					}
+				}
+				now := time.Now().UTC().Format(time.RFC3339Nano)
+				if _, err := tx.ExecContext(ctx, "UPDATE issues SET item_rank = ?, updated_at = ? WHERE id = ?", newRank, now, target.depID); err != nil {
+					return fmt.Errorf("fix rank inversions: update %s: %w", target.depID, err)
+				}
+				if err := smoothRanksIfNeededTx(ctx, tx, newRank); err != nil {
+					return fmt.Errorf("fix rank inversions: smooth ranks: %w", err)
+				}
+				rerankedCount++
 			}
-			now := time.Now().UTC().Format(time.RFC3339Nano)
-			if _, err := tx.ExecContext(ctx, "UPDATE issues SET item_rank = ?, updated_at = ? WHERE id = ?", newRank, now, target.depID); err != nil {
-				return 0, fmt.Errorf("fix rank inversions: update %s: %w", target.depID, err)
-			}
-			if err := smoothRanksIfNeededTx(ctx, tx, newRank); err != nil {
-				return 0, fmt.Errorf("fix rank inversions: smooth ranks: %w", err)
-			}
-			rerankedCount++
 		}
-	}
-	if rerankedCount == 0 {
-		return 0, nil
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("fix rank inversions: commit: %w", err)
-	}
-	if err := s.commitWorkingSet(ctx, "fix rank inversions"); err != nil {
+	}); err != nil {
 		return 0, err
 	}
 	return rerankedCount, nil

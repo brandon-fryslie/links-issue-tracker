@@ -235,50 +235,20 @@ func (s *Store) GetSyncState(ctx context.Context) (SyncState, error) {
 }
 
 func (s *Store) RecordSyncState(ctx context.Context, state SyncState) error {
-	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
-	if err != nil {
-		return err
-	}
-	defer releaseCommitLock()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin record sync state tx: %w", err)
-	}
-	defer tx.Rollback()
-	for key, value := range map[string]string{
-		"last_sync_path": strings.TrimSpace(state.Path),
-		"last_sync_hash": strings.TrimSpace(state.ContentHash),
-	} {
-		if err := s.setMeta(ctx, tx, key, value); err != nil {
-			return err
+	return s.withMutation(ctx, "record sync state", func(ctx context.Context, tx *sql.Tx) error {
+		for key, value := range map[string]string{
+			"last_sync_path": strings.TrimSpace(state.Path),
+			"last_sync_hash": strings.TrimSpace(state.ContentHash),
+		} {
+			if err := s.setMeta(ctx, tx, key, value); err != nil {
+				return err
+			}
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit record sync state: %w", err)
-	}
-	if err := s.commitWorkingSet(ctx, "record sync state"); err != nil {
-		return err
-	}
-	return nil
+		return nil
+	})
 }
 
 func (s *Store) CreateIssue(ctx context.Context, in CreateIssueInput) (model.Issue, error) {
-	var issue model.Issue
-	err := retryTransientManifestReadOnly(ctx, func(ctx context.Context) error {
-		created, createErr := s.createIssueOnce(ctx, in)
-		if createErr != nil {
-			return createErr
-		}
-		issue = created
-		return nil
-	}, transientManifestRetryDelay, waitWithContext)
-	if err != nil {
-		return model.Issue{}, err
-	}
-	return issue, nil
-}
-
-func (s *Store) createIssueOnce(ctx context.Context, in CreateIssueInput) (model.Issue, error) {
 	if strings.TrimSpace(in.Title) == "" {
 		return model.Issue{}, errors.New("title is required")
 	}
@@ -315,64 +285,49 @@ func (s *Store) createIssueOnce(ctx context.Context, in CreateIssueInput) (model
 	if err != nil {
 		return model.Issue{}, err
 	}
-	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
-	if err != nil {
-		return model.Issue{}, err
-	}
-	defer releaseCommitLock()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return model.Issue{}, fmt.Errorf("begin create issue tx: %w", err)
-	}
-	defer tx.Rollback()
 	parentID := strings.TrimSpace(in.ParentID)
-	if parentID != "" {
-		if err := tx.QueryRowContext(ctx, `SELECT id FROM issues WHERE id = ?`, parentID).Scan(new(string)); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return model.Issue{}, NotFoundError{Entity: "issue", ID: parentID}
+	if err := s.withMutation(ctx, "create issue", func(ctx context.Context, tx *sql.Tx) error {
+		if parentID != "" {
+			if err := tx.QueryRowContext(ctx, `SELECT id FROM issues WHERE id = ?`, parentID).Scan(new(string)); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return NotFoundError{Entity: "issue", ID: parentID}
+				}
+				return fmt.Errorf("lookup parent issue %q: %w", parentID, err)
 			}
-			return model.Issue{}, fmt.Errorf("lookup parent issue %q: %w", parentID, err)
 		}
-	}
-	prefix, err := s.issuePrefixForTx(ctx, tx)
-	if err != nil {
-		return model.Issue{}, err
-	}
-	issue.ID, err = newIssueID(ctx, tx, prefix, issue.Topic, issue.Title, issue.Description, createdBy, issue.CreatedAt, parentID)
-	if err != nil {
-		return model.Issue{}, err
-	}
-	issue.Rank, err = nextRankAtBottom(ctx, tx)
-	if err != nil {
-		return model.Issue{}, err
-	}
-	_, err = tx.ExecContext(ctx, `INSERT INTO issues(
-		id, title, description, agent_prompt, status, priority, issue_type, topic, assignee, item_rank, created_at, updated_at, closed_at, archived_at, deleted_at
-	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
-		issue.ID, issue.Title, issue.Description, nullableString(issue.Prompt), statusForStorage(issue), issue.Priority, issue.IssueType, issue.Topic,
-		issue.AssigneeValue(), issue.Rank, issue.CreatedAt.Format(time.RFC3339Nano), issue.UpdatedAt.Format(time.RFC3339Nano))
-	if err != nil {
-		return model.Issue{}, fmt.Errorf("insert issue: %w", err)
-	}
-	if parentID != "" {
-		if _, err := tx.ExecContext(ctx, `INSERT INTO relations(src_id, dst_id, type, created_at, created_by) VALUES (?, ?, 'parent-child', ?, ?)`,
-			issue.ID, parentID, issue.CreatedAt.Format(time.RFC3339Nano), createdBy); err != nil {
-			return model.Issue{}, fmt.Errorf("insert parent relation: %w", err)
+		prefix, err := s.issuePrefixForTx(ctx, tx)
+		if err != nil {
+			return err
 		}
-	}
-	if err := s.replaceLabelsTx(ctx, tx, issue.ID, issue.Labels, createdBy); err != nil {
-		return model.Issue{}, err
-	}
-	if err := s.insertHistoryTx(ctx, tx, issue.ID, "created", "issue created", "", "open", createdBy); err != nil {
-		return model.Issue{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return model.Issue{}, fmt.Errorf("commit create issue: %w", err)
-	}
-	if err := s.commitWorkingSet(ctx, "create issue"); err != nil {
-		return model.Issue{}, err
-	}
-	if err := s.smoothRanksIfNeeded(ctx, issue.Rank); err != nil {
+		issue.ID, err = newIssueID(ctx, tx, prefix, issue.Topic, issue.Title, issue.Description, createdBy, issue.CreatedAt, parentID)
+		if err != nil {
+			return err
+		}
+		issue.Rank, err = nextRankAtBottom(ctx, tx)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO issues(
+			id, title, description, agent_prompt, status, priority, issue_type, topic, assignee, item_rank, created_at, updated_at, closed_at, archived_at, deleted_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+			issue.ID, issue.Title, issue.Description, nullableString(issue.Prompt), statusForStorage(issue), issue.Priority, issue.IssueType, issue.Topic,
+			issue.AssigneeValue(), issue.Rank, issue.CreatedAt.Format(time.RFC3339Nano), issue.UpdatedAt.Format(time.RFC3339Nano)); err != nil {
+			return fmt.Errorf("insert issue: %w", err)
+		}
+		if parentID != "" {
+			if _, err := tx.ExecContext(ctx, `INSERT INTO relations(src_id, dst_id, type, created_at, created_by) VALUES (?, ?, 'parent-child', ?, ?)`,
+				issue.ID, parentID, issue.CreatedAt.Format(time.RFC3339Nano), createdBy); err != nil {
+				return fmt.Errorf("insert parent relation: %w", err)
+			}
+		}
+		if err := s.replaceLabelsTx(ctx, tx, issue.ID, issue.Labels, createdBy); err != nil {
+			return err
+		}
+		if err := s.insertHistoryTx(ctx, tx, issue.ID, "created", "issue created", "", "open", createdBy); err != nil {
+			return err
+		}
+		return smoothRanksIfNeededTx(ctx, tx, issue.Rank)
+	}); err != nil {
 		return model.Issue{}, err
 	}
 	return issue, nil
@@ -803,54 +758,25 @@ func (s *Store) UpdateIssue(ctx context.Context, id string, in UpdateIssueInput)
 	if value := issue.ClosedAtValue(); value != nil {
 		closedAt = value.Format(time.RFC3339Nano)
 	}
-	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
-	if err != nil {
-		return model.Issue{}, err
-	}
-	defer releaseCommitLock()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return model.Issue{}, fmt.Errorf("begin update issue tx: %w", err)
-	}
-	defer tx.Rollback()
-	_, err = tx.ExecContext(ctx, `UPDATE issues SET
-		title = ?, description = ?, agent_prompt = ?, status = ?, priority = ?, issue_type = ?, assignee = ?, updated_at = ?, closed_at = ?, archived_at = ?, deleted_at = ?
-		WHERE id = ?`, issue.Title, issue.Description, nullableString(issue.Prompt), statusForStorage(issue), issue.Priority, issue.IssueType, issue.AssigneeValue(), issue.UpdatedAt.Format(time.RFC3339Nano), closedAt, nullableTime(issue.ArchivedAt), nullableTime(issue.DeletedAt), issue.ID)
-	if err != nil {
-		return model.Issue{}, fmt.Errorf("update issue: %w", err)
-	}
-	if in.Labels != nil {
-		if err := s.replaceLabelsTx(ctx, tx, issue.ID, issue.Labels, "links"); err != nil {
-			return model.Issue{}, err
+	if err := s.withMutation(ctx, "update issue", func(ctx context.Context, tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE issues SET
+			title = ?, description = ?, agent_prompt = ?, status = ?, priority = ?, issue_type = ?, assignee = ?, updated_at = ?, closed_at = ?, archived_at = ?, deleted_at = ?
+			WHERE id = ?`, issue.Title, issue.Description, nullableString(issue.Prompt), statusForStorage(issue), issue.Priority, issue.IssueType, issue.AssigneeValue(), issue.UpdatedAt.Format(time.RFC3339Nano), closedAt, nullableTime(issue.ArchivedAt), nullableTime(issue.DeletedAt), issue.ID); err != nil {
+			return fmt.Errorf("update issue: %w", err)
 		}
-	}
-	if err := tx.Commit(); err != nil {
-		return model.Issue{}, fmt.Errorf("commit update issue: %w", err)
-	}
-	if err := s.commitWorkingSet(ctx, "update issue"); err != nil {
+		if in.Labels != nil {
+			if err := s.replaceLabelsTx(ctx, tx, issue.ID, issue.Labels, "links"); err != nil {
+				return err
+			}
+		}
+		return nil
+	}); err != nil {
 		return model.Issue{}, err
 	}
 	return s.GetIssue(ctx, issue.ID)
 }
 
-// RankToTop moves an issue to rank above all other issues.
 func (s *Store) AddComment(ctx context.Context, in AddCommentInput) (model.Comment, error) {
-	var comment model.Comment
-	err := retryTransientManifestReadOnly(ctx, func(ctx context.Context) error {
-		created, createErr := s.addCommentOnce(ctx, in)
-		if createErr != nil {
-			return createErr
-		}
-		comment = created
-		return nil
-	}, transientManifestRetryDelay, waitWithContext)
-	if err != nil {
-		return model.Comment{}, err
-	}
-	return comment, nil
-}
-
-func (s *Store) addCommentOnce(ctx context.Context, in AddCommentInput) (model.Comment, error) {
 	if _, err := s.GetIssue(ctx, in.IssueID); err != nil {
 		return model.Comment{}, err
 	}
@@ -863,45 +789,18 @@ func (s *Store) addCommentOnce(ctx context.Context, in AddCommentInput) (model.C
 	if comment.CreatedBy == "" {
 		comment.CreatedBy = "unknown"
 	}
-	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
-	if err != nil {
-		return model.Comment{}, err
-	}
-	defer releaseCommitLock()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return model.Comment{}, fmt.Errorf("begin add comment tx: %w", err)
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO comments(id, issue_id, body, created_at, created_by) VALUES (?, ?, ?, ?, ?)`, comment.ID, comment.IssueID, comment.Body, comment.CreatedAt.Format(time.RFC3339Nano), comment.CreatedBy); err != nil {
-		return model.Comment{}, fmt.Errorf("insert comment: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return model.Comment{}, fmt.Errorf("commit add comment: %w", err)
-	}
-	if err := s.commitWorkingSet(ctx, "add comment"); err != nil {
+	if err := s.withMutation(ctx, "add comment", func(ctx context.Context, tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO comments(id, issue_id, body, created_at, created_by) VALUES (?, ?, ?, ?, ?)`, comment.ID, comment.IssueID, comment.Body, comment.CreatedAt.Format(time.RFC3339Nano), comment.CreatedBy); err != nil {
+			return fmt.Errorf("insert comment: %w", err)
+		}
+		return nil
+	}); err != nil {
 		return model.Comment{}, err
 	}
 	return comment, nil
 }
 
 func (s *Store) TransitionIssue(ctx context.Context, in TransitionIssueInput) (model.Issue, error) {
-	var issue model.Issue
-	err := retryTransientManifestReadOnly(ctx, func(ctx context.Context) error {
-		transitioned, transitionErr := s.transitionIssueOnce(ctx, in)
-		if transitionErr != nil {
-			return transitionErr
-		}
-		issue = transitioned
-		return nil
-	}, transientManifestRetryDelay, waitWithContext)
-	if err != nil {
-		return model.Issue{}, err
-	}
-	return issue, nil
-}
-
-func (s *Store) transitionIssueOnce(ctx context.Context, in TransitionIssueInput) (model.Issue, error) {
 	issue, err := s.GetIssue(ctx, in.IssueID)
 	if err != nil {
 		return model.Issue{}, err
@@ -950,27 +849,13 @@ func (s *Store) transitionIssueOnce(ctx context.Context, in TransitionIssueInput
 		return model.Issue{}, fmt.Errorf("unsupported lifecycle action %q", action)
 	}
 	issue.UpdatedAt = now
-	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
-	if err != nil {
-		return model.Issue{}, err
-	}
-	defer releaseCommitLock()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return model.Issue{}, fmt.Errorf("begin transition issue tx: %w", err)
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `UPDATE issues SET status = ?, updated_at = ?, closed_at = ?, archived_at = ?, deleted_at = ? WHERE id = ?`,
-		statusForStorage(issue), issue.UpdatedAt.Format(time.RFC3339Nano), nullableTime(issue.ClosedAtValue()), nullableTime(issue.ArchivedAt), nullableTime(issue.DeletedAt), issue.ID); err != nil {
-		return model.Issue{}, fmt.Errorf("update issue lifecycle: %w", err)
-	}
-	if err := s.insertHistoryTx(ctx, tx, issue.ID, action, reason, fromStatus, toStatus, actor); err != nil {
-		return model.Issue{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return model.Issue{}, fmt.Errorf("commit transition issue: %w", err)
-	}
-	if err := s.commitWorkingSet(ctx, "transition issue"); err != nil {
+	if err := s.withMutation(ctx, "transition issue", func(ctx context.Context, tx *sql.Tx) error {
+		if _, err := tx.ExecContext(ctx, `UPDATE issues SET status = ?, updated_at = ?, closed_at = ?, archived_at = ?, deleted_at = ? WHERE id = ?`,
+			statusForStorage(issue), issue.UpdatedAt.Format(time.RFC3339Nano), nullableTime(issue.ClosedAtValue()), nullableTime(issue.ArchivedAt), nullableTime(issue.DeletedAt), issue.ID); err != nil {
+			return fmt.Errorf("update issue lifecycle: %w", err)
+		}
+		return s.insertHistoryTx(ctx, tx, issue.ID, action, reason, fromStatus, toStatus, actor)
+	}); err != nil {
 		return model.Issue{}, err
 	}
 	reloaded, err := s.GetIssue(ctx, issue.ID)
@@ -994,44 +879,30 @@ func (s *Store) writeStatusTransition(ctx context.Context, issue model.Issue, ac
 	fromStatus := issue.StatusValue()
 	toStatus := updated.StatusValue()
 	now := time.Now().UTC()
-	ctx, releaseCommitLock, err := s.acquireCommitLock(ctx)
-	if err != nil {
-		return model.Issue{}, err
-	}
-	defer releaseCommitLock()
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return model.Issue{}, fmt.Errorf("begin transition issue tx: %w", err)
-	}
-	defer tx.Rollback()
 	var closedAt any
 	if value := updated.ClosedAtValue(); value != nil {
 		closedAt = value.Format(time.RFC3339Nano)
 	}
-	// [LAW:dataflow-not-control-flow] Status transitions always execute one guarded write; contention is modeled by affected row count.
-	result, err := tx.ExecContext(ctx, `UPDATE issues SET status = ?, updated_at = ?, closed_at = ? WHERE id = ? AND status = ?`,
-		toStatus, now.Format(time.RFC3339Nano), closedAt, issue.ID, fromStatus)
-	if err != nil {
-		return model.Issue{}, fmt.Errorf("update issue status: %w", err)
-	}
-	affected, err := result.RowsAffected()
-	if err != nil {
-		return model.Issue{}, fmt.Errorf("read status transition result: %w", err)
-	}
-	if affected == 0 {
-		currentStatus, lookupErr := currentStatusTx(ctx, tx, issue.ID)
-		if lookupErr != nil {
-			return model.Issue{}, lookupErr
+	if err := s.withMutation(ctx, "transition issue", func(ctx context.Context, tx *sql.Tx) error {
+		// [LAW:dataflow-not-control-flow] Status transitions always execute one guarded write; contention is modeled by affected row count.
+		result, err := tx.ExecContext(ctx, `UPDATE issues SET status = ?, updated_at = ?, closed_at = ? WHERE id = ? AND status = ?`,
+			toStatus, now.Format(time.RFC3339Nano), closedAt, issue.ID, fromStatus)
+		if err != nil {
+			return fmt.Errorf("update issue status: %w", err)
 		}
-		return model.Issue{}, fmt.Errorf("%s conflict: issue status is %q", action, currentStatus)
-	}
-	if err := s.insertHistoryTx(ctx, tx, issue.ID, action, reason, fromStatus, toStatus, actor); err != nil {
-		return model.Issue{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return model.Issue{}, fmt.Errorf("commit transition issue: %w", err)
-	}
-	if err := s.commitWorkingSet(ctx, "transition issue"); err != nil {
+		affected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("read status transition result: %w", err)
+		}
+		if affected == 0 {
+			currentStatus, lookupErr := currentStatusTx(ctx, tx, issue.ID)
+			if lookupErr != nil {
+				return lookupErr
+			}
+			return fmt.Errorf("%s conflict: issue status is %q", action, currentStatus)
+		}
+		return s.insertHistoryTx(ctx, tx, issue.ID, action, reason, fromStatus, toStatus, actor)
+	}); err != nil {
 		return model.Issue{}, err
 	}
 	updated.UpdatedAt = now
