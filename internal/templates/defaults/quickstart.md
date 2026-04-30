@@ -9,8 +9,9 @@ Agent quickstart for links issue tracking
    `lit start <issue-id>`
 
 2) Create tickets
-   `lit new --title "..." --topic <topic> --type task|bug|feature|chore|epic`
-   `lit new --title "..." --topic <topic> --parent <parent-id> --type task`
+   `lit new --title "..." --topic <topic-1-2-words> --type task|bug|feature|chore|epic`
+   `lit new --title "..." --topic <topic-1-2-words> --parent <parent-id> --type task`
+   <agent-instructions>`--topic` is required and immutable. Pick a short hyphenated slug (1-2 words) that names a stable area, like `refactor`, `field-history`, or `dep-rm-relation-not-found` — not a full sentence or task description. Reuse an existing topic when one fits.</agent-instructions>
 
 3) Update tickets
    `lit update <issue-id> --title "..." --description "..." --priority 1 --assignee <user> --labels a,b`

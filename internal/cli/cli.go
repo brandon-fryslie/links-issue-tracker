@@ -574,7 +574,7 @@ func runNew(ctx context.Context, stdout io.Writer, ap *app.App, args []string) e
 	title := fs.String("title", "", "Issue title")
 	description := fs.String("description", "", "Issue description")
 	issueType := fs.String("type", "task", "Issue type: task|feature|bug|chore|epic")
-	topic := fs.String("topic", "", "Required immutable issue topic slug")
+	topic := fs.String("topic", "", "Required immutable issue topic slug (1-2 words; pick a stable area name like 'refactor' or 'field-history')")
 	parentID := fs.String("parent", "", "Optional parent issue ID; child IDs become parentID.<n>")
 	priority := fs.Int("priority", 2, "Priority 0..4 (lower is more important)")
 	assignee := fs.String("assignee", "", "Assignee")
