@@ -105,7 +105,7 @@ func commandSpecs(ctx context.Context, stdout io.Writer, stderr io.Writer) []Com
 	r := &commandRegistrar{ctx: ctx, stdout: stdout, stderr: stderr}
 
 	readyRun := r.appCmd(appAccessRead, "ready", func(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
-		return runReady(ctx, stdout, stderr, ap, args)
+		return runReady(ctx, stdout, r.stderr, ap, args)
 	})
 
 	completionRun := func(args []string) error {
