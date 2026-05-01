@@ -313,13 +313,25 @@ func smoothRanksIfNeededTx(ctx context.Context, tx *sql.Tx, triggerRank string) 
 	return nil
 }
 
-// [LAW:one-source-of-truth] Rank inversion detection uses one shared relation clause for both counting and remediation.
-const rankInversionsRelationClause = `FROM relations r
+// rankInversionCandidatesClause is a SQL pre-filter only: it picks blocks-edges
+// where ranks are inverted and both endpoints are non-deleted. It deliberately
+// does NOT filter on status — the canonical "is this issue closed?" predicate
+// lives in the lifecycle (model.Issue.State()), not in the SQL row, because
+// epics store status=NULL by design and their state is derived from children
+// via AllOf (see schema.go canonicalStatusCheckClause). A SQL-side
+// `status != 'closed'` test evaluates to NULL (not TRUE) for every epic and
+// would silently drop every blocks-edge that points at one. Liveness filtering
+// is therefore done in Go after hydration — see Store.liveRankInversions.
+// [LAW:one-source-of-truth] Lifecycle is the only authority for issue state;
+// SQL paths that need that classification round-trip through model.State().
+// [LAW:single-enforcer] Both Doctor count and FixRankInversions consume the
+// same liveRankInversions helper so the two cannot drift in what they call
+// an inversion.
+const rankInversionCandidatesClause = `FROM relations r
 	JOIN issues src ON src.id = r.src_id
 	JOIN issues dst ON dst.id = r.dst_id
 	WHERE r.type = 'blocks'
 	AND src.deleted_at IS NULL AND dst.deleted_at IS NULL
-	AND src.status != 'closed' AND dst.status != 'closed'
 	AND dst.item_rank > src.item_rank`
 
 type rankInversion struct {
@@ -327,30 +339,110 @@ type rankInversion struct {
 	dependentID string // the dependent (src in blocks relation)
 }
 
+// rowQueryer abstracts the QueryContext surface that *sql.DB and *sql.Tx
+// share, letting one helper run candidate-edge SQL inside or outside a tx.
+// [LAW:single-enforcer] One inversion-loader for both Doctor (read, no tx)
+// and FixRankInversions (mutating, intra-tx) — same SQL pre-filter, same
+// liveness intersect, no second site.
+type rowQueryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+}
+
+// loadInversionCandidates runs the SQL pre-filter and returns every blocks
+// edge whose endpoints are non-deleted and whose dst is ranked below src.
+// Liveness (is the issue closed per its lifecycle?) is filtered separately
+// in Go — see filterLiveInversions.
+func loadInversionCandidates(ctx context.Context, q rowQueryer) ([]rankInversion, error) {
+	// In blocks relations: src_id is the dependent, dst_id is the dependency (blocker).
+	rows, err := q.QueryContext(ctx, `SELECT r.dst_id, r.src_id `+rankInversionCandidatesClause+` ORDER BY src.item_rank ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("query: %w", err)
+	}
+	defer rows.Close()
+	inversions := make([]rankInversion, 0)
+	for rows.Next() {
+		var inv rankInversion
+		if err := rows.Scan(&inv.depID, &inv.dependentID); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		inversions = append(inversions, inv)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows: %w", err)
+	}
+	return inversions, nil
+}
+
+// filterLiveInversions drops every candidate whose dependent or dependency
+// has lifecycle State() == StateClosed. Closed work doesn't participate in
+// dependency ordering, so an inversion across a closed endpoint is not an
+// actionable inversion.
+func filterLiveInversions(candidates []rankInversion, liveIDs map[string]struct{}) []rankInversion {
+	out := make([]rankInversion, 0, len(candidates))
+	for _, inv := range candidates {
+		_, depLive := liveIDs[inv.depID]
+		_, dependentLive := liveIDs[inv.dependentID]
+		if depLive && dependentLive {
+			out = append(out, inv)
+		}
+	}
+	return out
+}
+
+// liveIssueIDs returns the set of non-deleted issue IDs whose lifecycle
+// State() is not Closed. Lifecycle is computed via the canonical hydration
+// path, so epics get AllOf rollup over their children — never a raw column
+// peek that would lie about epic state.
+// [LAW:one-source-of-truth] State classification rides the lifecycle here,
+// the same predicate ready uses for its rank_inversion annotations.
+func (s *Store) liveIssueIDs(ctx context.Context) (map[string]struct{}, error) {
+	issues, err := s.ListIssues(ctx, ListIssuesFilter{Statuses: []string{"open", "in_progress"}})
+	if err != nil {
+		return nil, fmt.Errorf("list live issues: %w", err)
+	}
+	out := make(map[string]struct{}, len(issues))
+	for _, issue := range issues {
+		out[issue.ID] = struct{}{}
+	}
+	return out, nil
+}
+
+// LiveRankInversions returns blocks-edges whose dependency is ranked below
+// the dependent and whose endpoints are both lifecycle-live. This is the
+// single classification path; Doctor counts len(LiveRankInversions) and
+// FixRankInversions consumes the same inversions for remediation.
+func (s *Store) LiveRankInversions(ctx context.Context) ([]rankInversion, error) {
+	liveIDs, err := s.liveIssueIDs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	candidates, err := loadInversionCandidates(ctx, s.db)
+	if err != nil {
+		return nil, fmt.Errorf("load inversion candidates: %w", err)
+	}
+	return filterLiveInversions(candidates, liveIDs), nil
+}
+
 // FixRankInversions finds all blocks relations where the dependency is ranked
 // below the dependent and ranks each dependency above its dependent. Returns
 // the number of dependency issues that were re-ranked.
 func (s *Store) FixRankInversions(ctx context.Context) (int, error) {
+	// Liveness is computed once before the tx: FixRankInversions only mutates
+	// item_rank, so closure status is invariant across the loop's iterations.
+	// Re-classifying inside the tx would require plumbing the queryer through
+	// hydrateIssues; the snapshot semantics here are equivalent and simpler.
+	// [LAW:dataflow-not-control-flow] Liveness is data the loop reads; it is
+	// not branched on per-iteration.
+	liveIDs, err := s.liveIssueIDs(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("fix rank inversions: snapshot live set: %w", err)
+	}
 	loadInversions := func(ctx context.Context, tx *sql.Tx) ([]rankInversion, error) {
-		// In blocks relations: src_id is the dependent, dst_id is the dependency (blocker).
-		// A rank inversion is when the dependency (dst) is ranked below the dependent (src).
-		rows, err := tx.QueryContext(ctx, `SELECT r.dst_id, r.src_id `+rankInversionsRelationClause+` ORDER BY src.item_rank ASC`)
+		candidates, err := loadInversionCandidates(ctx, tx)
 		if err != nil {
-			return nil, fmt.Errorf("query: %w", err)
+			return nil, err
 		}
-		defer rows.Close()
-		inversions := make([]rankInversion, 0)
-		for rows.Next() {
-			var inv rankInversion
-			if err := rows.Scan(&inv.depID, &inv.dependentID); err != nil {
-				return nil, fmt.Errorf("scan: %w", err)
-			}
-			inversions = append(inversions, inv)
-		}
-		if err := rows.Err(); err != nil {
-			return nil, fmt.Errorf("rows: %w", err)
-		}
-		return inversions, nil
+		return filterLiveInversions(candidates, liveIDs), nil
 	}
 	serializeInversions := func(inversions []rankInversion) string {
 		parts := make([]string, 0, len(inversions))

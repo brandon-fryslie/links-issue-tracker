@@ -131,10 +131,18 @@ func (s *Store) Doctor(ctx context.Context) (HealthReport, error) {
 		report.Warnings = append(report.Warnings, fmt.Sprintf("orphan issue history rows: %d", report.OrphanHistoryRows))
 	}
 	// Rank inversions: blocks relations where the dependency (dst) is ranked
-	// below the dependent (src) among non-closed issues.
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) `+rankInversionsRelationClause).Scan(&report.RankInversions); err != nil {
+	// below the dependent (src) among lifecycle-live issues. Counted via the
+	// same Go-side classifier FixRankInversions consumes so the two cannot
+	// disagree about what is an inversion. (Pre-fix this read used a SQL
+	// `status != 'closed'` filter that silently excluded every blocks-edge
+	// pointing at an epic, since epics carry status=NULL by design.)
+	// [LAW:single-enforcer] Doctor count and FixRankInversions are routed
+	// through Store.LiveRankInversions.
+	inversions, err := s.LiveRankInversions(ctx)
+	if err != nil {
 		return report, fmt.Errorf("count rank inversions: %w", err)
 	}
+	report.RankInversions = len(inversions)
 	if report.RankInversions > 0 {
 		report.Warnings = append(report.Warnings, fmt.Sprintf("rank inversions: %d (dependencies ranked below dependents)", report.RankInversions))
 	}
