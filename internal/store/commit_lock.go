@@ -110,22 +110,27 @@ func waitWithContext(ctx context.Context, duration time.Duration) error {
 }
 
 func (s *Store) commitWorkingSet(ctx context.Context, message string) error {
-	trimmed := strings.TrimSpace(message)
-	if trimmed == "" {
-		trimmed = "links mutation"
-	}
 	// [LAW:single-enforcer] commitWorkingSet is the single mutation boundary that owns transient commit retry behavior.
 	// [LAW:one-source-of-truth] A process-shared commit lock at this boundary is the canonical writer serialization mechanism.
 	return s.withCommitLock(ctx, func(ctx context.Context) error {
 		return retryTransientManifestReadOnly(ctx, func(ctx context.Context) error {
-			return s.commitWorkingSetOnce(ctx, trimmed)
+			return s.commitWorkingSetOnce(ctx, message)
 		}, transientManifestRetryDelay, waitWithContext)
 	})
 }
 
+// commitWorkingSetOnce is the single function that hands a commit message to
+// Dolt, so it owns what a valid commit message looks like: trimmed and never
+// empty. Routing normalization through here means every caller (commitWorkingSet
+// and withMutation) gets the same message shape with no per-callsite repetition.
+// [LAW:single-enforcer] One trim+default rule for Dolt commit messages.
 func (s *Store) commitWorkingSetOnce(ctx context.Context, message string) error {
+	trimmed := strings.TrimSpace(message)
+	if trimmed == "" {
+		trimmed = "links mutation"
+	}
 	var commitHash string
-	err := s.db.QueryRowContext(ctx, `CALL DOLT_COMMIT('-Am', ?)`, message).Scan(&commitHash)
+	err := s.db.QueryRowContext(ctx, `CALL DOLT_COMMIT('-Am', ?)`, trimmed).Scan(&commitHash)
 	if err == nil {
 		return nil
 	}
