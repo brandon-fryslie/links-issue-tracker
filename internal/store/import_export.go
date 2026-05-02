@@ -137,8 +137,8 @@ func (s *Store) Doctor(ctx context.Context) (HealthReport, error) {
 	// `status != 'closed'` filter that silently excluded every blocks-edge
 	// pointing at an epic, since epics carry status=NULL by design.)
 	// [LAW:single-enforcer] Doctor count and FixRankInversions are routed
-	// through Store.LiveRankInversions.
-	inversions, err := s.LiveRankInversions(ctx)
+	// through Store.liveRankInversions.
+	inversions, err := s.liveRankInversions(ctx)
 	if err != nil {
 		return report, fmt.Errorf("count rank inversions: %w", err)
 	}

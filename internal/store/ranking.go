@@ -389,10 +389,12 @@ func filterLiveInversions(candidates []rankInversion, liveIDs map[string]struct{
 	return out
 }
 
-// liveIssueIDs returns the set of non-deleted issue IDs whose lifecycle
-// State() is not Closed. Lifecycle is computed via the canonical hydration
-// path, so epics get AllOf rollup over their children — never a raw column
-// peek that would lie about epic state.
+// liveIssueIDs returns the set of non-archived, non-deleted issue IDs whose
+// lifecycle State() is not Closed. Archived issues are user-deprioritized and
+// do not generate actionable inversions, for the same reason closed issues do
+// not. Lifecycle is computed via the canonical hydration path, so epics get
+// AllOf rollup over their children — never a raw column peek that would lie
+// about epic state.
 // [LAW:one-source-of-truth] State classification rides the lifecycle here,
 // the same predicate ready uses for its rank_inversion annotations.
 func (s *Store) liveIssueIDs(ctx context.Context) (map[string]struct{}, error) {
@@ -407,11 +409,11 @@ func (s *Store) liveIssueIDs(ctx context.Context) (map[string]struct{}, error) {
 	return out, nil
 }
 
-// LiveRankInversions returns blocks-edges whose dependency is ranked below
+// liveRankInversions returns blocks-edges whose dependency is ranked below
 // the dependent and whose endpoints are both lifecycle-live. This is the
-// single classification path; Doctor counts len(LiveRankInversions) and
+// single classification path; Doctor counts len(liveRankInversions) and
 // FixRankInversions consumes the same inversions for remediation.
-func (s *Store) LiveRankInversions(ctx context.Context) ([]rankInversion, error) {
+func (s *Store) liveRankInversions(ctx context.Context) ([]rankInversion, error) {
 	liveIDs, err := s.liveIssueIDs(ctx)
 	if err != nil {
 		return nil, err
