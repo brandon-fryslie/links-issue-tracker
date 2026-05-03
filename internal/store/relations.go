@@ -74,7 +74,7 @@ func (s *Store) RemoveRelation(ctx context.Context, srcID, dstID, relType string
 		}
 		affected, _ := res.RowsAffected()
 		if affected == 0 {
-			return fmt.Errorf("relation not found")
+			return fmt.Errorf("relation not found: src=%s dst=%s type=%s", srcID, dstID, relType)
 		}
 		return nil
 	})
