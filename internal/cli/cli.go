@@ -1066,10 +1066,6 @@ func runWorkspace(stdout io.Writer, ws workspace.Info, args []string) error {
 	})
 }
 
-type errorDetailer interface {
-	ErrorDetails() map[string]any
-}
-
 func runCompletion(stdout io.Writer, args []string) error {
 	if len(args) != 1 {
 		return errors.New("usage: lit completion <bash|zsh|fish>")
