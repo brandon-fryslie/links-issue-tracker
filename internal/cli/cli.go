@@ -101,7 +101,6 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 	return root
 }
 
-
 func validateNestedCommandPath(args []string, usage string, commands ...string) error {
 	// [LAW:single-enforcer] Nested command path validation is centralized here so invalid/help paths fail before startup side effects.
 	if len(args) == 0 {
@@ -127,7 +126,7 @@ func validateCommentCommandPath(args []string) error {
 	return validateNestedCommandPath(args, "usage: lit comment add <id> --body <text>", "add")
 }
 
-func runWithWorkspace(_ []string, run func(workspace.Info) error) error {
+func runWithWorkspace(run func(workspace.Info) error) error {
 	ws, err := resolveWorkspaceFromWD()
 	if err != nil {
 		return err
@@ -135,7 +134,7 @@ func runWithWorkspace(_ []string, run func(workspace.Info) error) error {
 	return run(ws)
 }
 
-func runWithApp(ctx context.Context, accessMode appAccessMode, commandArgs []string, run func(context.Context, *app.App) error) error {
+func runWithApp(ctx context.Context, accessMode appAccessMode, run func(context.Context, *app.App) error) error {
 	cwd, err := os.Getwd()
 	if err != nil {
 		return fmt.Errorf("get cwd: %w", err)
@@ -157,7 +156,6 @@ func runWithApp(ctx context.Context, accessMode appAccessMode, commandArgs []str
 	defer ap.Close()
 	return run(ctx, ap)
 }
-
 
 func resolveWorkspaceFromWD() (workspace.Info, error) {
 	cwd, err := os.Getwd()
@@ -905,7 +903,6 @@ func runRankSet(ctx context.Context, stdout io.Writer, ap *app.App, args []strin
 		return err
 	})
 }
-
 
 func filterWorkableIssues(issues []model.Issue) []model.Issue {
 	filtered := make([]model.Issue, 0, len(issues))
