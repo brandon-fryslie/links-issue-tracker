@@ -136,9 +136,7 @@ func commandSpecs(ctx context.Context, stdout io.Writer, stderr io.Writer) []Com
 			Run: withValidation(validateHooksCommandPath, r.wsCmd("hooks", func(_ context.Context, stdout io.Writer, ws workspace.Info, args []string) error {
 				return runHooks(stdout, ws, args)
 			}))},
-		{Name: "migrate", Summary: "Migrate from Beads to links", GroupID: "maintenance",
-			Run: r.wsCmd("migrate", runMigrate)},
-		{Name: "sync", Summary: "Mirror Dolt data through git remotes", GroupID: "data",
+{Name: "sync", Summary: "Mirror Dolt data through git remotes", GroupID: "data",
 			Run: withValidation(validateSyncCommandPath, r.wsCmd("sync", runSync))},
 		{Name: "new", Summary: "Create an issue", GroupID: "operations",
 			Run: r.appCmd(appAccessWrite, "new", runNew)},

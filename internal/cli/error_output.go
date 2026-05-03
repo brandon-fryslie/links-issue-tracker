@@ -101,10 +101,6 @@ func commandErrorCode(exitCode int) string {
 }
 
 func commandErrorReason(err error) string {
-	var beadsRequired BeadsMigrationRequiredError
-	if errors.As(err, &beadsRequired) {
-		return "beads_migration_required"
-	}
 	var notFound store.NotFoundError
 	if errors.As(err, &notFound) {
 		return "entity_not_found"
@@ -137,8 +133,6 @@ func commandErrorReason(err error) string {
 
 func commandErrorRemediation(reason string) string {
 	switch reason {
-	case "beads_migration_required":
-		return "Run `lit migrate --apply --json` before retrying the command."
 	case "unknown_command":
 		return "Run `lit --help` (or `lit help <command>`) to select a supported command path."
 	case "usage_error":
