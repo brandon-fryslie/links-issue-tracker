@@ -34,15 +34,15 @@ type retrySleepFunc func(context.Context, time.Duration) error
 type commitLockContextKey struct{}
 
 // withMutation runs a mutation under a held commit lock. It begins a tx,
-// invokes fn, commits the tx, and runs the working-set commit — retrying
-// only the working-set commit on transient manifest-read-only errors with
-// the lock still held. The lock is acquired and released exactly once.
+// invokes fn, commits the tx, and runs the working-set commit via
+// commitWorkingSet (re-entrant: the lock is already held, so acquireCommitLock
+// short-circuits). The lock is acquired and released exactly once.
 //
 // [LAW:dataflow-not-control-flow] Every mutation runs the same sequence;
 // per-site variability is carried in `message` and `fn`, not in branches.
 // [LAW:single-enforcer] Lock acquisition, tx lifecycle, and transient-retry
-// are owned here, eliminating the inter-attempt race window where the lock
-// was previously released between outer retry attempts.
+// are all owned at their respective single boundaries; withMutation composes
+// them rather than duplicating any of them.
 func (s *Store) withMutation(ctx context.Context, message string, fn func(ctx context.Context, tx *sql.Tx) error) error {
 	return s.withCommitLock(ctx, func(ctx context.Context) error {
 		tx, err := s.db.BeginTx(ctx, nil)
@@ -56,9 +56,7 @@ func (s *Store) withMutation(ctx context.Context, message string, fn func(ctx co
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("commit %s tx: %w", message, err)
 		}
-		return retryTransientManifestReadOnly(ctx, func(ctx context.Context) error {
-			return s.commitWorkingSetOnce(ctx, message)
-		}, transientManifestRetryDelay, waitWithContext)
+		return s.commitWorkingSet(ctx, message)
 	})
 }
 

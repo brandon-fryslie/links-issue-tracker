@@ -128,6 +128,9 @@ func OpenForRead(ctx context.Context, doltRootDir string, workspaceID string) (*
 	if err := validateOpenArgs(doltRootDir, workspaceID); err != nil {
 		return nil, err
 	}
+	if _, err := os.Stat(doltRootDir); errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("repository not initialized with lit — run 'lit init' first")
+	}
 	s, err := openStoreConnection(doltRootDir, workspaceID)
 	if err != nil {
 		return nil, err
