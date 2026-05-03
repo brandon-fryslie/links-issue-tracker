@@ -64,19 +64,17 @@ func (r *commandRegistrar) appCmd(access appAccessMode, name string, fn appRunFn
 	return r.appCmdDynamic(func([]string) appAccessMode { return access }, name, fn)
 }
 
-func (r *commandRegistrar) appCmdDynamic(resolve func([]string) appAccessMode, name string, fn appRunFn) CommandRunner {
+func (r *commandRegistrar) appCmdDynamic(resolve func([]string) appAccessMode, _ string, fn appRunFn) CommandRunner {
 	return func(args []string) error {
-		commandArgs := append([]string{name}, args...)
-		return runWithApp(r.ctx, resolve(args), commandArgs, func(commandCtx context.Context, ap *app.App) error {
+		return runWithApp(r.ctx, resolve(args), func(commandCtx context.Context, ap *app.App) error {
 			return fn(commandCtx, r.stdout, ap, args)
 		})
 	}
 }
 
-func (r *commandRegistrar) wsCmd(name string, fn wsRunFn) CommandRunner {
+func (r *commandRegistrar) wsCmd(_ string, fn wsRunFn) CommandRunner {
 	return func(args []string) error {
-		commandArgs := append([]string{name}, args...)
-		return runWithWorkspace(commandArgs, func(ws workspace.Info) error {
+		return runWithWorkspace(func(ws workspace.Info) error {
 			return fn(r.ctx, r.stdout, ws, args)
 		})
 	}
@@ -136,7 +134,7 @@ func commandSpecs(ctx context.Context, stdout io.Writer, stderr io.Writer) []Com
 			Run: withValidation(validateHooksCommandPath, r.wsCmd("hooks", func(_ context.Context, stdout io.Writer, ws workspace.Info, args []string) error {
 				return runHooks(stdout, ws, args)
 			}))},
-{Name: "sync", Summary: "Mirror Dolt data through git remotes", GroupID: "data",
+		{Name: "sync", Summary: "Mirror Dolt data through git remotes", GroupID: "data",
 			Run: withValidation(validateSyncCommandPath, r.wsCmd("sync", runSync))},
 		{Name: "new", Summary: "Create an issue", GroupID: "operations",
 			Run: r.appCmd(appAccessWrite, "new", runNew)},
