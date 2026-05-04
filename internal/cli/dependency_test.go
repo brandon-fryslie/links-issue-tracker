@@ -103,11 +103,17 @@ func TestDepRmReportsDiagnosticIDsOnNotFound(t *testing.T) {
 	ctx := context.Background()
 	ap := newTestCLIApp(t)
 
-	issueA, _ := ap.Store.CreateIssue(ctx, store.CreateIssueInput{Title: "A", Topic: "dep", IssueType: "task", Priority: 1})
-	issueB, _ := ap.Store.CreateIssue(ctx, store.CreateIssueInput{Title: "B", Topic: "dep", IssueType: "task", Priority: 2})
+	issueA, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{Title: "A", Topic: "dep", IssueType: "task", Priority: 1})
+	if err != nil {
+		t.Fatalf("CreateIssue(A) error = %v", err)
+	}
+	issueB, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{Title: "B", Topic: "dep", IssueType: "task", Priority: 2})
+	if err != nil {
+		t.Fatalf("CreateIssue(B) error = %v", err)
+	}
 
 	var stderr bytes.Buffer
-	err := runDep(ctx, &stderr, ap, []string{"rm", "--type", "blocks", issueA.ID, issueB.ID})
+	err = runDep(ctx, &stderr, ap, []string{"rm", "--type", "blocks", issueA.ID, issueB.ID})
 	if err == nil {
 		t.Fatal("dep rm nonexistent relation should error")
 	}
