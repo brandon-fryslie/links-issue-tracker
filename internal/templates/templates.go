@@ -15,6 +15,10 @@ const (
 	AgentsSectionTemplateName = "agents-section.md"
 	PrePushHookTemplateName   = "pre-push-hook.sh"
 	QuickstartTemplateName    = "quickstart.md"
+
+	guidanceNamePrefix = "guidance-"
+	guidancePreSuffix  = "-pre.md"
+	guidancePostSuffix = "-post.md"
 )
 
 var (
@@ -173,4 +177,23 @@ func firstNonEmpty(values ...string) string {
 		}
 	}
 	return ""
+}
+
+// GuidanceTemplateName returns the canonical template filename for a
+// transition action's guidance phase (e.g. "guidance-done-pre.md").
+func GuidanceTemplateName(action, phase string) string {
+	return guidanceNamePrefix + action + "-" + phase + ".md"
+}
+
+// LoadGuidance resolves a guidance template for the given action and phase
+// ("pre" or "post") using the standard precedence chain. Returns ("", nil) when
+// no template exists — callers use this to decide whether the two-phase flow
+// activates, making the template's existence the data that drives behavior.
+func LoadGuidance(action, phase, workspaceRoot string) (string, error) {
+	name := GuidanceTemplateName(action, phase)
+	content, err := Load(name, workspaceRoot)
+	if err != nil {
+		return "", nil
+	}
+	return content, nil
 }
