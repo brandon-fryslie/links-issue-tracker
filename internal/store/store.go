@@ -90,25 +90,27 @@ func (a ApplyUpdateInput) IsEmpty() bool {
 }
 
 type statusTransitionKey struct {
-	From string
-	To   string
+	From model.State
+	To   model.State
 }
 
 // [LAW:one-source-of-truth] Status transition action map is the single authoritative source for lit update transitions.
 var updateStatusTransitionActions = map[statusTransitionKey]string{
-	{From: "open", To: "in_progress"}:   "start",
-	{From: "in_progress", To: "closed"}: "done",
-	{From: "open", To: "closed"}:        "close",
-	{From: "closed", To: "open"}:        "reopen",
-	{From: "closed", To: "in_progress"}: "reopen+start",
-	{From: "in_progress", To: "open"}:   "done+reopen",
+	{From: model.StateOpen, To: model.StateInProgress}:    "start",
+	{From: model.StateInProgress, To: model.StateClosed}: "done",
+	{From: model.StateOpen, To: model.StateClosed}:        "close",
+	{From: model.StateClosed, To: model.StateOpen}:        "reopen",
+	{From: model.StateClosed, To: model.StateInProgress}: "reopen+start",
+	{From: model.StateInProgress, To: model.StateOpen}:   "done+reopen",
 }
 
 func statusTransitionActionsForApplyUpdate(fromStatus, toStatus string) ([]string, error) {
 	if toStatus == "" || fromStatus == toStatus {
 		return nil, nil
 	}
-	action, exists := updateStatusTransitionActions[statusTransitionKey{From: fromStatus, To: toStatus}]
+	from, _ := model.ParseState(fromStatus)
+	to, _ := model.ParseState(toStatus)
+	action, exists := updateStatusTransitionActions[statusTransitionKey{From: from, To: to}]
 	if !exists {
 		return nil, fmt.Errorf("unsupported status transition %q -> %q for lit update", fromStatus, toStatus)
 	}
@@ -121,7 +123,7 @@ type SortSpec struct {
 }
 
 type ListIssuesFilter struct {
-	Statuses          []string
+	Statuses          []model.State
 	IssueTypes        []string
 	ExcludeIssueTypes []string
 	Assignees         []string
@@ -532,16 +534,10 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 	return capLimit(filterByState(hydrated, allowedStates), filter.Limit), nil
 }
 
-func parseStatusFilter(input []string) ([]model.State, error) {
+func parseStatusFilter(input []model.State) ([]model.State, error) {
 	out := make([]model.State, 0, len(input))
 	for _, raw := range input {
-		state, err := model.ParseState(raw)
-		if err != nil {
-			return nil, err
-		}
-		if state == "" {
-			state = model.StateOpen
-		}
+		state, _ := model.ParseState(string(raw))
 		out = append(out, state)
 	}
 	return out, nil
@@ -837,13 +833,8 @@ func (s *Store) ApplyUpdate(ctx context.Context, id string, in ApplyUpdateInput)
 	if err != nil {
 		return model.Issue{}, err
 	}
-	normalizedTarget, err := model.ParseState(in.TargetStatus)
-	if err != nil && strings.TrimSpace(in.TargetStatus) != "" {
-		return model.Issue{}, err
-	}
-	if normalizedTarget != "" && string(normalizedTarget) != in.TargetStatus {
-		in.TargetStatus = string(normalizedTarget)
-	}
+	normalizedTarget, _ := model.ParseState(in.TargetStatus)
+	in.TargetStatus = string(normalizedTarget)
 	actions, err := statusTransitionActionsForApplyUpdate(current.StatusValue(), in.TargetStatus)
 	if err != nil {
 		return model.Issue{}, err
@@ -1456,13 +1447,7 @@ func statusForStorage(issue model.Issue) sql.NullString {
 func statusForStorageRaw(issueType string, status string) (sql.NullString, error) {
 	view := model.StatusView{}
 	if !model.IsContainerType(issueType) {
-		state, err := model.ParseState(status)
-		if err != nil {
-			return sql.NullString{}, err
-		}
-		if state == "" {
-			state = model.StateOpen
-		}
+		state, _ := model.ParseState(status)
 		view.Value = state
 	}
 	issue, err := model.HydrateRow(model.Issue{IssueType: issueType}, view, nil)

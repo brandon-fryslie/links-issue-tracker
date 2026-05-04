@@ -38,7 +38,7 @@ func Merge(base store.ListIssuesFilter, incoming store.ListIssuesFilter) (store.
 	if err != nil {
 		return store.ListIssuesFilter{}, err
 	}
-	filter.Statuses = mergeSlice(normalizedBase, normalizedIncoming)
+	filter.Statuses = mergeStateSlice(normalizedBase, normalizedIncoming)
 	filter.IssueTypes = mergeSlice(filter.IssueTypes, incoming.IssueTypes)
 	filter.Assignees = mergeSlice(filter.Assignees, incoming.Assignees)
 	filter.SearchTerms = append(filter.SearchTerms, incoming.SearchTerms...)
@@ -68,13 +68,8 @@ func Merge(base store.ListIssuesFilter, incoming store.ListIssuesFilter) (store.
 func applyTerm(filter *store.ListIssuesFilter, term string) error {
 	switch {
 	case strings.HasPrefix(term, "status:"):
-		parsed, err := model.ParseState(strings.TrimPrefix(term, "status:"))
-		if err != nil {
-			return err
-		}
-		if parsed != "" {
-			filter.Statuses = append(filter.Statuses, string(parsed))
-		}
+		parsed, _ := model.ParseState(strings.TrimPrefix(term, "status:"))
+		filter.Statuses = append(filter.Statuses, parsed)
 		return nil
 	case strings.HasPrefix(term, "type:"):
 		t := strings.TrimSpace(strings.TrimPrefix(term, "type:"))
@@ -112,18 +107,31 @@ func applyTerm(filter *store.ListIssuesFilter, term string) error {
 	}
 }
 
-func normalizeQueryStatuses(statuses []string) ([]string, error) {
-	result := make([]string, 0, len(statuses))
+func normalizeQueryStatuses(statuses []model.State) ([]model.State, error) {
+	result := make([]model.State, 0, len(statuses))
 	for _, s := range statuses {
-		parsed, err := model.ParseState(s)
-		if err != nil {
-			return nil, err
-		}
-		if parsed != "" {
-			result = append(result, string(parsed))
-		}
+		parsed, _ := model.ParseState(string(s))
+		result = append(result, parsed)
 	}
 	return result, nil
+}
+
+func mergeStateSlice(base, incoming []model.State) []model.State {
+	if len(incoming) == 0 {
+		return base
+	}
+	seen := make(map[model.State]bool, len(base))
+	for _, v := range base {
+		seen[v] = true
+	}
+	result := append([]model.State{}, base...)
+	for _, v := range incoming {
+		if !seen[v] {
+			result = append(result, v)
+			seen[v] = true
+		}
+	}
+	return result
 }
 
 func mergeSlice(base, incoming []string) []string {

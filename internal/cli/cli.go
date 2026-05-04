@@ -404,7 +404,7 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	visited := map[string]bool{}
 	fs.Visit(func(f *pflag.Flag) { visited[f.Name] = true })
 	filter := store.ListIssuesFilter{
-		Statuses:        toSlice(strings.TrimSpace(*status)),
+		Statuses:        parseStateSlice(strings.TrimSpace(*status)),
 		IssueTypes:      toSlice(strings.TrimSpace(*issueType)),
 		Assignees:       toSlice(strings.TrimSpace(*assignee)),
 		IncludeArchived: *includeArchived,
@@ -467,7 +467,7 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	// around ListIssues. When the user hasn't narrowed by status (via --status or
 	// --query status:...), exclude closed issues so `lit ls` shows active work.
 	if len(filter.Statuses) == 0 {
-		filter.Statuses = []string{"open", "in_progress"}
+		filter.Statuses = []model.State{model.StateOpen, model.StateInProgress}
 	}
 	issues, err := ap.Store.ListIssues(ctx, filter)
 	if err != nil {
@@ -565,13 +565,14 @@ func gatherReadyAnnotated(ctx context.Context, ap *app.App, rf readyFilter) ([]a
 	if err != nil {
 		return nil, nil, err
 	}
-	statuses := []string{"open", "in_progress"}
+	statuses := []model.State{model.StateOpen, model.StateInProgress}
 	if rf.Status != "" {
 		// User-supplied status overrides the workable default. The intersection
 		// with leaf-only filtering still applies via filterWorkableIssues below;
 		// a user asking for closed items here gets none, which is the honest
 		// answer rather than silently substituting a different status.
-		statuses = []string{rf.Status}
+		parsed, _ := model.ParseState(rf.Status)
+		statuses = []model.State{parsed}
 	}
 	// [LAW:one-source-of-truth] rank is the canonical ordering; no explicit SortBy
 	// needed — the store default is item_rank ASC.
@@ -667,7 +668,7 @@ func runOrphaned(ctx context.Context, stdout io.Writer, ap *app.App, args []stri
 		return errors.New("usage: lit orphaned [--assignee <user>] [--json]")
 	}
 	listFilter := store.ListIssuesFilter{
-		Statuses:        []string{"in_progress"},
+		Statuses:        []model.State{model.StateInProgress},
 		Assignees:       toSlice(strings.TrimSpace(*assignee)),
 		IncludeArchived: false,
 		IncludeDeleted:  false,
@@ -1167,6 +1168,14 @@ func printValue(w io.Writer, v any, jsonOut bool, textFn func(io.Writer, any) er
 		return writeJSON(w, v)
 	}
 	return textFn(w, v)
+}
+
+func parseStateSlice(s string) []model.State {
+	if strings.TrimSpace(s) == "" {
+		return nil
+	}
+	state, _ := model.ParseState(s)
+	return []model.State{state}
 }
 
 func toSlice(s string) []string {

@@ -82,7 +82,7 @@ func ParseState(value string) (State, error) {
 	case Open, InProgress, Closed:
 		return State(normalized), nil
 	default:
-		return "", fmt.Errorf("unknown lifecycle state %q", value)
+		return Open, nil
 	}
 }
 
