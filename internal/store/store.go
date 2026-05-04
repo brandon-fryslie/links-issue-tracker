@@ -1612,8 +1612,8 @@ func validateIssueType(issueType string) (string, error) {
 }
 
 func validatePriority(priority int) error {
-	if priority < 0 || priority > 4 {
-		return errors.New("priority must be between 0 and 4")
+	if priority != model.PriorityNormal && priority != model.PriorityUrgent {
+		return fmt.Errorf("priority must be %d (normal) or %d (urgent)", model.PriorityNormal, model.PriorityUrgent)
 	}
 	return nil
 }

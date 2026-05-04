@@ -229,7 +229,7 @@ func TestSyncCompactRunsCleanlyAndPreservesData(t *testing.T) {
 	if err := st.EnsureIssuePrefix(ctx, "test"); err != nil {
 		t.Fatalf("EnsureIssuePrefix() error = %v", err)
 	}
-	issue, err := st.CreateIssue(ctx, CreateIssueInput{Title: "gc target", Topic: "gc-test", IssueType: "task", Priority: 2})
+	issue, err := st.CreateIssue(ctx, CreateIssueInput{Title: "gc target", Topic: "gc-test", IssueType: "task", Priority: 0})
 	if err != nil {
 		t.Fatalf("CreateIssue() error = %v", err)
 	}

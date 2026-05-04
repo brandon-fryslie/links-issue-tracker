@@ -37,7 +37,7 @@ func createIssuesTableStmt() string {
 			archived_at VARCHAR(64) NULL,
 			deleted_at VARCHAR(64) NULL,
 			CHECK(%s),
-			CHECK(priority >= 0 AND priority <= 4),
+			CHECK(priority >= 0 AND priority <= 1),
 			CHECK(issue_type IN ('task','feature','bug','chore','epic'))
 		);`, canonicalStatusCheckClause)
 }
@@ -163,6 +163,11 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	changed = changed || rankChanged
+	priorityChanged, err := s.ensurePriorityRange(ctx)
+	if err != nil {
+		return err
+	}
+	changed = changed || priorityChanged
 	workspaceChanged, err := s.ensureMetaValue(ctx, "workspace_id", s.workspaceID)
 	if err != nil {
 		return err
@@ -302,6 +307,80 @@ func (s *Store) ensureIssueRanks(ctx context.Context) (bool, error) {
 		current = rank.After(current)
 	}
 	return true, nil
+}
+
+// ensurePriorityRange resets any legacy priority values (> 1) to normal (0)
+// and updates the CHECK constraint to accept only 0 and 1.
+// [LAW:one-source-of-truth] Priority range migration runs once at store open;
+// the schema constraint and Go validation both derive from model.PriorityNormal/PriorityUrgent.
+func (s *Store) ensurePriorityRange(ctx context.Context) (bool, error) {
+	changed := false
+	// Reset any legacy priority values > 1 to normal (0).
+	resetChanged, err := s.execReconciliationUpdate(
+		ctx,
+		`SELECT 1 FROM issues WHERE priority > 1 LIMIT 1`,
+		`UPDATE issues SET priority = 0 WHERE priority > 1`,
+		"reset legacy priority values to normal",
+	)
+	if err != nil {
+		return false, err
+	}
+	changed = changed || resetChanged
+	// Update the CHECK constraint: drop any old priority constraint and add the new 0-1 range.
+	constraints, err := s.listIssuePriorityCheckConstraints(ctx)
+	if err != nil {
+		return false, err
+	}
+	if hasCanonicalPriorityConstraint(constraints) {
+		return changed, nil
+	}
+	for _, c := range constraints {
+		if _, err := s.db.ExecContext(ctx, "ALTER TABLE issues DROP CHECK `"+strings.ReplaceAll(c.name, "`", "``")+"`"); err != nil {
+			return false, fmt.Errorf("drop priority check %s: %w", c.name, err)
+		}
+	}
+	if _, err := s.db.ExecContext(ctx, `ALTER TABLE issues ADD CONSTRAINT issues_priority_check CHECK (priority >= 0 AND priority <= 1)`); err != nil {
+		return false, fmt.Errorf("add canonical priority check: %w", err)
+	}
+	return true, nil
+}
+
+func (s *Store) listIssuePriorityCheckConstraints(ctx context.Context) ([]issueCheckConstraint, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT tc.constraint_name, cc.check_clause
+		FROM information_schema.table_constraints tc
+		JOIN information_schema.check_constraints cc
+		  ON tc.constraint_schema = cc.constraint_schema
+		 AND tc.constraint_name = cc.constraint_name
+		WHERE tc.table_schema = DATABASE()
+		  AND tc.table_name = 'issues'
+		  AND tc.constraint_type = 'CHECK'`)
+	if err != nil {
+		return nil, fmt.Errorf("query issue check constraints: %w", err)
+	}
+	defer rows.Close()
+	var out []issueCheckConstraint
+	for rows.Next() {
+		var c issueCheckConstraint
+		if err := rows.Scan(&c.name, &c.clause); err != nil {
+			return nil, fmt.Errorf("scan issue check constraint: %w", err)
+		}
+		normalized := normalizeConstraintClause(c.clause)
+		if strings.Contains(normalized, "priority") {
+			out = append(out, c)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate issue check constraints: %w", err)
+	}
+	return out, nil
+}
+
+func hasCanonicalPriorityConstraint(constraints []issueCheckConstraint) bool {
+	if len(constraints) != 1 {
+		return false
+	}
+	normalized := normalizeConstraintClause(constraints[0].clause)
+	return strings.Contains(normalized, "priority>=0") && strings.Contains(normalized, "priority<=1")
 }
 
 func (s *Store) ensureStatusConstraint(ctx context.Context) (bool, error) {
