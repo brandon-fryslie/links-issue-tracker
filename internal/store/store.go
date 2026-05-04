@@ -108,8 +108,8 @@ func statusTransitionActionsForApplyUpdate(fromStatus, toStatus string) ([]strin
 	if toStatus == "" || fromStatus == toStatus {
 		return nil, nil
 	}
-	from, _ := model.ParseState(fromStatus)
-	to, _ := model.ParseState(toStatus)
+	from := model.DefaultOpen(fromStatus)
+	to := model.DefaultOpen(toStatus)
 	action, exists := updateStatusTransitionActions[statusTransitionKey{From: from, To: to}]
 	if !exists {
 		return nil, fmt.Errorf("unsupported status transition %q -> %q for lit update", fromStatus, toStatus)
@@ -537,7 +537,7 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 func parseStatusFilter(input []model.State) ([]model.State, error) {
 	out := make([]model.State, 0, len(input))
 	for _, raw := range input {
-		state, _ := model.ParseState(string(raw))
+		state := model.DefaultOpen(string(raw))
 		out = append(out, state)
 	}
 	return out, nil
@@ -833,7 +833,7 @@ func (s *Store) ApplyUpdate(ctx context.Context, id string, in ApplyUpdateInput)
 	if err != nil {
 		return model.Issue{}, err
 	}
-	normalizedTarget, _ := model.ParseState(in.TargetStatus)
+	normalizedTarget := model.DefaultOpen(in.TargetStatus)
 	in.TargetStatus = string(normalizedTarget)
 	actions, err := statusTransitionActionsForApplyUpdate(current.StatusValue(), in.TargetStatus)
 	if err != nil {
@@ -1447,7 +1447,7 @@ func statusForStorage(issue model.Issue) sql.NullString {
 func statusForStorageRaw(issueType string, status string) (sql.NullString, error) {
 	view := model.StatusView{}
 	if !model.IsContainerType(issueType) {
-		state, _ := model.ParseState(status)
+		state := model.DefaultOpen(status)
 		view.Value = state
 	}
 	issue, err := model.HydrateRow(model.Issue{IssueType: issueType}, view, nil)

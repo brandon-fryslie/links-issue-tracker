@@ -68,7 +68,10 @@ func Merge(base store.ListIssuesFilter, incoming store.ListIssuesFilter) (store.
 func applyTerm(filter *store.ListIssuesFilter, term string) error {
 	switch {
 	case strings.HasPrefix(term, "status:"):
-		parsed, _ := model.ParseState(strings.TrimPrefix(term, "status:"))
+		parsed, err := model.ParseState(strings.TrimPrefix(term, "status:"))
+		if err != nil {
+			return err
+		}
 		filter.Statuses = append(filter.Statuses, parsed)
 		return nil
 	case strings.HasPrefix(term, "type:"):
@@ -110,7 +113,10 @@ func applyTerm(filter *store.ListIssuesFilter, term string) error {
 func normalizeQueryStatuses(statuses []model.State) ([]model.State, error) {
 	result := make([]model.State, 0, len(statuses))
 	for _, s := range statuses {
-		parsed, _ := model.ParseState(string(s))
+		parsed, err := model.ParseState(string(s))
+		if err != nil {
+			return nil, err
+		}
 		result = append(result, parsed)
 	}
 	return result, nil

@@ -146,14 +146,29 @@ func TestParseStateNormalizes(t *testing.T) {
 	}
 }
 
-func TestParseStateDefaultsInvalidToOpen(t *testing.T) {
-	for _, input := range []string{"todo", "", "  ", "unknown", "garbage"} {
-		got, err := ParseState(input)
-		if err != nil {
-			t.Fatalf("ParseState(%q) error = %v, want nil", input, err)
+func TestParseStateRejectsInvalid(t *testing.T) {
+	for _, input := range []string{"todo", "unknown", "garbage"} {
+		_, err := ParseState(input)
+		if err == nil {
+			t.Fatalf("ParseState(%q) expected error", input)
 		}
+	}
+}
+
+func TestParseStateRejectsBlank(t *testing.T) {
+	for _, input := range []string{"", "  "} {
+		_, err := ParseState(input)
+		if err == nil {
+			t.Fatalf("ParseState(%q) expected error", input)
+		}
+	}
+}
+
+func TestDefaultOpenReturnsOpenForInvalid(t *testing.T) {
+	for _, input := range []string{"todo", "", "  ", "unknown", "garbage"} {
+		got := DefaultOpen(input)
 		if got != Open {
-			t.Fatalf("ParseState(%q) = %q, want %q", input, got, Open)
+			t.Fatalf("DefaultOpen(%q) = %q, want %q", input, got, Open)
 		}
 	}
 }

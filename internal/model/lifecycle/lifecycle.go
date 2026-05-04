@@ -82,8 +82,20 @@ func ParseState(value string) (State, error) {
 	case Open, InProgress, Closed:
 		return State(normalized), nil
 	default:
-		return Open, nil
+		return "", fmt.Errorf("invalid status %q (valid: open, in_progress, closed)", value)
 	}
+}
+
+// DefaultOpen parses a state, defaulting to Open for blank or unrecognized
+// input. Use this for lenient boundaries (import, hydration, storage) where
+// the data may be absent or legacy. Strict boundaries (CLI flags, query
+// language) should use ParseState directly.
+func DefaultOpen(value string) State {
+	state, err := ParseState(value)
+	if err != nil {
+		return Open
+	}
+	return state
 }
 
 func ParseAction(value string) (ActionName, error) {

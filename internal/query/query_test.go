@@ -2,8 +2,6 @@ package query
 
 import (
 	"testing"
-
-	"github.com/bmf/links-issue-tracker/internal/model"
 )
 
 func TestParseBuildsFilterFromQueryExpression(t *testing.T) {
@@ -68,12 +66,8 @@ func TestStatusAliasInProgressNormalizesToBeadsValue(t *testing.T) {
 	}
 }
 
-func TestParseDefaultsInvalidStatusToOpen(t *testing.T) {
-	result, err := Parse(`status:todo`)
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(result.Filter.Statuses) != 1 || result.Filter.Statuses[0] != model.StateOpen {
-		t.Fatalf("expected status:todo to default to open, got %v", result.Filter.Statuses)
+func TestParseRejectsInvalidStatus(t *testing.T) {
+	if _, err := Parse(`status:todo`); err == nil {
+		t.Fatal("expected invalid status error")
 	}
 }

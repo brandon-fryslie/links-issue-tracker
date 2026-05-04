@@ -403,8 +403,12 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	}
 	visited := map[string]bool{}
 	fs.Visit(func(f *pflag.Flag) { visited[f.Name] = true })
+	statuses, err := parseStateSlice(strings.TrimSpace(*status))
+	if err != nil {
+		return fmt.Errorf("parse --status: %w", err)
+	}
 	filter := store.ListIssuesFilter{
-		Statuses:        parseStateSlice(strings.TrimSpace(*status)),
+		Statuses:        statuses,
 		IssueTypes:      toSlice(strings.TrimSpace(*issueType)),
 		Assignees:       toSlice(strings.TrimSpace(*assignee)),
 		IncludeArchived: *includeArchived,
@@ -567,12 +571,11 @@ func gatherReadyAnnotated(ctx context.Context, ap *app.App, rf readyFilter) ([]a
 	}
 	statuses := []model.State{model.StateOpen, model.StateInProgress}
 	if rf.Status != "" {
-		// User-supplied status overrides the workable default. The intersection
-		// with leaf-only filtering still applies via filterWorkableIssues below;
-		// a user asking for closed items here gets none, which is the honest
-		// answer rather than silently substituting a different status.
-		parsed, _ := model.ParseState(rf.Status)
-		statuses = []model.State{parsed}
+		// User-supplied status overrides the workable default. Unrecognized
+		// values default to Open via DefaultOpen — the ready command is
+		// lenient, matching store/import behavior rather than strict CLI flag
+		// validation.
+		statuses = []model.State{model.DefaultOpen(rf.Status)}
 	}
 	// [LAW:one-source-of-truth] rank is the canonical ordering; no explicit SortBy
 	// needed — the store default is item_rank ASC.
@@ -1170,12 +1173,15 @@ func printValue(w io.Writer, v any, jsonOut bool, textFn func(io.Writer, any) er
 	return textFn(w, v)
 }
 
-func parseStateSlice(s string) []model.State {
+func parseStateSlice(s string) ([]model.State, error) {
 	if strings.TrimSpace(s) == "" {
-		return nil
+		return nil, nil
 	}
-	state, _ := model.ParseState(s)
-	return []model.State{state}
+	state, err := model.ParseState(s)
+	if err != nil {
+		return nil, err
+	}
+	return []model.State{state}, nil
 }
 
 func toSlice(s string) []string {
