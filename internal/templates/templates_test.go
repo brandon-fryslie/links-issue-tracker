@@ -34,7 +34,7 @@ func TestLoadReturnsEmbeddedQuickstartWhenNoOverride(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error = %v", err)
 	}
-	if !strings.Contains(content, "Agent quickstart for links issue tracking") {
+	if !strings.Contains(content, "Agent instructions for using links issue tracker (lit)") {
 		t.Fatalf("embedded quickstart default missing summary: %q", content)
 	}
 }
@@ -132,7 +132,7 @@ func TestEmbeddedDefaultReturnsContent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EmbeddedDefault() error = %v", err)
 	}
-	if !strings.Contains(string(content), "Agent quickstart for links issue tracking") {
+	if !strings.Contains(string(content), "Agent instructions for using links issue tracker (lit)") {
 		t.Fatalf("embedded quickstart missing summary: %q", content)
 	}
 }
