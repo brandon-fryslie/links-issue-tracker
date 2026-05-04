@@ -100,13 +100,15 @@ func writeInitHumanOutput(w io.Writer, report initReport) error {
 		{"CLAUDE.md", report.Claude, ""},
 	}
 
-	var updated, skipped []string
+	var updated, skipped, unchanged []string
 	for _, item := range items {
 		switch item.status {
 		case "created", "updated", "installed":
 			updated = append(updated, item.label)
 		case "skipped":
 			skipped = append(skipped, item.label)
+		case "unchanged":
+			unchanged = append(unchanged, item.label)
 		}
 	}
 
@@ -121,6 +123,11 @@ func writeInitHumanOutput(w io.Writer, report initReport) error {
 	}
 	if len(updated) > 0 {
 		if _, err := fmt.Fprintf(w, "  Updated: %s\n", strings.Join(updated, ", ")); err != nil {
+			return err
+		}
+	}
+	if len(unchanged) > 0 {
+		if _, err := fmt.Fprintf(w, "  Up to date: %s\n", strings.Join(unchanged, ", ")); err != nil {
 			return err
 		}
 	}
