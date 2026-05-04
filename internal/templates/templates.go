@@ -17,8 +17,6 @@ const (
 	QuickstartTemplateName    = "quickstart.md"
 
 	guidanceNamePrefix = "guidance-"
-	guidancePreSuffix  = "-pre.md"
-	guidancePostSuffix = "-post.md"
 )
 
 var (
@@ -186,14 +184,31 @@ func GuidanceTemplateName(action, phase string) string {
 }
 
 // LoadGuidance resolves a guidance template for the given action and phase
-// ("pre" or "post") using the standard precedence chain. Returns ("", nil) when
-// no template exists — callers use this to decide whether the two-phase flow
-// activates, making the template's existence the data that drives behavior.
+// ("pre" or "post"). Unlike Load, guidance templates are optional — absence is
+// not an error, it just deactivates the two-phase flow for that action.
+// Real I/O errors (permission denied, path-is-a-dir) propagate so callers can
+// surface them instead of silently skipping user-configured guidance.
 func LoadGuidance(action, phase, workspaceRoot string) (string, error) {
 	name := GuidanceTemplateName(action, phase)
-	content, err := Load(name, workspaceRoot)
-	if err != nil {
+
+	projectContent, projectErr := readOptionalFile(projectTemplatePath(workspaceRoot, name))
+	if projectErr != nil {
+		return "", fmt.Errorf("load guidance project template %s: %w", name, projectErr)
+	}
+	globalContent, globalErr := readOptionalFile(GlobalPath(name))
+	if globalErr != nil {
+		return "", fmt.Errorf("load guidance global template %s: %w", name, globalErr)
+	}
+
+	// Embedded default is optional for guidance — missing is not an error.
+	var embedded string
+	if raw, err := EmbeddedDefault(name); err == nil {
+		embedded = string(raw)
+	}
+
+	resolved := firstNonEmpty(projectContent, globalContent, embedded)
+	if resolved == "" {
 		return "", nil
 	}
-	return content, nil
+	return resolved, nil
 }

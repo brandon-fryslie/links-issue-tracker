@@ -938,7 +938,10 @@ func runTransition(ctx context.Context, stdout io.Writer, ap *app.App, args []st
 	// prints guidance and exits; --apply executes the transition and prints post-guidance.
 	// When no pre-guidance template exists, the command works as before (backward compatible).
 	// JSON mode bypasses guidance entirely — scripts don't need coaching.
-	preGuidance, hasPreGuidance := loadTransitionGuidance(action, "pre", ap.Workspace.RootDir)
+	preGuidance, hasPreGuidance, err := loadTransitionGuidance(action, "pre", ap.Workspace.RootDir)
+	if err != nil {
+		return fmt.Errorf("load pre-guidance: %w", err)
+	}
 
 	if hasPreGuidance && !*apply && !isJSON {
 		rendered := renderGuidance(preGuidance, issueID)
@@ -959,7 +962,10 @@ func runTransition(ctx context.Context, stdout io.Writer, ap *app.App, args []st
 	}
 
 	if !isJSON {
-		postGuidance, hasPostGuidance := loadTransitionGuidance(action, "post", ap.Workspace.RootDir)
+		postGuidance, hasPostGuidance, err := loadTransitionGuidance(action, "post", ap.Workspace.RootDir)
+		if err != nil {
+			return fmt.Errorf("load post-guidance: %w", err)
+		}
 		if hasPostGuidance {
 			rendered := renderGuidance(postGuidance, issueID)
 			if _, err := fmt.Fprintln(stdout, rendered); err != nil {
@@ -1215,14 +1221,17 @@ func transitionCommandName(action string) string {
 }
 
 // loadTransitionGuidance loads a guidance template for the given action/phase.
-// Returns the template content and whether it exists. Absent templates are not
-// an error — they simply deactivate the guidance flow for that action.
-func loadTransitionGuidance(action, phase, workspaceRoot string) (string, bool) {
+// Returns the template content, whether it exists, and any I/O error.
+// Absent templates are not an error — they simply deactivate the guidance flow.
+func loadTransitionGuidance(action, phase, workspaceRoot string) (string, bool, error) {
 	content, err := templates.LoadGuidance(action, phase, workspaceRoot)
-	if err != nil || content == "" {
-		return "", false
+	if err != nil {
+		return "", false, err
 	}
-	return strings.TrimSpace(content), true
+	if content == "" {
+		return "", false, nil
+	}
+	return strings.TrimSpace(content), true, nil
 }
 
 // renderGuidance interpolates <id> placeholders in a guidance template.

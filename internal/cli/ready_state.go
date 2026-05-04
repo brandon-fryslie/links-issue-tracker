@@ -418,7 +418,10 @@ func printReadyOutput(w io.Writer, columns []string, issues []annotation.Annotat
 // parseable) without threading a second writer through the rendering path.
 // [LAW:single-enforcer] Single point of preamble emission.
 func writeReadyPreamble(w io.Writer) error {
-	_, err := fmt.Fprintln(w, readyPreamble)
+	if _, err := fmt.Fprintln(w, readyPreamble); err != nil {
+		return err
+	}
+	_, err := fmt.Fprintln(w, strings.Repeat("─", 80))
 	return err
 }
 

@@ -114,3 +114,13 @@ func TestNamesReturnsAllManagedTemplates(t *testing.T) {
 	}
 }
 
+func TestQuickstartEmbeddedDefaultLoads(t *testing.T) {
+	content, err := Load(QuickstartTemplateName, "")
+	if err != nil {
+		t.Fatalf("Load(QuickstartTemplateName) error = %v", err)
+	}
+	if !strings.Contains(content, "<agent-instructions>") {
+		t.Fatal("quickstart embedded default missing <agent-instructions> tag")
+	}
+}
+
