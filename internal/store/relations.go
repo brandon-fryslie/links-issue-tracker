@@ -62,6 +62,7 @@ func (s *Store) AddRelation(ctx context.Context, in AddRelationInput) (model.Rel
 }
 
 func (s *Store) RemoveRelation(ctx context.Context, srcID, dstID, relType string) error {
+	relType = strings.TrimSpace(relType)
 	if relType == "related-to" {
 		ordered := []string{srcID, dstID}
 		sort.Strings(ordered)
