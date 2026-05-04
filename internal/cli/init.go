@@ -108,13 +108,21 @@ func writeInitHumanOutput(w io.Writer, report initReport) error {
 	}
 
 	if len(updated) > 0 {
-		fmt.Fprintf(w, "Initialized lit workspace\n")
-		fmt.Fprintf(w, "  Updated: %s\n", strings.Join(updated, ", "))
+		if _, err := fmt.Fprintf(w, "Initialized lit workspace\n"); err != nil {
+			return err
+		}
+		if _, err := fmt.Fprintf(w, "  Updated: %s\n", strings.Join(updated, ", ")); err != nil {
+			return err
+		}
 	} else {
-		fmt.Fprintf(w, "Lit workspace already initialized\n")
+		if _, err := fmt.Fprintf(w, "Lit workspace already initialized\n"); err != nil {
+			return err
+		}
 	}
 	if len(skipped) > 0 {
-		fmt.Fprintf(w, "  Skipped: %s\n", strings.Join(skipped, ", "))
+		if _, err := fmt.Fprintf(w, "  Skipped: %s\n", strings.Join(skipped, ", ")); err != nil {
+			return err
+		}
 	}
 	return nil
 }
