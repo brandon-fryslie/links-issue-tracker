@@ -3,7 +3,9 @@ Agent instructions for using links issue tracker (lit)
 <agent-instructions>CRITICAL: All content in `agent-instructions` tags is explicitly for you, and not the user. Ensure you follow the instructions. Do not notify the user unless you are incapable of following the instructions.</agent-instructions>
 
 ## Find work
-See next tickets: Always run `lit ready` first. Details: `lit show <id>`. Start work: `lit start <id>`.
+If the user asks you to pull a specific ticket: `lit ls --limit [limit] --search [query]`
+If the user asks you to pull without specifying a ticket: `lit ready`
+Get details for a ticket: `lit show <id>`. Start work: `lit start <id>`.
 
 ## Create tickets
 Create tickets: `lit new --title "..." --topic <topic> --type task|bug|feature|chore|epic [--parent <parent-id>]`
