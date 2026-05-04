@@ -351,9 +351,7 @@ Downstream tickets are your real acceptance criteria —
 not just "does this work in isolation" but "does this set the project up to be successful in the future."
 Structure your implementation to make downstream tickets simpler and more robust,
 even if the ticket doesn't specify it (but only if it aligns with the downstream tickets).
-
-IMPORTANT: If you haven't run 'lit quickstart' yet, do so NOW to ensure you understand how to use lit.
-`
+IMPORTANT: If you haven't run 'lit quickstart' yet, do so NOW to ensure you understand how to use lit.`
 
 const readyMaxItems = 10
 
@@ -420,10 +418,7 @@ func printReadyOutput(w io.Writer, columns []string, issues []annotation.Annotat
 // parseable) without threading a second writer through the rendering path.
 // [LAW:single-enforcer] Single point of preamble emission.
 func writeReadyPreamble(w io.Writer) error {
-	if _, err := fmt.Fprintln(w, readyPreamble); err != nil {
-		return err
-	}
-	_, err := fmt.Fprintln(w, strings.Repeat("─", 80))
+	_, err := fmt.Fprintln(w, readyPreamble)
 	return err
 }
 
@@ -431,6 +426,10 @@ func writeReadyPreamble(w io.Writer) error {
 // Caps output at readyMaxItems. The preamble is emitted separately to stderr
 // by writeReadyPreamble at the runReady boundary.
 func printReadySection(w io.Writer, columns []string, ready []annotation.AnnotatedIssue, unblocksMap map[string][]string) error {
+	if _, err := fmt.Fprintln(w, "Ready tickets:"); err != nil {
+		return err
+	}
+
 	display := ready
 	if len(display) > readyMaxItems {
 		display = display[:readyMaxItems]
@@ -533,7 +532,7 @@ func printBlockedSummary(w io.Writer, blocked []annotation.AnnotatedIssue) error
 			counts[a.Kind]++
 		}
 	}
-	if _, err := fmt.Fprintf(w, "\nBlocked (%d):\n", len(blocked)); err != nil {
+	if _, err := fmt.Fprintf(w, "\nBlocked tickets: %d (blocked tickets are not displayed above)\n", len(blocked)); err != nil {
 		return err
 	}
 	// Print in a stable order based on readyBlockingKinds.
