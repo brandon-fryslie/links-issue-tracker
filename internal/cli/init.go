@@ -110,17 +110,17 @@ func writeInitHumanOutput(w io.Writer, report initReport) error {
 		}
 	}
 
-	if report.DBCreated || len(updated) > 0 {
+	if report.DBCreated {
 		if _, err := fmt.Fprintf(w, "Initialized lit workspace\n"); err != nil {
 			return err
 		}
-		if len(updated) > 0 {
-			if _, err := fmt.Fprintf(w, "  Updated: %s\n", strings.Join(updated, ", ")); err != nil {
-				return err
-			}
-		}
 	} else {
-		if _, err := fmt.Fprintf(w, "Lit workspace already initialized\n"); err != nil {
+		if _, err := fmt.Fprintf(w, "lit workspace already initialized\n"); err != nil {
+			return err
+		}
+	}
+	if len(updated) > 0 {
+		if _, err := fmt.Fprintf(w, "  Updated: %s\n", strings.Join(updated, ", ")); err != nil {
 			return err
 		}
 	}
