@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(rm -v /Users/bmf/.claude/RTK.md)",
+      "Bash(rtk ls *)",
+      "Bash(rm -v /Users/bmf/.claude/hooks/tokenzip-rewrite.sh /Users/bmf/.claude/hooks/.tokenzip-hook.sha256)",
+      "Read(//Users/bmf/.claude/hooks/**)",
+      "Bash(rm -v /Users/bmf/.claude/hooks/rtk-rewrite.sh /Users/bmf/.claude/hooks/.rtk-hook.sha256)",
+      "Bash(lit quickstart *)",
+      "Bash(go build *)",
+      "Bash(go test *)",
+      "Bash(lit show *)",
+      "Bash(lit close *)",
+      "Bash(lit start *)",
+      "Bash(go vet *)",
+      "Bash(gofmt *)"
+    ]
+  }
+}
