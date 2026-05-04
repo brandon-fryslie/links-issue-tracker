@@ -17,17 +17,18 @@ type quickstartRefreshItem struct {
 
 type quickstartRefreshReport struct {
 	Agents     quickstartRefreshItem `json:"agents"`
+	Claude     quickstartRefreshItem `json:"claude"`
 	Hooks      quickstartRefreshItem `json:"hooks"`
 	Quickstart quickstartRefreshItem `json:"quickstart"`
 }
 
 func refreshQuickstartManagedAssets(ws workspace.Info) (quickstartRefreshReport, error) {
-	// [LAW:single-enforcer] Quickstart refresh reuses the existing managed writers so AGENTS and hook updates stay owned at one boundary.
+	// [LAW:single-enforcer] Quickstart refresh reuses the existing managed writers so AGENTS, CLAUDE, and hook updates stay owned at one boundary.
 	hookResult, hookErr := installHooks(ws)
 	if hookErr != nil {
 		return quickstartRefreshReport{}, hookErr
 	}
-	agentsResult, agentsErr := ensureLinksAgentsSection(ws.RootDir)
+	agentsResult, claudeResult, agentsErr := ensureLinksAgentFiles(ws.RootDir)
 	if agentsErr != nil {
 		return quickstartRefreshReport{}, agentsErr
 	}
@@ -40,6 +41,11 @@ func refreshQuickstartManagedAssets(ws workspace.Info) (quickstartRefreshReport,
 		Agents: quickstartRefreshItem{
 			Path:    agentsResult.Path,
 			Status:  managedAssetStatus(agentsResult.Changed, agentsResult.Created),
+			Managed: true,
+		},
+		Claude: quickstartRefreshItem{
+			Path:    claudeResult.Path,
+			Status:  managedAssetStatus(claudeResult.Changed, claudeResult.Created),
 			Managed: true,
 		},
 		Quickstart: quickstartItem,
@@ -96,9 +102,10 @@ func managedAssetStatus(changed bool, created bool) string {
 }
 
 func formatQuickstartRefreshSummary(refresh quickstartRefreshReport) string {
-	return fmt.Sprintf("hooks=%s agents=%s quickstart=%s",
+	return fmt.Sprintf("hooks=%s agents=%s claude=%s quickstart=%s",
 		formatQuickstartRefreshItemSummary(refresh.Hooks),
 		formatQuickstartRefreshItemSummary(refresh.Agents),
+		formatQuickstartRefreshItemSummary(refresh.Claude),
 		formatQuickstartRefreshItemSummary(refresh.Quickstart),
 	)
 }

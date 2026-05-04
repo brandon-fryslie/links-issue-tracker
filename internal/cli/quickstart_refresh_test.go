@@ -43,7 +43,7 @@ func TestQuickstartRefreshRewritesManagedAssetsAndIsIdempotent(t *testing.T) {
 	t.Cleanup(func() { _ = os.Chdir(prevWD) })
 
 	first := runQuickstartRefresh(t)
-	if !strings.Contains(first, "refresh hooks=updated agents=updated quickstart=absent") {
+	if !strings.Contains(first, "refresh hooks=updated agents=updated claude=created quickstart=absent") {
 		t.Fatalf("quickstart refresh output = %q, want updated summary", first)
 	}
 
@@ -56,7 +56,7 @@ func TestQuickstartRefreshRewritesManagedAssetsAndIsIdempotent(t *testing.T) {
 	}
 
 	second := runQuickstartRefresh(t)
-	if !strings.Contains(second, "refresh hooks=unchanged agents=unchanged quickstart=absent") {
+	if !strings.Contains(second, "refresh hooks=unchanged agents=unchanged claude=unchanged quickstart=absent") {
 		t.Fatalf("second quickstart refresh output = %q, want unchanged summary", second)
 	}
 

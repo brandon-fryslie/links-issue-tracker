@@ -16,6 +16,7 @@ type initReport struct {
 	DatabasePath string `json:"database_path"`
 	Hooks        string `json:"hooks"`
 	Agents       string `json:"agents"`
+	Claude       string `json:"claude"`
 }
 
 func runInit(ctx context.Context, stdout io.Writer, ws workspace.Info, args []string) error {
@@ -40,6 +41,7 @@ func runInit(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		DatabasePath: ws.DatabasePath,
 		Hooks:        "skipped",
 		Agents:       "skipped",
+		Claude:       "skipped",
 	}
 
 	if !*skipHooks {
@@ -55,7 +57,7 @@ func runInit(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 	}
 
 	if !*skipAgents {
-		agentsResult, agentsErr := ensureLinksAgentsSection(ws.RootDir)
+		agentsResult, claudeResult, agentsErr := ensureLinksAgentFiles(ws.RootDir)
 		if agentsErr != nil {
 			return agentsErr
 		}
@@ -66,18 +68,26 @@ func runInit(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		} else {
 			report.Agents = "unchanged"
 		}
+		if claudeResult.Created {
+			report.Claude = "created"
+		} else if claudeResult.Changed {
+			report.Claude = "updated"
+		} else {
+			report.Claude = "unchanged"
+		}
 	}
 
 	return printValue(stdout, report, *jsonOut, func(w io.Writer, v any) error {
 		payload := v.(initReport)
 		_, printErr := fmt.Fprintf(
 			w,
-			"%s workspace=%s db=%s hooks=%s agents=%s\n",
+			"%s workspace=%s db=%s hooks=%s agents=%s claude=%s\n",
 			payload.Status,
 			payload.WorkspaceID,
 			payload.DatabasePath,
 			payload.Hooks,
 			payload.Agents,
+			payload.Claude,
 		)
 		return printErr
 	})
