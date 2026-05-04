@@ -15,6 +15,7 @@ type initReport struct {
 	Status       string `json:"status"`
 	WorkspaceID  string `json:"workspace_id"`
 	DatabasePath string `json:"database_path"`
+	DBCreated    bool   `json:"db_created"`
 	Hooks        string `json:"hooks"`
 	Agents       string `json:"agents"`
 	Claude       string `json:"claude"`
@@ -32,7 +33,8 @@ func runInit(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		return errors.New("usage: lit init [--json] [--skip-hooks] [--skip-agents]")
 	}
 
-	if err := store.EnsureDatabase(ctx, ws.DatabasePath, ws.WorkspaceID); err != nil {
+	dbCreated, err := store.EnsureDatabase(ctx, ws.DatabasePath, ws.WorkspaceID)
+	if err != nil {
 		return err
 	}
 
@@ -40,6 +42,7 @@ func runInit(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 		Status:       "initialized",
 		WorkspaceID:  ws.WorkspaceID,
 		DatabasePath: ws.DatabasePath,
+		DBCreated:    dbCreated,
 		Hooks:        "skipped",
 		Agents:       "skipped",
 		Claude:       "skipped",
@@ -107,12 +110,14 @@ func writeInitHumanOutput(w io.Writer, report initReport) error {
 		}
 	}
 
-	if len(updated) > 0 {
+	if report.DBCreated || len(updated) > 0 {
 		if _, err := fmt.Fprintf(w, "Initialized lit workspace\n"); err != nil {
 			return err
 		}
-		if _, err := fmt.Fprintf(w, "  Updated: %s\n", strings.Join(updated, ", ")); err != nil {
-			return err
+		if len(updated) > 0 {
+			if _, err := fmt.Fprintf(w, "  Updated: %s\n", strings.Join(updated, ", ")); err != nil {
+				return err
+			}
 		}
 	} else {
 		if _, err := fmt.Fprintf(w, "Lit workspace already initialized\n"); err != nil {
