@@ -191,13 +191,15 @@ func GuidanceTemplateName(action, phase string) string {
 func LoadGuidance(action, phase, workspaceRoot string) (string, error) {
 	name := GuidanceTemplateName(action, phase)
 
-	projectContent, projectErr := readOptionalFile(projectTemplatePath(workspaceRoot, name))
+	projectPath := projectTemplatePath(workspaceRoot, name)
+	projectContent, projectErr := readOptionalFile(projectPath)
 	if projectErr != nil {
-		return "", fmt.Errorf("load guidance project template %s: %w", name, projectErr)
+		return "", fmt.Errorf("load guidance template %s: %w", projectPath, projectErr)
 	}
-	globalContent, globalErr := readOptionalFile(GlobalPath(name))
+	globalPath := GlobalPath(name)
+	globalContent, globalErr := readOptionalFile(globalPath)
 	if globalErr != nil {
-		return "", fmt.Errorf("load guidance global template %s: %w", name, globalErr)
+		return "", fmt.Errorf("load guidance template %s: %w", globalPath, globalErr)
 	}
 
 	// Embedded default is optional for guidance — missing is not an error.
