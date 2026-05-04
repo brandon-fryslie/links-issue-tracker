@@ -917,23 +917,20 @@ func filterWorkableIssues(issues []model.Issue) []model.Issue {
 }
 
 func runTransition(ctx context.Context, stdout io.Writer, ap *app.App, args []string, action string) error {
-	positional, flagArgs := splitArgs(args, 1)
 	fs := newCobraFlagSet(action)
 	reason := fs.String("reason", "", "Transition reason")
 	by := fs.String("by", os.Getenv("USER"), "Transition actor")
 	apply := fs.Bool("apply", false, "Apply the transition (without this flag, pre-guidance is printed instead)")
 	jsonOut := fs.Bool("json", false, "Output JSON")
-	if err := parseFlagSet(fs, flagArgs, stdout); err != nil {
+	if err := parseFlagSet(fs, args, stdout); err != nil {
 		return err
 	}
-	if len(positional) != 1 {
-		return fmt.Errorf("usage: lit %s <id> [--reason <text>] [--apply]", transitionCommandName(action))
-	}
-	if fs.NArg() != 0 {
+	remaining := fs.cmd.Flags().Args()
+	if len(remaining) != 1 {
 		return fmt.Errorf("usage: lit %s <id> [--reason <text>] [--apply]", transitionCommandName(action))
 	}
 
-	issueID := positional[0]
+	issueID := remaining[0]
 	isJSON := *jsonOut || outputModeFromWriter(stdout) == outputModeJSON
 
 	// [LAW:dataflow-not-control-flow] Pre-guidance template existence is the data that
