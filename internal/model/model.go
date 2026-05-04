@@ -24,6 +24,11 @@ const (
 	ActionReopen = lifecycle.ActionReopen
 )
 
+var (
+	ParseState  = lifecycle.ParseState
+	ParseAction = lifecycle.ParseAction
+)
+
 func IsContainerType(issueType string) bool {
 	trimmed := strings.TrimSpace(issueType)
 	for _, container := range ContainerIssueTypes {

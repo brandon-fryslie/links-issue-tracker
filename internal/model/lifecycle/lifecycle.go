@@ -10,7 +10,10 @@
 // without Container semantics will make it contribute only its own Progress.
 package lifecycle
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 type State string
 
@@ -71,11 +74,25 @@ func Walk(l Lifecycle, visit func(Lifecycle) bool) {
 }
 
 func ParseState(value string) (State, error) {
-	switch State(value) {
+	normalized := strings.TrimSpace(strings.ToLower(value))
+	if normalized == "in-progress" {
+		normalized = "in_progress"
+	}
+	switch State(normalized) {
 	case Open, InProgress, Closed:
-		return State(value), nil
+		return State(normalized), nil
 	default:
 		return "", fmt.Errorf("unknown lifecycle state %q", value)
+	}
+}
+
+func ParseAction(value string) (ActionName, error) {
+	normalized := strings.TrimSpace(strings.ToLower(value))
+	switch ActionName(normalized) {
+	case ActionStart, ActionDone, ActionClose, ActionReopen:
+		return ActionName(normalized), nil
+	default:
+		return "", fmt.Errorf("unsupported lifecycle action %q", value)
 	}
 }
 

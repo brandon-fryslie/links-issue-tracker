@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bmf/links-issue-tracker/internal/model"
 	"github.com/bmf/links-issue-tracker/internal/store"
 )
 
@@ -67,11 +68,13 @@ func Merge(base store.ListIssuesFilter, incoming store.ListIssuesFilter) (store.
 func applyTerm(filter *store.ListIssuesFilter, term string) error {
 	switch {
 	case strings.HasPrefix(term, "status:"):
-		status, err := normalizeQueryStatus(strings.TrimPrefix(term, "status:"))
+		parsed, err := model.ParseState(strings.TrimPrefix(term, "status:"))
 		if err != nil {
 			return err
 		}
-		filter.Statuses = append(filter.Statuses, status)
+		if parsed != "" {
+			filter.Statuses = append(filter.Statuses, string(parsed))
+		}
 		return nil
 	case strings.HasPrefix(term, "type:"):
 		t := strings.TrimSpace(strings.TrimPrefix(term, "type:"))
@@ -109,26 +112,15 @@ func applyTerm(filter *store.ListIssuesFilter, term string) error {
 	}
 }
 
-func normalizeQueryStatus(input string) (string, error) {
-	normalized, err := store.NormalizeStatusToken(input)
-	if err != nil {
-		return "", err
-	}
-	if normalized == "" {
-		return "", nil
-	}
-	return normalized, nil
-}
-
 func normalizeQueryStatuses(statuses []string) ([]string, error) {
 	result := make([]string, 0, len(statuses))
 	for _, s := range statuses {
-		normalized, err := normalizeQueryStatus(s)
+		parsed, err := model.ParseState(s)
 		if err != nil {
 			return nil, err
 		}
-		if normalized != "" {
-			result = append(result, normalized)
+		if parsed != "" {
+			result = append(result, string(parsed))
 		}
 	}
 	return result, nil

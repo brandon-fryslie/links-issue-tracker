@@ -120,3 +120,65 @@ func assertActions(t *testing.T, got []ActionName, want []ActionName) {
 		}
 	}
 }
+
+func TestParseStateNormalizes(t *testing.T) {
+	tests := []struct {
+		input string
+		want  State
+	}{
+		{"open", Open},
+		{"Open", Open},
+		{"OPEN", Open},
+		{"in_progress", InProgress},
+		{"IN_PROGRESS", InProgress},
+		{"in-progress", InProgress},
+		{"  closed  ", Closed},
+		{"Closed", Closed},
+	}
+	for _, tt := range tests {
+		got, err := ParseState(tt.input)
+		if err != nil {
+			t.Fatalf("ParseState(%q) error = %v", tt.input, err)
+		}
+		if got != tt.want {
+			t.Fatalf("ParseState(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestParseStateRejectsInvalid(t *testing.T) {
+	_, err := ParseState("todo")
+	if err == nil {
+		t.Fatal("expected error for invalid state")
+	}
+}
+
+func TestParseActionValid(t *testing.T) {
+	tests := []struct {
+		input string
+		want  ActionName
+	}{
+		{"start", ActionStart},
+		{"Done", ActionDone},
+		{"  close  ", ActionClose},
+		{"REOPEN", ActionReopen},
+	}
+	for _, tt := range tests {
+		got, err := ParseAction(tt.input)
+		if err != nil {
+			t.Fatalf("ParseAction(%q) error = %v", tt.input, err)
+		}
+		if got != tt.want {
+			t.Fatalf("ParseAction(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestParseActionRejectsNonLifecycle(t *testing.T) {
+	for _, input := range []string{"archive", "delete", "restore", "bogus"} {
+		_, err := ParseAction(input)
+		if err == nil {
+			t.Fatalf("expected error for non-lifecycle action %q", input)
+		}
+	}
+}
