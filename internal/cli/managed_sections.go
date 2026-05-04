@@ -2,6 +2,17 @@ package cli
 
 import "strings"
 
+// migrateMarkers replaces legacy begin/end marker pairs with current ones.
+// Idempotent: if no legacy markers are present, the content is returned unchanged.
+func migrateMarkers(content, oldBegin, oldEnd, newBegin, newEnd string) string {
+	if !strings.Contains(content, oldBegin) {
+		return content
+	}
+	content = strings.ReplaceAll(content, oldBegin, newBegin)
+	content = strings.ReplaceAll(content, oldEnd, newEnd)
+	return content
+}
+
 // upsertManagedSection replaces the managed section when markers exist,
 // otherwise appends the section to the end of the document.
 func upsertManagedSection(content string, section string, beginMarker string, endMarker string) (string, bool) {

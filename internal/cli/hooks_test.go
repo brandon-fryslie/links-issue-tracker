@@ -32,7 +32,7 @@ func TestHooksInstallWritesPrePushHook(t *testing.T) {
 		t.Fatalf("ReadFile(pre-push) error = %v", err)
 	}
 	text := string(content)
-	if !strings.Contains(text, linksHookBeginMarker) || !strings.Contains(text, linksHookEndMarker) {
+	if !strings.Contains(text, litHookBeginMarker) || !strings.Contains(text, litHookEndMarker) {
 		t.Fatalf("hook missing managed section markers: %q", text)
 	}
 	if !strings.Contains(text, "hook-triggered lit sync push failed") {
@@ -78,7 +78,7 @@ func TestHooksInstallPreservesExistingPrePushHook(t *testing.T) {
 	if !strings.Contains(newHookText, "echo custom-pre-push") {
 		t.Fatalf("new hook does not preserve existing logic: %q", newHookText)
 	}
-	if !strings.Contains(newHookText, linksHookBeginMarker) || !strings.Contains(newHookText, linksHookEndMarker) {
+	if !strings.Contains(newHookText, litHookBeginMarker) || !strings.Contains(newHookText, litHookEndMarker) {
 		t.Fatalf("new hook missing links managed section: %q", newHookText)
 	}
 }
