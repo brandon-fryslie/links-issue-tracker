@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/bmf/links-issue-tracker/internal/store"
 	"github.com/bmf/links-issue-tracker/internal/workspace"
@@ -79,16 +80,41 @@ func runInit(ctx context.Context, stdout io.Writer, ws workspace.Info, args []st
 
 	return printValue(stdout, report, *jsonOut, func(w io.Writer, v any) error {
 		payload := v.(initReport)
-		_, printErr := fmt.Fprintf(
-			w,
-			"%s workspace=%s db=%s hooks=%s agents=%s claude=%s\n",
-			payload.Status,
-			payload.WorkspaceID,
-			payload.DatabasePath,
-			payload.Hooks,
-			payload.Agents,
-			payload.Claude,
-		)
-		return printErr
+		return writeInitHumanOutput(w, payload)
 	})
+}
+
+type labeledStatus struct {
+	label  string
+	status string
+	reason string
+}
+
+func writeInitHumanOutput(w io.Writer, report initReport) error {
+	items := []labeledStatus{
+		{"pre-push hook", report.Hooks, ""},
+		{"AGENTS.md", report.Agents, ""},
+		{"CLAUDE.md", report.Claude, ""},
+	}
+
+	var updated, skipped []string
+	for _, item := range items {
+		switch item.status {
+		case "created", "updated", "installed":
+			updated = append(updated, item.label)
+		case "skipped":
+			skipped = append(skipped, item.label)
+		}
+	}
+
+	if len(updated) > 0 {
+		fmt.Fprintf(w, "Initialized lit workspace\n")
+		fmt.Fprintf(w, "  Updated: %s\n", strings.Join(updated, ", "))
+	} else {
+		fmt.Fprintf(w, "Lit workspace already initialized\n")
+	}
+	if len(skipped) > 0 {
+		fmt.Fprintf(w, "  Skipped: %s\n", strings.Join(skipped, ", "))
+	}
+	return nil
 }
