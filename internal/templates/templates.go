@@ -55,27 +55,52 @@ func ResolveShortName(alias string) (string, error) {
 	return name, nil
 }
 
+// Source describes which layer a resolved template came from.
+type Source string
+
+const (
+	SourceProject  Source = "project"
+	SourceGlobal   Source = "global"
+	SourceEmbedded Source = "embedded"
+)
+
 // Load resolves a managed template with project > global > embedded precedence.
 // It never writes; absence of a file at a given layer simply means that layer
 // contributes nothing. The embedded default is always available as the final fallback.
 func Load(name string, workspaceRoot string) (string, error) {
+	content, _, err := LoadWithSource(name, workspaceRoot)
+	return content, err
+}
+
+// LoadWithSource is like Load but also returns which layer the content came from.
+func LoadWithSource(name string, workspaceRoot string) (string, Source, error) {
 	projectContent, projectErr := readOptionalFile(projectTemplatePath(workspaceRoot, name))
 	if projectErr != nil {
-		return "", fmt.Errorf("load project template %s: %w", projectTemplatePath(workspaceRoot, name), projectErr)
+		return "", "", fmt.Errorf("load project template %s: %w", projectTemplatePath(workspaceRoot, name), projectErr)
 	}
 	globalContent, globalErr := readOptionalFile(GlobalPath(name))
 	if globalErr != nil {
-		return "", fmt.Errorf("load global template %s: %w", GlobalPath(name), globalErr)
+		return "", "", fmt.Errorf("load global template %s: %w", GlobalPath(name), globalErr)
 	}
 	embedded, err := EmbeddedDefault(name)
 	if err != nil {
-		return "", fmt.Errorf("load embedded template %s: %w", name, err)
+		return "", "", fmt.Errorf("load embedded template %s: %w", name, err)
 	}
-	resolved := firstNonEmpty(projectContent, globalContent, string(embedded))
-	if resolved == "" {
-		return "", fmt.Errorf("load template %s: no non-empty source", name)
+	type candidate struct {
+		content string
+		source  Source
 	}
-	return resolved, nil
+	candidates := []candidate{
+		{projectContent, SourceProject},
+		{globalContent, SourceGlobal},
+		{string(embedded), SourceEmbedded},
+	}
+	for _, c := range candidates {
+		if c.content != "" {
+			return c.content, c.source, nil
+		}
+	}
+	return "", "", fmt.Errorf("load template %s: no non-empty source", name)
 }
 
 // EmbeddedDefault returns the raw bytes of the embedded default for name.
