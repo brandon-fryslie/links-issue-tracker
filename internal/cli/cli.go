@@ -92,7 +92,18 @@ func newRootCommand(ctx context.Context, stdout io.Writer, stderr io.Writer) *co
 			if len(args) > 0 {
 				return fmt.Errorf("unknown command %q", args[0])
 			}
-			return cmd.Help()
+			// [LAW:one-source-of-truth] Default command reuses renderQuickstartGuidance
+			// so the output is always identical to `lit quickstart`.
+			ws, wsErr := resolveWorkspaceFromWD()
+			if wsErr != nil {
+				return cmd.Help()
+			}
+			guidance, guidanceErr := renderQuickstartGuidance(ws.RootDir)
+			if guidanceErr != nil {
+				return cmd.Help()
+			}
+			_, printErr := fmt.Fprintln(cmd.OutOrStdout(), guidance)
+			return printErr
 		},
 	}
 	root.CompletionOptions.DisableDefaultCmd = true
