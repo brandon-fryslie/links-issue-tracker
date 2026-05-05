@@ -7,8 +7,28 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/bmf/links-issue-tracker/internal/model"
 	"github.com/bmf/links-issue-tracker/internal/rank"
 )
+
+// canonicalPriorityCheckClause encodes the priority range invariant derived
+// from the canonical model.Priority* constants. Used by the fresh-table CREATE
+// (createIssuesTableStmt), the upgrade-path ALTER (ensurePriorityRange), and
+// the constraint detector (hasCanonicalPriorityConstraint) so they cannot
+// drift. [LAW:one-source-of-truth] [LAW:single-enforcer]
+var canonicalPriorityCheckClause = fmt.Sprintf(
+	"priority >= %d AND priority <= %d",
+	model.PriorityNormal, model.PriorityUrgent,
+)
+
+// canonicalPriorityCheckClauseFragments are the substrings (whitespace-stripped,
+// matching information_schema's normalized form) that uniquely identify the
+// canonical priority CHECK clause. Derived from the canonical model.Priority*
+// constants. [LAW:one-source-of-truth]
+var canonicalPriorityCheckClauseFragments = []string{
+	fmt.Sprintf("priority>=%d", model.PriorityNormal),
+	fmt.Sprintf("priority<=%d", model.PriorityUrgent),
+}
 
 // canonicalStatusCheckClause encodes the invariant that container rows store
 // NULL status (state is derived from children) and leaf rows carry one of the
@@ -37,9 +57,9 @@ func createIssuesTableStmt() string {
 			archived_at VARCHAR(64) NULL,
 			deleted_at VARCHAR(64) NULL,
 			CHECK(%s),
-			CHECK(priority >= 0 AND priority <= 1),
+			CHECK(%s),
 			CHECK(issue_type IN ('task','feature','bug','chore','epic'))
-		);`, canonicalStatusCheckClause)
+		);`, canonicalStatusCheckClause, canonicalPriorityCheckClause)
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -309,24 +329,53 @@ func (s *Store) ensureIssueRanks(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-// ensurePriorityRange resets any legacy priority values (> 1) to normal (0)
-// and updates the CHECK constraint to accept only 0 and 1.
+// ensurePriorityRange remaps legacy 0..4 priority values onto the canonical
+// 2-level scheme and installs the canonical CHECK constraint. The legacy
+// scheme used "lower number = more important" (default 2), so old {0,1} were
+// the *most* important rows: those become urgent. Old {2,3,4} become normal.
+// Detection is by data shape: any row outside [PriorityNormal,PriorityUrgent]
+// proves the table is still on legacy semantics, so the full remap runs as
+// one atomic step. Once values are confined to [0,1], re-runs are no-ops.
 // [LAW:one-source-of-truth] Priority range migration runs once at store open;
-// the schema constraint and Go validation both derive from model.PriorityNormal/PriorityUrgent.
+// CHECK clause and migration UPDATEs derive from model.Priority{Normal,Urgent}.
 func (s *Store) ensurePriorityRange(ctx context.Context) (bool, error) {
 	changed := false
-	// Reset any legacy priority values > 1 to normal (0).
-	resetChanged, err := s.execReconciliationUpdate(
-		ctx,
-		`SELECT 1 FROM issues WHERE priority > 1 LIMIT 1`,
-		`UPDATE issues SET priority = 0 WHERE priority > 1`,
-		"reset legacy priority values to normal",
+	// Detect legacy data: any priority outside the canonical 2-level range
+	// means the table predates this migration. When detected, remap atomically:
+	// legacy {0,1} -> urgent, legacy {2..4} -> normal. Order matters — promote
+	// the highest-importance rows first so they don't get swept into normal
+	// by the second statement.
+	legacyDetectSQL := fmt.Sprintf(
+		"SELECT 1 FROM issues WHERE priority < %d OR priority > %d LIMIT 1",
+		model.PriorityNormal, model.PriorityUrgent,
 	)
-	if err != nil {
-		return false, err
+	var hasLegacy int
+	probeErr := s.db.QueryRowContext(ctx, legacyDetectSQL).Scan(&hasLegacy)
+	if probeErr != nil && !errors.Is(probeErr, sql.ErrNoRows) {
+		return false, fmt.Errorf("probe legacy priority rows: %w", probeErr)
 	}
-	changed = changed || resetChanged
-	// Update the CHECK constraint: drop any old priority constraint and add the new 0-1 range.
+	if probeErr == nil {
+		// [LAW:dataflow-not-control-flow] Two unconditional UPDATEs whose
+		// row sets never overlap: legacy 0 promotes to urgent, legacy {2,3,4}
+		// demotes to normal. Legacy 1 already equals PriorityUrgent.
+		promoteSQL := fmt.Sprintf(
+			"UPDATE issues SET priority = %d WHERE priority < %d",
+			model.PriorityUrgent, model.PriorityUrgent,
+		)
+		if _, err := s.db.ExecContext(ctx, promoteSQL); err != nil {
+			return false, fmt.Errorf("promote legacy high-priority rows to urgent: %w", err)
+		}
+		demoteSQL := fmt.Sprintf(
+			"UPDATE issues SET priority = %d WHERE priority > %d",
+			model.PriorityNormal, model.PriorityUrgent,
+		)
+		if _, err := s.db.ExecContext(ctx, demoteSQL); err != nil {
+			return false, fmt.Errorf("demote legacy low-priority rows to normal: %w", err)
+		}
+		changed = true
+	}
+	// Update the CHECK constraint: drop any old priority constraint and add
+	// the canonical clause derived from the model constants.
 	constraints, err := s.listIssuePriorityCheckConstraints(ctx)
 	if err != nil {
 		return false, err
@@ -339,7 +388,11 @@ func (s *Store) ensurePriorityRange(ctx context.Context) (bool, error) {
 			return false, fmt.Errorf("drop priority check %s: %w", c.name, err)
 		}
 	}
-	if _, err := s.db.ExecContext(ctx, `ALTER TABLE issues ADD CONSTRAINT issues_priority_check CHECK (priority >= 0 AND priority <= 1)`); err != nil {
+	addCheckSQL := fmt.Sprintf(
+		"ALTER TABLE issues ADD CONSTRAINT issues_priority_check CHECK (%s)",
+		canonicalPriorityCheckClause,
+	)
+	if _, err := s.db.ExecContext(ctx, addCheckSQL); err != nil {
 		return false, fmt.Errorf("add canonical priority check: %w", err)
 	}
 	return true, nil
@@ -380,7 +433,13 @@ func hasCanonicalPriorityConstraint(constraints []issueCheckConstraint) bool {
 		return false
 	}
 	normalized := normalizeConstraintClause(constraints[0].clause)
-	return strings.Contains(normalized, "priority>=0") && strings.Contains(normalized, "priority<=1")
+	// [LAW:one-source-of-truth] Fragments derive from model.Priority{Normal,Urgent}.
+	for _, fragment := range canonicalPriorityCheckClauseFragments {
+		if !strings.Contains(normalized, fragment) {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Store) ensureStatusConstraint(ctx context.Context) (bool, error) {
