@@ -16,7 +16,7 @@ func TestRunTransitionDonePreGuidancePrintsWithoutTransitioning(t *testing.T) {
 	ap := newTestCLIApp(t)
 
 	issue, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
-		Title: "Guidance test", Topic: "guidance", IssueType: "task", Priority: 2,
+		Title: "Guidance test", Topic: "guidance", IssueType: "task", Priority: 0,
 	})
 	if err != nil {
 		t.Fatalf("CreateIssue() error = %v", err)
@@ -47,7 +47,7 @@ func TestRunTransitionDoneApplyTransitionsAndPrintsPostGuidance(t *testing.T) {
 	ap := newTestCLIApp(t)
 
 	issue, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
-		Title: "Guidance apply test", Topic: "guidance", IssueType: "task", Priority: 2,
+		Title: "Guidance apply test", Topic: "guidance", IssueType: "task", Priority: 0,
 	})
 	if err != nil {
 		t.Fatalf("CreateIssue() error = %v", err)

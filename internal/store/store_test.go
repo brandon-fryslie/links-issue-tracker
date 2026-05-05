@@ -1834,15 +1834,15 @@ func TestRemovePerChildBlockAfterRankReorder(t *testing.T) {
 	}
 
 	// Create children of B.
-	childB1, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Child B.1", Topic: "dep", IssueType: "task", Priority: 2, ParentID: epicB.ID})
+	childB1, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Child B.1", Topic: "dep", IssueType: "task", Priority: 0, ParentID: epicB.ID})
 	if err != nil {
 		t.Fatalf("CreateIssue(childB1) error = %v", err)
 	}
-	childB2, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Child B.2", Topic: "dep", IssueType: "task", Priority: 2, ParentID: epicB.ID})
+	childB2, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Child B.2", Topic: "dep", IssueType: "task", Priority: 0, ParentID: epicB.ID})
 	if err != nil {
 		t.Fatalf("CreateIssue(childB2) error = %v", err)
 	}
-	childB3, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Child B.3", Topic: "dep", IssueType: "task", Priority: 2, ParentID: epicB.ID})
+	childB3, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Child B.3", Topic: "dep", IssueType: "task", Priority: 0, ParentID: epicB.ID})
 	if err != nil {
 		t.Fatalf("CreateIssue(childB3) error = %v", err)
 	}
