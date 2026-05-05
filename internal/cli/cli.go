@@ -771,7 +771,7 @@ func runUpdate(ctx context.Context, stdout io.Writer, ap *app.App, args []string
 	description := fs.String("description", "", "Issue description")
 	prompt := fs.String("prompt", "", "Reusable agent prompt for the work this issue captures")
 	issueType := fs.String("type", "", "Issue type: task|feature|bug|chore|epic")
-	priority := fs.Int("priority", 0, "Priority: 0=normal, 1=urgent")
+	priority := fs.Int("priority", model.PriorityNormal, "Priority: 0=normal, 1=urgent") // [LAW:one-source-of-truth] default derives from model constant; matches runNew/runFollowup
 	assignee := fs.String("assignee", "", "Assignee")
 	labels := fs.String("labels", "", "Comma-separated labels")
 	status := fs.String("status", "", "Status: open|in_progress|closed")
