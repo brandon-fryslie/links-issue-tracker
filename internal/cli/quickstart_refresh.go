@@ -67,7 +67,7 @@ func refreshQuickstartTemplate(workspaceRoot string) (quickstartRefreshItem, err
 	if err != nil {
 		return quickstartRefreshItem{}, fmt.Errorf("refresh quickstart: read embedded default: %w", err)
 	}
-	path, content, _, err := templates.ActiveOverride(workspaceRoot, templates.QuickstartTemplateName)
+	path, content, err := templates.ActiveOverride(workspaceRoot, templates.QuickstartTemplateName)
 	if err != nil {
 		return quickstartRefreshItem{}, fmt.Errorf("refresh quickstart: read override: %w", err)
 	}
