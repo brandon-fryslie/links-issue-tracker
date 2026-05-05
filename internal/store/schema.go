@@ -7,28 +7,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/bmf/links-issue-tracker/internal/model"
 	"github.com/bmf/links-issue-tracker/internal/rank"
 )
-
-// canonicalPriorityCheckClause encodes the priority range invariant derived
-// from the canonical model.Priority* constants. Used by the fresh-table CREATE
-// (createIssuesTableStmt), the upgrade-path ALTER (ensurePriorityRange), and
-// the constraint detector (hasCanonicalPriorityConstraint) so they cannot
-// drift. [LAW:one-source-of-truth] [LAW:single-enforcer]
-var canonicalPriorityCheckClause = fmt.Sprintf(
-	"priority >= %d AND priority <= %d",
-	model.PriorityNormal, model.PriorityUrgent,
-)
-
-// canonicalPriorityCheckClauseFragments are the substrings (whitespace-stripped,
-// matching information_schema's normalized form) that uniquely identify the
-// canonical priority CHECK clause. Derived from the canonical model.Priority*
-// constants. [LAW:one-source-of-truth]
-var canonicalPriorityCheckClauseFragments = []string{
-	fmt.Sprintf("priority>=%d", model.PriorityNormal),
-	fmt.Sprintf("priority<=%d", model.PriorityUrgent),
-}
 
 // canonicalStatusCheckClause encodes the invariant that container rows store
 // NULL status (state is derived from children) and leaf rows carry one of the
@@ -57,9 +37,9 @@ func createIssuesTableStmt() string {
 			archived_at VARCHAR(64) NULL,
 			deleted_at VARCHAR(64) NULL,
 			CHECK(%s),
-			CHECK(%s),
+			CHECK(priority >= 0 AND priority <= 1),
 			CHECK(issue_type IN ('task','feature','bug','chore','epic'))
-		);`, canonicalStatusCheckClause, canonicalPriorityCheckClause)
+		);`, canonicalStatusCheckClause)
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -183,7 +163,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	changed = changed || rankChanged
-	priorityChanged, err := s.ensurePriorityRange(ctx)
+	priorityChanged, err := s.resetPrioritiesToNormal(ctx)
 	if err != nil {
 		return err
 	}
@@ -329,71 +309,33 @@ func (s *Store) ensureIssueRanks(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
-// ensurePriorityRange remaps legacy 0..4 priority values onto the canonical
-// 2-level scheme and installs the canonical CHECK constraint. The legacy
-// scheme used "lower number = more important" (default 2), so old {0,1} were
-// the *most* important rows: those become urgent. Old {2,3,4} become normal.
-// Detection is by data shape: any row outside [PriorityNormal,PriorityUrgent]
-// proves the table is still on legacy semantics, so the full remap runs as
-// one atomic step. Once values are confined to [0,1], re-runs are no-ops.
-// [LAW:one-source-of-truth] Priority range migration runs once at store open;
-// CHECK clause and migration UPDATEs derive from model.Priority{Normal,Urgent}.
-func (s *Store) ensurePriorityRange(ctx context.Context) (bool, error) {
-	changed := false
-	// Detect legacy data: any priority outside the canonical 2-level range
-	// means the table predates this migration. When detected, remap atomically:
-	// legacy {0,1} -> urgent, legacy {2..4} -> normal. Order matters — promote
-	// the highest-importance rows first so they don't get swept into normal
-	// by the second statement.
-	legacyDetectSQL := fmt.Sprintf(
-		"SELECT 1 FROM issues WHERE priority < %d OR priority > %d LIMIT 1",
-		model.PriorityNormal, model.PriorityUrgent,
-	)
-	var hasLegacy int
-	probeErr := s.db.QueryRowContext(ctx, legacyDetectSQL).Scan(&hasLegacy)
-	if probeErr != nil && !errors.Is(probeErr, sql.ErrNoRows) {
-		return false, fmt.Errorf("probe legacy priority rows: %w", probeErr)
-	}
-	if probeErr == nil {
-		// [LAW:dataflow-not-control-flow] Two unconditional UPDATEs whose
-		// row sets never overlap: legacy 0 promotes to urgent, legacy {2,3,4}
-		// demotes to normal. Legacy 1 already equals PriorityUrgent.
-		promoteSQL := fmt.Sprintf(
-			"UPDATE issues SET priority = %d WHERE priority < %d",
-			model.PriorityUrgent, model.PriorityUrgent,
-		)
-		if _, err := s.db.ExecContext(ctx, promoteSQL); err != nil {
-			return false, fmt.Errorf("promote legacy high-priority rows to urgent: %w", err)
-		}
-		demoteSQL := fmt.Sprintf(
-			"UPDATE issues SET priority = %d WHERE priority > %d",
-			model.PriorityNormal, model.PriorityUrgent,
-		)
-		if _, err := s.db.ExecContext(ctx, demoteSQL); err != nil {
-			return false, fmt.Errorf("demote legacy low-priority rows to normal: %w", err)
-		}
-		changed = true
-	}
-	// Update the CHECK constraint: drop any old priority constraint and add
-	// the canonical clause derived from the model constants.
+// resetPrioritiesToNormal performs the one-shot data migration described in
+// links-priority-2r6: collapse the legacy 0..4 priority range to {normal=0,
+// urgent=1} by resetting all existing priorities to normal, then install the
+// canonical CHECK constraint. Gated by the CHECK constraint shape itself: a
+// table whose only priority constraint is `priority >= 0 AND priority <= 1`
+// is already on the canonical schema (fresh-create or post-migration), so
+// the function returns without writing. Otherwise it resets all rows to 0
+// before replacing the CHECK so the new constraint can never reject the
+// existing data. [LAW:dataflow-not-control-flow] [LAW:single-enforcer]
+func (s *Store) resetPrioritiesToNormal(ctx context.Context) (bool, error) {
 	constraints, err := s.listIssuePriorityCheckConstraints(ctx)
 	if err != nil {
 		return false, err
 	}
 	if hasCanonicalPriorityConstraint(constraints) {
-		return changed, nil
+		return false, nil
+	}
+	if _, err := s.db.ExecContext(ctx, "UPDATE issues SET priority = 0"); err != nil {
+		return false, fmt.Errorf("reset priorities to normal: %w", err)
 	}
 	for _, c := range constraints {
 		if _, err := s.db.ExecContext(ctx, "ALTER TABLE issues DROP CHECK `"+strings.ReplaceAll(c.name, "`", "``")+"`"); err != nil {
 			return false, fmt.Errorf("drop priority check %s: %w", c.name, err)
 		}
 	}
-	addCheckSQL := fmt.Sprintf(
-		"ALTER TABLE issues ADD CONSTRAINT issues_priority_check CHECK (%s)",
-		canonicalPriorityCheckClause,
-	)
-	if _, err := s.db.ExecContext(ctx, addCheckSQL); err != nil {
-		return false, fmt.Errorf("add canonical priority check: %w", err)
+	if _, err := s.db.ExecContext(ctx, "ALTER TABLE issues ADD CONSTRAINT issues_priority_check CHECK (priority >= 0 AND priority <= 1)"); err != nil {
+		return false, fmt.Errorf("add priority check: %w", err)
 	}
 	return true, nil
 }
@@ -411,14 +353,13 @@ func (s *Store) listIssuePriorityCheckConstraints(ctx context.Context) ([]issueC
 		return nil, fmt.Errorf("query issue check constraints: %w", err)
 	}
 	defer rows.Close()
-	var out []issueCheckConstraint
+	out := []issueCheckConstraint{}
 	for rows.Next() {
 		var c issueCheckConstraint
 		if err := rows.Scan(&c.name, &c.clause); err != nil {
 			return nil, fmt.Errorf("scan issue check constraint: %w", err)
 		}
-		normalized := normalizeConstraintClause(c.clause)
-		if strings.Contains(normalized, "priority") {
+		if strings.Contains(normalizeConstraintClause(c.clause), "priority") {
 			out = append(out, c)
 		}
 	}
@@ -433,13 +374,7 @@ func hasCanonicalPriorityConstraint(constraints []issueCheckConstraint) bool {
 		return false
 	}
 	normalized := normalizeConstraintClause(constraints[0].clause)
-	// [LAW:one-source-of-truth] Fragments derive from model.Priority{Normal,Urgent}.
-	for _, fragment := range canonicalPriorityCheckClauseFragments {
-		if !strings.Contains(normalized, fragment) {
-			return false
-		}
-	}
-	return true
+	return strings.Contains(normalized, "priority<=1")
 }
 
 func (s *Store) ensureStatusConstraint(ctx context.Context) (bool, error) {
