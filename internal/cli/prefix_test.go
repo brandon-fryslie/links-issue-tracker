@@ -179,3 +179,15 @@ func TestPrefixSetRejectsInvalidPrefix(t *testing.T) {
 		t.Fatalf("error = %q, want it to mention invalid prefix", err.Error())
 	}
 }
+
+func TestPrefixSetRejectsExtraPositionalArgs(t *testing.T) {
+	_, runLit := initRepoForPrefixTest(t)
+
+	out, err := runLit("prefix", "set", "newproj", "typo", "--apply")
+	if err == nil {
+		t.Fatalf("expected usage error for extra positional arg; got output: %s", out)
+	}
+	if !strings.Contains(err.Error(), "usage:") {
+		t.Fatalf("error = %q, want usage error mentioning extra args", err.Error())
+	}
+}

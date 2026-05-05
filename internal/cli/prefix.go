@@ -35,7 +35,7 @@ func runPrefixSet(stdout io.Writer, ws workspace.Info, args []string) error {
 	if err := parseFlagSet(fs, flagArgs, stdout); err != nil {
 		return err
 	}
-	if len(positional) != 1 {
+	if len(positional) != 1 || fs.NArg() != 0 {
 		return errors.New("usage: lit prefix set <new-prefix> [--apply] [--json]")
 	}
 	requested := strings.TrimSpace(positional[0])
