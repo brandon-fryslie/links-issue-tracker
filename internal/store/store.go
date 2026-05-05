@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -32,7 +33,15 @@ type Store struct {
 	doltRootDir    string
 	commitLockPath string
 	telemetryDir   string
+	// [LAW:single-enforcer] One process-level writer owns human-readable
+	// migration progress output; tests override via SetLoggerForTest. Defaults
+	// to os.Stderr so unconfigured stores still surface migration events.
+	logger io.Writer
 }
+
+// SetLoggerForTest swaps the migration log writer. Test-only seam — production
+// callers should not retarget logging mid-flight.
+func (s *Store) SetLoggerForTest(w io.Writer) { s.logger = w }
 
 type NotFoundError struct {
 	Entity string
@@ -239,6 +248,7 @@ func openStoreConnection(doltRootDir string, workspaceID string) (*Store, error)
 		doltRootDir:    doltRootDir,
 		commitLockPath: filepath.Join(filepath.Clean(doltRootDir), ".links-commit.lock"),
 		telemetryDir:   filepath.Join(filepath.Clean(doltRootDir), "telemetry"),
+		logger:         os.Stderr,
 	}, nil
 }
 

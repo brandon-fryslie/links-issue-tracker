@@ -95,6 +95,20 @@ func (s *Store) migrate(ctx context.Context) error {
 			FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
 		);`,
 		`CREATE INDEX idx_issue_history_issue_created ON issue_history(issue_id, created_at);`,
+		// [LAW:one-source-of-truth] migration_log is the durable record of every
+		// versioned migration attempt; the in-memory versionedMigrations slice is
+		// the registry, this table is the history.
+		`CREATE TABLE migration_log (
+			id BIGINT AUTO_INCREMENT PRIMARY KEY,
+			version INT NOT NULL,
+			name VARCHAR(191) NOT NULL,
+			started_at VARCHAR(64) NOT NULL,
+			finished_at VARCHAR(64) NULL,
+			status VARCHAR(16) NOT NULL,
+			rows_affected BIGINT NOT NULL DEFAULT 0,
+			error TEXT NULL,
+			KEY (version)
+		);`,
 	}
 	for _, stmt := range schema {
 		stmtChanged, err := execIgnoreAlreadyExists(ctx, s.db, stmt)
@@ -173,11 +187,16 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	changed = changed || schemaVersionChanged
-	if !changed {
-		return nil
+	// [LAW:single-enforcer] Versioned migrations are gated and applied at this
+	// single point in the migration pipeline. The runner owns its own per-
+	// migration Dolt commits, so the baseline commit below covers only the
+	// probe-gated reconciliation stages above.
+	if changed {
+		if err := s.commitWorkingSet(ctx, "Initialize links schema"); err != nil {
+			return err
+		}
 	}
-	// [LAW:dataflow-not-control-flow] Startup migration always runs the same reconciliation stages; only the derived `changed` value selects commit input.
-	if err := s.commitWorkingSet(ctx, "Initialize links schema"); err != nil {
+	if err := s.runVersionedMigrations(ctx); err != nil {
 		return err
 	}
 	return nil
