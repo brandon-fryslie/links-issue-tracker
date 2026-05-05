@@ -54,7 +54,7 @@ func newIssueID(ctx context.Context, tx *sql.Tx, prefix string, topic string, ti
 }
 
 func newTopLevelIssueID(ctx context.Context, tx *sql.Tx, prefix string, topic string, title string, description string, createdBy string, createdAt time.Time) (string, error) {
-	baseLength, err := getAdaptiveIssueIDLength(ctx, tx, prefix)
+	baseLength, err := getAdaptiveIssueIDLength(ctx, tx)
 	if err != nil {
 		baseLength = 6
 	}
@@ -107,17 +107,22 @@ func newChildIssueID(ctx context.Context, tx *sql.Tx, parentID string) (string, 
 	return fmt.Sprintf("%s.%d", parentID, maxChildNumber+1), nil
 }
 
-func getAdaptiveIssueIDLength(ctx context.Context, tx *sql.Tx, prefix string) (int, error) {
-	numIssues, err := countTopLevelIssues(ctx, tx, prefix)
+// [LAW:dataflow-not-control-flow] Adaptive length is a pure function of the
+// top-level issue population. The prefix never gates the count: every issue in
+// a workspace shares one generation-time prefix, and even after a rename the
+// collision space we care about is "all top-level IDs in this DB" — counting
+// across prefixes is conservative (slightly longer hashes) and never wrong.
+func getAdaptiveIssueIDLength(ctx context.Context, tx *sql.Tx) (int, error) {
+	numIssues, err := countTopLevelIssues(ctx, tx)
 	if err != nil {
 		return 6, err
 	}
 	return issueid.ComputeAdaptiveLength(numIssues), nil
 }
 
-func countTopLevelIssues(ctx context.Context, tx *sql.Tx, prefix string) (int, error) {
+func countTopLevelIssues(ctx context.Context, tx *sql.Tx) (int, error) {
 	var count int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id LIKE ? AND id NOT LIKE ?`, prefix+"-%", "%.%").Scan(&count); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM issues WHERE id NOT LIKE ?`, "%.%").Scan(&count); err != nil {
 		return 0, err
 	}
 	return count, nil
