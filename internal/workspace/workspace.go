@@ -242,8 +242,31 @@ func writeConfig(path string, cfg Config) (Config, error) {
 		return Config{}, fmt.Errorf("marshal workspace config: %w", err)
 	}
 	payload = append(payload, '\n')
-	if err := os.WriteFile(path, payload, 0o644); err != nil {
-		return Config{}, fmt.Errorf("write workspace config: %w", err)
+	// [LAW:single-enforcer] Same-directory temp-file + rename is the atomic-write
+	// boundary every config writer flows through, so a crash between truncate
+	// and write cannot leave config.json empty or partially written.
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".config.json.*")
+	if err != nil {
+		return Config{}, fmt.Errorf("create workspace config temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	if _, err := tmp.Write(payload); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return Config{}, fmt.Errorf("write workspace config temp: %w", err)
+	}
+	if err := tmp.Chmod(0o644); err != nil {
+		_ = tmp.Close()
+		_ = os.Remove(tmpPath)
+		return Config{}, fmt.Errorf("chmod workspace config temp: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpPath)
+		return Config{}, fmt.Errorf("close workspace config temp: %w", err)
+	}
+	if err := os.Rename(tmpPath, path); err != nil {
+		_ = os.Remove(tmpPath)
+		return Config{}, fmt.Errorf("rename workspace config: %w", err)
 	}
 	return cfg, nil
 }
