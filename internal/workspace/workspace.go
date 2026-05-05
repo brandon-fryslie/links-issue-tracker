@@ -194,18 +194,6 @@ func GitRemotes(cwd string) ([]GitRemote, error) {
 }
 
 func loadOrCreateConfig(rootDir string, path string) (Config, error) {
-	writeConfig := func(cfg Config) (Config, error) {
-		payload, err := json.MarshalIndent(cfg, "", "  ")
-		if err != nil {
-			return Config{}, fmt.Errorf("marshal workspace config: %w", err)
-		}
-		payload = append(payload, '\n')
-		if err := os.WriteFile(path, payload, 0o644); err != nil {
-			return Config{}, fmt.Errorf("write workspace config: %w", err)
-		}
-		return cfg, nil
-	}
-
 	payload, err := os.ReadFile(path)
 	if err == nil {
 		var cfg Config
@@ -221,7 +209,7 @@ func loadOrCreateConfig(rootDir string, path string) (Config, error) {
 				return Config{}, err
 			}
 			cfg.IssuePrefix = derivedPrefix
-			return writeConfig(cfg)
+			return writeConfig(path, cfg)
 		}
 		normalizedPrefix, err := issueid.NormalizeConfiguredPrefix(cfg.IssuePrefix)
 		if err != nil {
@@ -229,7 +217,7 @@ func loadOrCreateConfig(rootDir string, path string) (Config, error) {
 		}
 		if normalizedPrefix != cfg.IssuePrefix {
 			cfg.IssuePrefix = normalizedPrefix
-			return writeConfig(cfg)
+			return writeConfig(path, cfg)
 		}
 		return cfg, nil
 	}
@@ -245,7 +233,42 @@ func loadOrCreateConfig(rootDir string, path string) (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	return writeConfig(cfg)
+	return writeConfig(path, cfg)
+}
+
+func writeConfig(path string, cfg Config) (Config, error) {
+	payload, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return Config{}, fmt.Errorf("marshal workspace config: %w", err)
+	}
+	payload = append(payload, '\n')
+	if err := os.WriteFile(path, payload, 0o644); err != nil {
+		return Config{}, fmt.Errorf("write workspace config: %w", err)
+	}
+	return cfg, nil
+}
+
+// UpdateConfig reads the workspace config at path, applies mutate, and writes
+// the result back. The mutate callback owns validation of the new shape; a
+// non-nil error from it aborts the write. Returns the post-mutate config.
+//
+// [LAW:single-enforcer] All in-place edits to the workspace config go through
+// this single read-modify-write boundary so partial writes can't desync
+// callers from on-disk state.
+func UpdateConfig(path string, mutate func(Config) (Config, error)) (Config, error) {
+	payload, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("read workspace config: %w", err)
+	}
+	var cfg Config
+	if err := json.Unmarshal(payload, &cfg); err != nil {
+		return Config{}, fmt.Errorf("parse workspace config: %w", err)
+	}
+	updated, err := mutate(cfg)
+	if err != nil {
+		return Config{}, err
+	}
+	return writeConfig(path, updated)
 }
 
 func deriveIssuePrefix(rootDir string) (string, error) {
