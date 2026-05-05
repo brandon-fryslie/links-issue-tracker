@@ -403,8 +403,6 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	status := fs.String("status", "", "Filter by status: open|in_progress|closed")
 	issueType := fs.String("type", "", "Filter by issue type")
 	assignee := fs.String("assignee", "", "Filter by assignee")
-	priorityMin := fs.Int("priority-min", -1, "Minimum priority (0=normal, 1=urgent)")
-	priorityMax := fs.Int("priority-max", -1, "Maximum priority (0=normal, 1=urgent)")
 	search := fs.String("search", "", "Search title and description text")
 	ids := fs.String("ids", "", "Comma-separated issue IDs")
 	labels := fs.String("labels", "", "Comma-separated labels all of which must match")
@@ -413,7 +411,7 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	includeDeleted := fs.Bool("include-deleted", false, "Include deleted issues")
 	updatedAfter := fs.String("updated-after", "", "Only include issues updated at or after RFC3339 timestamp")
 	updatedBefore := fs.String("updated-before", "", "Only include issues updated at or before RFC3339 timestamp")
-	queryExpr := fs.String("query", "", "Query language: status:in_progress type:task priority:1 has:comments text")
+	queryExpr := fs.String("query", "", "Query language: status:in_progress type:task has:comments text")
 	sortExpr := fs.String("sort", "", "Sort fields, e.g. rank:asc,updated_at:desc")
 	columnsExpr := fs.String("columns", "", "Comma-separated output columns")
 	format := fs.String("format", "lines", "Output format: lines|table")
@@ -442,14 +440,6 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 			return err
 		}
 		filter.SortBy = sortSpecs
-	}
-	if visited["priority-min"] {
-		value := *priorityMin
-		filter.PriorityMin = &value
-	}
-	if visited["priority-max"] {
-		value := *priorityMax
-		filter.PriorityMax = &value
 	}
 	if visited["search"] {
 		filter.SearchTerms = append(filter.SearchTerms, strings.TrimSpace(*search))
@@ -519,8 +509,6 @@ func runReady(ctx context.Context, stdout io.Writer, stderr io.Writer, ap *app.A
 	issueType := fs.String("type", "", "Filter by issue type")
 	status := fs.String("status", "", "Filter by status: open|in_progress (closed excludes everything)")
 	labels := fs.String("labels", "", "Comma-separated labels all of which must match")
-	priorityMin := fs.Int("priority-min", -1, "Minimum priority (0=normal, 1=urgent)")
-	priorityMax := fs.Int("priority-max", -1, "Maximum priority (0=normal, 1=urgent)")
 	limit := fs.Int("limit", 0, "Limit results")
 	columnsExpr := fs.String("columns", "", "Comma-separated output columns")
 	jsonOut := fs.Bool("json", false, "Output JSON")
@@ -528,23 +516,13 @@ func runReady(ctx context.Context, stdout io.Writer, stderr io.Writer, ap *app.A
 		return err
 	}
 	if fs.NArg() != 0 {
-		return errors.New("usage: lit ready [--type ...] [--status ...] [--labels ...] [--assignee <user>] [--priority-min N] [--priority-max N] [--limit N] [--columns ...] [--json]")
+		return errors.New("usage: lit ready [--type ...] [--status ...] [--labels ...] [--assignee <user>] [--limit N] [--columns ...] [--json]")
 	}
-	visited := map[string]bool{}
-	fs.Visit(func(f *pflag.Flag) { visited[f.Name] = true })
 	rf := readyFilter{
 		Assignee:  strings.TrimSpace(*assignee),
 		IssueType: strings.TrimSpace(*issueType),
 		Status:    strings.TrimSpace(*status),
 		Labels:    splitCSV(*labels),
-	}
-	if visited["priority-min"] {
-		v := *priorityMin
-		rf.PriorityMin = &v
-	}
-	if visited["priority-max"] {
-		v := *priorityMax
-		rf.PriorityMax = &v
 	}
 	annotated, _, err := gatherReadyAnnotated(ctx, ap, rf)
 	if err != nil {
@@ -570,12 +548,10 @@ func runReady(ctx context.Context, stdout io.Writer, stderr io.Writer, ap *app.A
 // `lit next`. Empty fields mean "no narrowing"; the workable definition
 // (open/in_progress, leaves only) is layered on top by gatherReadyAnnotated.
 type readyFilter struct {
-	Assignee    string
-	IssueType   string
-	Status      string
-	Labels      []string
-	PriorityMin *int
-	PriorityMax *int
+	Assignee  string
+	IssueType string
+	Status    string
+	Labels    []string
 }
 
 // gatherReadyAnnotated runs the shared ready pipeline: list workable leaves,
@@ -605,8 +581,6 @@ func gatherReadyAnnotated(ctx context.Context, ap *app.App, rf readyFilter) ([]a
 		IssueTypes:      toSlice(rf.IssueType),
 		Assignees:       toSlice(rf.Assignee),
 		LabelsAll:       rf.Labels,
-		PriorityMin:     rf.PriorityMin,
-		PriorityMax:     rf.PriorityMax,
 		IncludeArchived: false,
 		IncludeDeleted:  false,
 		Limit:           0,

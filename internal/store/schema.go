@@ -7,8 +7,16 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/bmf/links-issue-tracker/internal/model"
 	"github.com/bmf/links-issue-tracker/internal/rank"
 )
+
+// priorityCheckClause is the schema-level encoding of the priority range
+// invariant. Derived from the canonical model.Priority* constants and shared
+// by the fresh-table CREATE (createIssuesTableStmt) and the upgrade-path
+// ALTER (resetPrioritiesToNormal) so the two writers cannot drift.
+// [LAW:one-source-of-truth]
+var priorityCheckClause = fmt.Sprintf("priority >= %d AND priority <= %d", model.PriorityNormal, model.PriorityUrgent)
 
 // canonicalStatusCheckClause encodes the invariant that container rows store
 // NULL status (state is derived from children) and leaf rows carry one of the
@@ -37,9 +45,9 @@ func createIssuesTableStmt() string {
 			archived_at VARCHAR(64) NULL,
 			deleted_at VARCHAR(64) NULL,
 			CHECK(%s),
-			CHECK(priority >= 0 AND priority <= 1),
+			CHECK(%s),
 			CHECK(issue_type IN ('task','feature','bug','chore','epic'))
-		);`, canonicalStatusCheckClause)
+		);`, canonicalStatusCheckClause, priorityCheckClause)
 }
 
 func (s *Store) migrate(ctx context.Context) error {
@@ -326,7 +334,7 @@ func (s *Store) resetPrioritiesToNormal(ctx context.Context) (bool, error) {
 	if hasCanonicalPriorityConstraint(constraints) {
 		return false, nil
 	}
-	if _, err := s.db.ExecContext(ctx, "UPDATE issues SET priority = 0"); err != nil {
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("UPDATE issues SET priority = %d", model.PriorityNormal)); err != nil {
 		return false, fmt.Errorf("reset priorities to normal: %w", err)
 	}
 	for _, c := range constraints {
@@ -334,7 +342,7 @@ func (s *Store) resetPrioritiesToNormal(ctx context.Context) (bool, error) {
 			return false, fmt.Errorf("drop priority check %s: %w", c.name, err)
 		}
 	}
-	if _, err := s.db.ExecContext(ctx, "ALTER TABLE issues ADD CONSTRAINT issues_priority_check CHECK (priority >= 0 AND priority <= 1)"); err != nil {
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf("ALTER TABLE issues ADD CONSTRAINT issues_priority_check CHECK (%s)", priorityCheckClause)); err != nil {
 		return false, fmt.Errorf("add priority check: %w", err)
 	}
 	return true, nil
@@ -374,7 +382,10 @@ func hasCanonicalPriorityConstraint(constraints []issueCheckConstraint) bool {
 		return false
 	}
 	normalized := normalizeConstraintClause(constraints[0].clause)
-	return strings.Contains(normalized, "priority<=1")
+	// [LAW:one-source-of-truth] Discriminator derived from PriorityUrgent — the
+	// upper bound is what differs between the legacy (<=4) and canonical (<=1)
+	// shapes.
+	return strings.Contains(normalized, fmt.Sprintf("priority<=%d", model.PriorityUrgent))
 }
 
 func (s *Store) ensureStatusConstraint(ctx context.Context) (bool, error) {

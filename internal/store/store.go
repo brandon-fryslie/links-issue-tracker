@@ -130,8 +130,6 @@ type ListIssuesFilter struct {
 	IssueTypes        []string
 	ExcludeIssueTypes []string
 	Assignees         []string
-	PriorityMin       *int
-	PriorityMax       *int
 	SearchTerms       []string
 	IDs               []string
 	HasComments       *bool
@@ -447,14 +445,6 @@ func (s *Store) ListIssues(ctx context.Context, filter ListIssuesFilter) ([]mode
 		if len(placeholders) > 0 {
 			where = append(where, "i.assignee IN ("+strings.Join(placeholders, ",")+")")
 		}
-	}
-	if filter.PriorityMin != nil {
-		where = append(where, "i.priority >= ?")
-		args = append(args, *filter.PriorityMin)
-	}
-	if filter.PriorityMax != nil {
-		where = append(where, "i.priority <= ?")
-		args = append(args, *filter.PriorityMax)
 	}
 	if filter.UpdatedAfter != nil {
 		where = append(where, "i.updated_at >= ?")

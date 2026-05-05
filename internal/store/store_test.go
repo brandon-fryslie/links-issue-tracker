@@ -708,7 +708,6 @@ func TestStoreListIssuesSupportsAdvancedFilters(t *testing.T) {
 		Statuses:      []model.State{model.StateOpen},
 		IssueTypes:    []string{"task"},
 		Assignees:     []string{"bmf"},
-		PriorityMax:   intPtr(2),
 		SearchTerms:   []string{"renderer", "draw prep"},
 		IDs:           []string{issueA.ID, issueB.ID},
 		LabelsAll:     []string{"renderer"},
@@ -898,8 +897,6 @@ func TestStoreLabelsAreWritableFirstClassData(t *testing.T) {
 		t.Fatalf("export.Labels = %#v", export.Labels)
 	}
 }
-
-func intPtr(value int) *int { return &value }
 
 func issueWithStatus(t *testing.T, issue model.Issue, status model.State) model.Issue {
 	t.Helper()
