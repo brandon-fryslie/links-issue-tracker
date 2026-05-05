@@ -118,8 +118,19 @@ func TestConcurrentMutationsMixedOperations(t *testing.T) {
 
 	eg, egCtx := errgroup.WithContext(ctx)
 
-	// Goroutine batch 1: create new issues with the mixed-test label.
+	// Plan each batch up front. The plan is the source of truth for the
+	// post-condition; the goroutines apply the plan exactly. Verification
+	// reads the plan and asserts the persisted state matches every entry,
+	// catching dropped writes that a bare readability+count check would miss.
+	// [LAW:dataflow-not-control-flow] verification iterates the plan, not
+	// the goroutine outcomes — same loop every run, only values vary.
+
+	// Plan: create new issues with the mixed-test label.
 	const newCount = 5
+	commentPlan := make(map[string]string, 5)            // issueID -> comment body
+	priorityPlan := make(map[string]int, preCreateCount) // issueID -> expected priority
+	transitionPlan := map[string]string{}                // issueID -> expected status
+
 	for i := range newCount {
 		eg.Go(func() error {
 			_, err := st.CreateIssue(egCtx, CreateIssueInput{
@@ -133,39 +144,45 @@ func TestConcurrentMutationsMixedOperations(t *testing.T) {
 		})
 	}
 
-	// Goroutine batch 2: add comments to pre-created issues.
+	// Plan: add comments to pre-created issues.
 	for i, id := range issues[:5] {
-		i, id := i, id
+		body := fmt.Sprintf("Concurrent comment %d", i)
+		commentPlan[id] = body
 		eg.Go(func() error {
 			_, err := st.AddComment(egCtx, AddCommentInput{
 				IssueID:   id,
-				Body:      fmt.Sprintf("Concurrent comment %d", i),
+				Body:      body,
 				CreatedBy: "concurrent-tester",
 			})
 			return err
 		})
 	}
 
-	// Goroutine batch 3: update pre-created issues.
+	// Plan: update priorities on pre-created issues.
 	for i, id := range issues[5:] {
-		i, id := i, id
+		newPriority := (i + 1) % 5
+		priorityPlan[id] = newPriority
 		eg.Go(func() error {
-			newPriority := (i + 1) % 5
+			p := newPriority
 			_, err := st.UpdateIssue(egCtx, id, UpdateIssueInput{
-				Priority: &newPriority,
+				Priority: &p,
 			})
 			return err
 		})
 	}
 
-	// Goroutine batch 4: transition pre-created issues.
+	// Plan: transition pre-created issues. start -> in_progress, close -> closed.
+	transitionStatus := map[string]string{
+		"start": "in_progress",
+		"close": "closed",
+	}
 	for i, id := range issues[:3] {
-		i, id := i, id
+		action := "start"
+		if i%2 == 0 {
+			action = "close"
+		}
+		transitionPlan[id] = transitionStatus[action]
 		eg.Go(func() error {
-			action := "start"
-			if i%2 == 0 {
-				action = "close"
-			}
 			_, err := st.TransitionIssue(egCtx, TransitionIssueInput{
 				IssueID:   id,
 				Action:    action,
@@ -180,15 +197,7 @@ func TestConcurrentMutationsMixedOperations(t *testing.T) {
 		t.Fatalf("concurrent mixed mutations failed: %v", err)
 	}
 
-	// Verify all pre-created issues are still readable.
-	for _, id := range issues {
-		_, err := st.GetIssue(ctx, id)
-		if err != nil {
-			t.Fatalf("GetIssue(%s) after concurrent ops error = %v", id, err)
-		}
-	}
-
-	// Verify the total count: preCreateCount + newCount, all carrying mixed-test label.
+	// Verify total label count first — establishes the issues are all readable.
 	all, err := st.ListIssues(ctx, ListIssuesFilter{
 		LabelsAll: []string{"mixed-test"},
 	})
@@ -198,6 +207,57 @@ func TestConcurrentMutationsMixedOperations(t *testing.T) {
 	wantTotal := preCreateCount + newCount
 	if len(all) != wantTotal {
 		t.Fatalf("ListIssues() returned %d issues, want %d", len(all), wantTotal)
+	}
+
+	// Verify each planned comment actually persisted on the target issue.
+	for id, wantBody := range commentPlan {
+		detail, err := st.GetIssueDetail(ctx, id)
+		if err != nil {
+			t.Fatalf("GetIssueDetail(%s) error = %v", id, err)
+		}
+		found := false
+		for _, c := range detail.Comments {
+			if c.Body == wantBody {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("comment %q not found on issue %s (got %d comments)", wantBody, id, len(detail.Comments))
+		}
+	}
+
+	// Verify each planned priority update actually persisted.
+	for id, wantPriority := range priorityPlan {
+		issue, err := st.GetIssue(ctx, id)
+		if err != nil {
+			t.Fatalf("GetIssue(%s) error = %v", id, err)
+		}
+		if issue.Priority != wantPriority {
+			t.Fatalf("issue %s Priority = %d, want %d", id, issue.Priority, wantPriority)
+		}
+	}
+
+	// Verify each planned transition produced the expected status and at
+	// least one history row. A dropped transition write would leave the
+	// status at "open" with no new history.
+	for id, wantStatus := range transitionPlan {
+		detail, err := st.GetIssueDetail(ctx, id)
+		if err != nil {
+			t.Fatalf("GetIssueDetail(%s) error = %v", id, err)
+		}
+		if got := detail.Issue.StatusValue(); got != wantStatus {
+			t.Fatalf("issue %s status = %q, want %q", id, got, wantStatus)
+		}
+		transitionEvents := 0
+		for _, h := range detail.History {
+			if h.ToStatus == wantStatus {
+				transitionEvents++
+			}
+		}
+		if transitionEvents == 0 {
+			t.Fatalf("issue %s has no history row recording transition to %q", id, wantStatus)
+		}
 	}
 
 	// Lock must not be held.

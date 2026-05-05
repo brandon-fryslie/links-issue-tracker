@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
-	"time"
+
+	"golang.org/x/sync/errgroup"
 )
 
 // TestPanicDuringMutationReleasesLock verifies that withMutation's deferred
@@ -66,68 +68,18 @@ func TestPanicDuringWithCommitLockReleasesLock(t *testing.T) {
 	}
 }
 
-// TestStaleLockFromDeadPIDIsReclaimed creates a lock file containing a PID
-// that does not correspond to a running process and verifies that
-// acquireCommitLock reclaims it.
-func TestStaleLockFromDeadPIDIsReclaimed(t *testing.T) {
-	lockPath := filepath.Join(t.TempDir(), ".links-commit.lock")
-	// PID 999999 is extremely unlikely to be running.
-	if err := os.WriteFile(lockPath, []byte("999999\n"), 0o600); err != nil {
-		t.Fatalf("WriteFile error = %v", err)
-	}
-	s := &Store{commitLockPath: lockPath}
+// Stale-lock reclamation by dead PID is covered by
+// TestAcquireCommitLockReclaimsDeadOwner in commit_lock_test.go.
+// Stale-lock reclamation by age (malformed owner) is covered by
+// TestRemoveStaleCommitLockRemovesStaleMalformedOwner in commit_lock_test.go.
+// [LAW:one-source-of-truth] one canonical assertion per behavior.
 
-	// Override PID probe so the test is deterministic regardless of platform.
-	originalProbe := commitLockPIDRunning
-	commitLockPIDRunning = func(pid int) (bool, error) {
-		return false, nil
-	}
-	t.Cleanup(func() { commitLockPIDRunning = originalProbe })
-
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-
-	lockedCtx, release, err := s.acquireCommitLock(ctx)
-	if err != nil {
-		t.Fatalf("acquireCommitLock() error = %v", err)
-	}
-	if lockedCtx.Value(commitLockContextKey{}) != true {
-		t.Fatalf("context does not carry commit lock marker")
-	}
-	release()
-
-	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
-		t.Fatalf("lock file still exists after release: stat err = %v", err)
-	}
-}
-
-// TestStaleLockFromAgeIsReclaimed creates a lock file with an old mtime and
-// verifies that removeStaleCommitLock removes it even when the owner PID is
-// unreadable (malformed content).
-func TestStaleLockFromAgeIsReclaimed(t *testing.T) {
-	lockPath := filepath.Join(t.TempDir(), ".links-commit.lock")
-	if err := os.WriteFile(lockPath, []byte("garbage\n"), 0o600); err != nil {
-		t.Fatalf("WriteFile error = %v", err)
-	}
-	// Make the lock older than the stale threshold.
-	staleTime := time.Now().Add(-2 * time.Hour)
-	if err := os.Chtimes(lockPath, staleTime, staleTime); err != nil {
-		t.Fatalf("Chtimes error = %v", err)
-	}
-
-	if err := removeStaleCommitLock(lockPath, time.Minute); err != nil {
-		t.Fatalf("removeStaleCommitLock() error = %v", err)
-	}
-	if _, err := os.Stat(lockPath); !os.IsNotExist(err) {
-		t.Fatalf("stale lock file was not removed: stat err = %v", err)
-	}
-}
-
-// TestCommitWorkingSetRetryAfterTxCommit verifies that withMutation calls
-// commitWorkingSet (which re-enters withCommitLock) after the transaction is
-// committed. This exercises the re-entrant path where the context already
-// carries the lock marker.
-func TestCommitWorkingSetRetryAfterTxCommit(t *testing.T) {
+// TestWithMutationCommitWorkingSetReentrantPath verifies that withMutation's
+// post-tx call to commitWorkingSet re-enters withCommitLock and short-circuits
+// correctly because the context already carries the lock marker. CreateIssue
+// only succeeds end-to-end when the re-entrant path completes without
+// deadlocking or attempting to take the file lock a second time.
+func TestWithMutationCommitWorkingSetReentrantPath(t *testing.T) {
 	st := openIssueStore(t, context.Background())
 
 	// CreateIssue goes through withMutation, which:
@@ -187,28 +139,47 @@ func TestLockFileContainsCurrentPID(t *testing.T) {
 	_ = os.Remove(lockPath)
 }
 
-// TestTryAcquireFileLockFailsIfExists verifies atomicity: a second
-// tryAcquireFileLock on the same path fails with os.ErrExist.
-func TestTryAcquireFileLockFailsIfExists(t *testing.T) {
+// TestTryAcquireFileLockIsAtomicUnderRace verifies true atomicity: when N
+// goroutines race to acquire the same lock path concurrently, exactly one
+// observes locked=true and every other observes os.ErrExist. A check-then-
+// create implementation (stat + create as separate syscalls) would let two
+// racers both pass the check and both create the file, which this test
+// catches under -race.
+// [LAW:single-enforcer] file lock acquisition is the single atomic boundary.
+func TestTryAcquireFileLockIsAtomicUnderRace(t *testing.T) {
 	lockPath := filepath.Join(t.TempDir(), ".links-commit.lock")
 
-	locked, err := tryAcquireFileLock(lockPath)
-	if err != nil {
-		t.Fatalf("first tryAcquireFileLock() error = %v", err)
+	const racers = 32
+	var winners atomic.Int32
+	var existsErrs atomic.Int32
+
+	eg, _ := errgroup.WithContext(context.Background())
+	start := make(chan struct{})
+	for range racers {
+		eg.Go(func() error {
+			<-start
+			locked, err := tryAcquireFileLock(lockPath)
+			if locked && err == nil {
+				winners.Add(1)
+				return nil
+			}
+			if !locked && errors.Is(err, os.ErrExist) {
+				existsErrs.Add(1)
+				return nil
+			}
+			return fmt.Errorf("unexpected racer outcome: locked=%v err=%v", locked, err)
+		})
 	}
-	if !locked {
-		t.Fatal("first tryAcquireFileLock() returned locked=false")
+	close(start)
+	if err := eg.Wait(); err != nil {
+		t.Fatalf("racer goroutine error = %v", err)
 	}
 
-	locked2, err2 := tryAcquireFileLock(lockPath)
-	if err2 == nil {
-		t.Fatal("second tryAcquireFileLock() error = nil, want os.ErrExist")
+	if got := winners.Load(); got != 1 {
+		t.Fatalf("winners = %d, want exactly 1 (atomicity broken)", got)
 	}
-	if !errors.Is(err2, os.ErrExist) {
-		t.Fatalf("second tryAcquireFileLock() error = %v, want os.ErrExist", err2)
-	}
-	if locked2 {
-		t.Fatal("second tryAcquireFileLock() returned locked=true")
+	if got := existsErrs.Load(); got != racers-1 {
+		t.Fatalf("os.ErrExist count = %d, want %d", got, racers-1)
 	}
 	_ = os.Remove(lockPath)
 }
