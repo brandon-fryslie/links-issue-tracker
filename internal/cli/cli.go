@@ -18,6 +18,7 @@ import (
 	"github.com/bmf/links-issue-tracker/internal/model"
 	"github.com/bmf/links-issue-tracker/internal/query"
 	"github.com/bmf/links-issue-tracker/internal/store"
+	"github.com/bmf/links-issue-tracker/internal/templates"
 	"github.com/bmf/links-issue-tracker/internal/workspace"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
@@ -403,8 +404,12 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	}
 	visited := map[string]bool{}
 	fs.Visit(func(f *pflag.Flag) { visited[f.Name] = true })
+	statuses, err := parseStateSlice(strings.TrimSpace(*status))
+	if err != nil {
+		return fmt.Errorf("parse --status: %w", err)
+	}
 	filter := store.ListIssuesFilter{
-		Statuses:        toSlice(strings.TrimSpace(*status)),
+		Statuses:        statuses,
 		IssueTypes:      toSlice(strings.TrimSpace(*issueType)),
 		Assignees:       toSlice(strings.TrimSpace(*assignee)),
 		IncludeArchived: *includeArchived,
@@ -467,7 +472,7 @@ func runList(ctx context.Context, stdout io.Writer, ap *app.App, args []string) 
 	// around ListIssues. When the user hasn't narrowed by status (via --status or
 	// --query status:...), exclude closed issues so `lit ls` shows active work.
 	if len(filter.Statuses) == 0 {
-		filter.Statuses = []string{"open", "in_progress"}
+		filter.Statuses = []model.State{model.StateOpen, model.StateInProgress}
 	}
 	issues, err := ap.Store.ListIssues(ctx, filter)
 	if err != nil {
@@ -565,13 +570,13 @@ func gatherReadyAnnotated(ctx context.Context, ap *app.App, rf readyFilter) ([]a
 	if err != nil {
 		return nil, nil, err
 	}
-	statuses := []string{"open", "in_progress"}
+	statuses := []model.State{model.StateOpen, model.StateInProgress}
 	if rf.Status != "" {
-		// User-supplied status overrides the workable default. The intersection
-		// with leaf-only filtering still applies via filterWorkableIssues below;
-		// a user asking for closed items here gets none, which is the honest
-		// answer rather than silently substituting a different status.
-		statuses = []string{rf.Status}
+		// User-supplied status overrides the workable default. Unrecognized
+		// values default to Open via DefaultOpen — the ready command is
+		// lenient, matching store/import behavior rather than strict CLI flag
+		// validation.
+		statuses = []model.State{model.DefaultOpen(rf.Status)}
 	}
 	// [LAW:one-source-of-truth] rank is the canonical ordering; no explicit SortBy
 	// needed — the store default is item_rank ASC.
@@ -668,7 +673,7 @@ func runOrphaned(ctx context.Context, stdout io.Writer, ap *app.App, args []stri
 		return errors.New("usage: lit orphaned [--assignee <user>] [--json]")
 	}
 	listFilter := store.ListIssuesFilter{
-		Statuses:        []string{"in_progress"},
+		Statuses:        []model.State{model.StateInProgress},
 		Assignees:       toSlice(strings.TrimSpace(*assignee)),
 		IncludeArchived: false,
 		IncludeDeleted:  false,
@@ -917,22 +922,42 @@ func filterWorkableIssues(issues []model.Issue) []model.Issue {
 }
 
 func runTransition(ctx context.Context, stdout io.Writer, ap *app.App, args []string, action string) error {
-	positional, flagArgs := splitArgs(args, 1)
 	fs := newCobraFlagSet(action)
 	reason := fs.String("reason", "", "Transition reason")
 	by := fs.String("by", os.Getenv("USER"), "Transition actor")
+	apply := fs.Bool("apply", false, "Apply the transition (without this flag, pre-guidance is printed instead)")
 	jsonOut := fs.Bool("json", false, "Output JSON")
-	if err := parseFlagSet(fs, flagArgs, stdout); err != nil {
+	if err := parseFlagSet(fs, args, stdout); err != nil {
 		return err
 	}
-	if len(positional) != 1 {
-		return fmt.Errorf("usage: lit %s <id> [--reason <text>]", transitionCommandName(action))
+	remaining := fs.cmd.Flags().Args()
+	if len(remaining) != 1 {
+		return fmt.Errorf("usage: lit %s <id> [--reason <text>] [--apply]", transitionCommandName(action))
 	}
-	if fs.NArg() != 0 {
-		return fmt.Errorf("usage: lit %s <id> [--reason <text>]", transitionCommandName(action))
+
+	issueID := remaining[0]
+	isJSON := *jsonOut || outputModeFromWriter(stdout) == outputModeJSON
+
+	// [LAW:dataflow-not-control-flow] Pre-guidance template existence is the data that
+	// activates the two-phase flow. When a pre-guidance template exists, the bare command
+	// prints guidance and exits; --apply executes the transition and prints post-guidance.
+	// When no pre-guidance template exists, the command works as before (backward compatible).
+	// JSON mode bypasses guidance entirely — scripts don't need coaching.
+	preGuidance, hasPreGuidance, err := loadTransitionGuidance(action, "pre", ap.Workspace.RootDir)
+	if err != nil {
+		return fmt.Errorf("load pre-guidance: %w", err)
 	}
+
+	if hasPreGuidance && !*apply && !isJSON {
+		rendered := renderGuidance(preGuidance, issueID)
+		if _, err := fmt.Fprintln(stdout, rendered); err != nil {
+			return err
+		}
+		return nil
+	}
+
 	issue, err := ap.Store.TransitionIssue(ctx, store.TransitionIssueInput{
-		IssueID:   positional[0],
+		IssueID:   issueID,
 		Action:    action,
 		Reason:    *reason,
 		CreatedBy: *by,
@@ -940,6 +965,20 @@ func runTransition(ctx context.Context, stdout io.Writer, ap *app.App, args []st
 	if err != nil {
 		return err
 	}
+
+	if !isJSON {
+		postGuidance, hasPostGuidance, err := loadTransitionGuidance(action, "post", ap.Workspace.RootDir)
+		if err != nil {
+			return fmt.Errorf("load post-guidance: %w", err)
+		}
+		if hasPostGuidance {
+			rendered := renderGuidance(postGuidance, issueID)
+			if _, err := fmt.Fprintln(stdout, rendered); err != nil {
+				return err
+			}
+		}
+	}
+
 	return printValue(stdout, issue, *jsonOut, printIssueSummary)
 }
 
@@ -1138,7 +1177,7 @@ func runQuickstart(ctx context.Context, stdout io.Writer, ws workspace.Info, arg
 		if err != nil {
 			return err
 		}
-		lines = append(lines, fmt.Sprintf("refresh %s", formatQuickstartRefreshSummary(refreshReport)), "")
+		lines = append(lines, formatQuickstartRefreshSummary(refreshReport), "")
 	}
 	lines = append(lines, guidance)
 	_, err = fmt.Fprintln(stdout, strings.Join(lines, "\n"))
@@ -1170,6 +1209,17 @@ func printValue(w io.Writer, v any, jsonOut bool, textFn func(io.Writer, any) er
 	return textFn(w, v)
 }
 
+func parseStateSlice(s string) ([]model.State, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+	state, err := model.ParseState(s)
+	if err != nil {
+		return nil, err
+	}
+	return []model.State{state}, nil
+}
+
 func toSlice(s string) []string {
 	if s == "" {
 		return nil
@@ -1184,6 +1234,25 @@ func transitionCommandName(action string) string {
 	default:
 		return action
 	}
+}
+
+// loadTransitionGuidance loads a guidance template for the given action/phase.
+// Returns the template content, whether it exists, and any I/O error.
+// Absent templates are not an error — they simply deactivate the guidance flow.
+func loadTransitionGuidance(action, phase, workspaceRoot string) (string, bool, error) {
+	content, err := templates.LoadGuidance(action, phase, workspaceRoot)
+	if err != nil {
+		return "", false, err
+	}
+	if content == "" {
+		return "", false, nil
+	}
+	return strings.TrimSpace(content), true, nil
+}
+
+// renderGuidance interpolates <id> placeholders in a guidance template.
+func renderGuidance(template string, issueID string) string {
+	return strings.ReplaceAll(template, "<id>", issueID)
 }
 
 func splitCSV(input string) []string {

@@ -202,13 +202,13 @@ func TestListIssuesStatusFilterUsesDerivedEpicState(t *testing.T) {
 
 	cases := []struct {
 		name     string
-		statuses []string
+		statuses []model.State
 		want     map[string]bool
 	}{
-		{name: "default open+in_progress", statuses: []string{"open", "in_progress"}, want: map[string]bool{openEpic.ID: true, mixedEpic.ID: true, closedEpic.ID: false}},
-		{name: "open only", statuses: []string{"open"}, want: map[string]bool{openEpic.ID: true, mixedEpic.ID: false, closedEpic.ID: false}},
-		{name: "in_progress only", statuses: []string{"in_progress"}, want: map[string]bool{openEpic.ID: false, mixedEpic.ID: true, closedEpic.ID: false}},
-		{name: "closed only", statuses: []string{"closed"}, want: map[string]bool{openEpic.ID: false, mixedEpic.ID: false, closedEpic.ID: true}},
+		{name: "default open+in_progress", statuses: []model.State{model.StateOpen, model.StateInProgress}, want: map[string]bool{openEpic.ID: true, mixedEpic.ID: true, closedEpic.ID: false}},
+		{name: "open only", statuses: []model.State{model.StateOpen}, want: map[string]bool{openEpic.ID: true, mixedEpic.ID: false, closedEpic.ID: false}},
+		{name: "in_progress only", statuses: []model.State{model.StateInProgress}, want: map[string]bool{openEpic.ID: false, mixedEpic.ID: true, closedEpic.ID: false}},
+		{name: "closed only", statuses: []model.State{model.StateClosed}, want: map[string]bool{openEpic.ID: false, mixedEpic.ID: false, closedEpic.ID: true}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -709,7 +709,7 @@ func TestStoreListIssuesSupportsAdvancedFilters(t *testing.T) {
 	after := now.Add(time.Hour)
 	hasComments := true
 	issues, err := st.ListIssues(ctx, ListIssuesFilter{
-		Statuses:      []string{"open"},
+		Statuses:      []model.State{model.StateOpen},
 		IssueTypes:    []string{"task"},
 		Assignees:     []string{"bmf"},
 		PriorityMax:   intPtr(2),
@@ -1125,7 +1125,7 @@ func TestIssueStatusClaimAndDoneAreDeterministic(t *testing.T) {
 		t.Fatalf("done = %#v, want closed with ClosedAt", done)
 	}
 
-	openIssues, err := st.ListIssues(ctx, ListIssuesFilter{Statuses: []string{"open"}})
+	openIssues, err := st.ListIssues(ctx, ListIssuesFilter{Statuses: []model.State{model.StateOpen}})
 	if err != nil {
 		t.Fatalf("ListIssues(open) error = %v", err)
 	}
@@ -1133,7 +1133,7 @@ func TestIssueStatusClaimAndDoneAreDeterministic(t *testing.T) {
 		t.Fatalf("openIssues = %#v, want empty", openIssues)
 	}
 
-	closedIssues, err := st.ListIssues(ctx, ListIssuesFilter{Statuses: []string{"closed"}})
+	closedIssues, err := st.ListIssues(ctx, ListIssuesFilter{Statuses: []model.State{model.StateClosed}})
 	if err != nil {
 		t.Fatalf("ListIssues(closed) error = %v", err)
 	}
@@ -1269,7 +1269,7 @@ func TestOpenForReadAutoMigratesExistingSchema(t *testing.T) {
 	doltRoot := filepath.Join(t.TempDir(), "dolt")
 
 	// Create the database without running migration.
-	if err := EnsureDatabase(ctx, doltRoot, "test-workspace-id"); err != nil {
+	if _, err := EnsureDatabase(ctx, doltRoot, "test-workspace-id"); err != nil {
 		t.Fatalf("EnsureDatabase() error = %v", err)
 	}
 	seed, err := openStoreConnection(doltRoot, "test-workspace-id")
@@ -1812,6 +1812,69 @@ func TestRankSetRejectsTooFewIDs(t *testing.T) {
 	}
 	if err := st.RankSet(ctx, []string{a.ID}); err == nil || !strings.Contains(err.Error(), "at least 2") {
 		t.Fatalf("RankSet(single id) error = %v, want too-few error", err)
+	}
+}
+
+// TestRemovePerChildBlockAfterRankReorder reproduces the bug where per-child
+// block edges added when an epic-level block already exists cannot be removed
+// after a rank reorder. The store-level orientation for blocks is:
+// src=dependent (blocked), dst=dependency (blocker).
+func TestRemovePerChildBlockAfterRankReorder(t *testing.T) {
+	ctx := context.Background()
+	st := openIssueStore(t, ctx)
+
+	// Create blocker epic A and blocked epic B.
+	epicA, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Blocker epic A", Topic: "dep", IssueType: "epic", Priority: 1})
+	if err != nil {
+		t.Fatalf("CreateIssue(epicA) error = %v", err)
+	}
+	epicB, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Blocked epic B", Topic: "dep", IssueType: "epic", Priority: 1})
+	if err != nil {
+		t.Fatalf("CreateIssue(epicB) error = %v", err)
+	}
+
+	// Create children of B.
+	childB1, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Child B.1", Topic: "dep", IssueType: "task", Priority: 2, ParentID: epicB.ID})
+	if err != nil {
+		t.Fatalf("CreateIssue(childB1) error = %v", err)
+	}
+	childB2, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Child B.2", Topic: "dep", IssueType: "task", Priority: 2, ParentID: epicB.ID})
+	if err != nil {
+		t.Fatalf("CreateIssue(childB2) error = %v", err)
+	}
+	childB3, err := st.CreateIssue(ctx, CreateIssueInput{Title: "Child B.3", Topic: "dep", IssueType: "task", Priority: 2, ParentID: epicB.ID})
+	if err != nil {
+		t.Fatalf("CreateIssue(childB3) error = %v", err)
+	}
+
+	// Add epic-to-epic block: A blocks B.
+	// Store convention: src=blocked (B), dst=blocker (A).
+	if _, err := st.AddRelation(ctx, AddRelationInput{SrcID: epicB.ID, DstID: epicA.ID, Type: "blocks", CreatedBy: "tester"}); err != nil {
+		t.Fatalf("AddRelation(epic-level block) error = %v", err)
+	}
+
+	// Add per-child blocks: A blocks B.1, B.2, B.3.
+	for _, childID := range []string{childB1.ID, childB2.ID, childB3.ID} {
+		if _, err := st.AddRelation(ctx, AddRelationInput{SrcID: childID, DstID: epicA.ID, Type: "blocks", CreatedBy: "tester"}); err != nil {
+			t.Fatalf("AddRelation(per-child block %s) error = %v", childID, err)
+		}
+	}
+
+	// Rank A above B.
+	if err := st.RankAbove(ctx, epicA.ID, epicB.ID); err != nil {
+		t.Fatalf("RankAbove(A, B) error = %v", err)
+	}
+
+	// Remove per-child blocks — this is where the bug manifests.
+	for _, childID := range []string{childB1.ID, childB2.ID, childB3.ID} {
+		if err := st.RemoveRelation(ctx, childID, epicA.ID, "blocks"); err != nil {
+			t.Errorf("RemoveRelation(per-child block %s) error = %v", childID, err)
+		}
+	}
+
+	// Remove epic-level block.
+	if err := st.RemoveRelation(ctx, epicB.ID, epicA.ID, "blocks"); err != nil {
+		t.Fatalf("RemoveRelation(epic-level block) error = %v", err)
 	}
 }
 
