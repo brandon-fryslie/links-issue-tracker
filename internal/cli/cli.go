@@ -333,6 +333,7 @@ func runNew(ctx context.Context, stdout io.Writer, ap *app.App, args []string) e
 	}
 	issue, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{
 		Title: *title, Description: *description, Prompt: *prompt, IssueType: *issueType, Topic: *topic, ParentID: *parentID, Priority: *priority, Assignee: *assignee, Labels: splitCSV(*labels),
+		Prefix: ap.Workspace.IssuePrefix,
 	})
 	if err != nil {
 		return err
@@ -389,6 +390,7 @@ func runFollowup(ctx context.Context, stdout io.Writer, ap *app.App, args []stri
 		Priority:    *priority,
 		Assignee:    *assignee,
 		Labels:      splitCSV(*labels),
+		Prefix:      ap.Workspace.IssuePrefix,
 	})
 	if err != nil {
 		return err
@@ -1079,7 +1081,7 @@ func runImportTree(ctx context.Context, stdout io.Writer, ap *app.App, args []st
 	if err := json.Unmarshal(data, &specs); err != nil {
 		return fmt.Errorf("parse import spec: %w", err)
 	}
-	result, err := ap.Store.ImportTree(ctx, specs)
+	result, err := ap.Store.ImportTree(ctx, ap.Workspace.IssuePrefix, specs)
 	if err != nil {
 		return err
 	}

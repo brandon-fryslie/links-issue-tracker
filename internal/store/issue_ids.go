@@ -3,7 +3,6 @@ package store
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -11,40 +10,6 @@ import (
 
 	"github.com/bmf/links-issue-tracker/internal/issueid"
 )
-
-// [LAW:verifiable-goals] Remove the startup topic backfill once all pre-topic repositories
-// have crossed the sunset window on April 19, 2026.
-const legacyTopicMigrationRemoveBy = "2026-04-19"
-
-func (s *Store) EnsureIssuePrefix(ctx context.Context, prefix string) error {
-	normalized, err := issueid.NormalizeConfiguredPrefix(prefix)
-	if err != nil {
-		return fmt.Errorf("normalize issue prefix: %w", err)
-	}
-	changed, err := s.ensureMetaValue(ctx, "issue_prefix", normalized)
-	if err != nil {
-		return err
-	}
-	if !changed {
-		return nil
-	}
-	return s.commitWorkingSet(ctx, "set issue prefix")
-}
-
-func (s *Store) issuePrefixForTx(ctx context.Context, tx *sql.Tx) (string, error) {
-	var prefix string
-	if err := tx.QueryRowContext(ctx, `SELECT meta_value FROM meta WHERE meta_key = 'issue_prefix'`).Scan(&prefix); err != nil {
-		if err == sql.ErrNoRows {
-			return "", errors.New("issue prefix is not configured")
-		}
-		return "", fmt.Errorf("get issue prefix: %w", err)
-	}
-	normalized, err := issueid.NormalizeConfiguredPrefix(prefix)
-	if err != nil {
-		return "", fmt.Errorf("normalize stored issue prefix: %w", err)
-	}
-	return normalized, nil
-}
 
 func newIssueID(ctx context.Context, tx *sql.Tx, prefix string, topic string, title string, description string, createdBy string, createdAt time.Time, parentID string) (string, error) {
 	if strings.TrimSpace(parentID) != "" {
