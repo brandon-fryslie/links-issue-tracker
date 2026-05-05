@@ -58,6 +58,9 @@ type CreateIssueInput struct {
 	Priority    int
 	Assignee    string
 	Labels      []string
+	// Prefix is the workspace's cosmetic ID prefix (e.g., "links" → "links-foo-abc1").
+	// Sourced from workspace config at the call site. Not persisted as derived state.
+	Prefix string
 }
 
 type UpdateIssueInput struct {
@@ -344,9 +347,9 @@ func (s *Store) CreateIssue(ctx context.Context, in CreateIssueInput) (model.Iss
 				return fmt.Errorf("lookup parent issue %q: %w", parentID, err)
 			}
 		}
-		prefix, err := s.issuePrefixForTx(ctx, tx)
+		prefix, err := issueid.NormalizeConfiguredPrefix(in.Prefix)
 		if err != nil {
-			return err
+			return fmt.Errorf("normalize issue prefix: %w", err)
 		}
 		issue.ID, err = newIssueID(ctx, tx, prefix, issue.Topic, issue.Title, issue.Description, createdBy, issue.CreatedAt, parentID)
 		if err != nil {
@@ -828,13 +831,16 @@ func (s *Store) UpdateIssue(ctx context.Context, id string, in UpdateIssueInput)
 
 // [LAW:dataflow-not-control-flow] ApplyUpdate is the single execution path for all lit update mutations.
 // Variability lives in the input values: empty TargetStatus = no transitions; empty Fields = no field write.
+// Empty TargetStatus must not be normalized — DefaultOpen("") would mutate the "no --status flag" signal
+// into a real "open" target, which then fails the transition lookup for containers (StatusValue == "").
 func (s *Store) ApplyUpdate(ctx context.Context, id string, in ApplyUpdateInput) (model.Issue, error) {
 	current, err := s.GetIssue(ctx, id)
 	if err != nil {
 		return model.Issue{}, err
 	}
-	normalizedTarget := model.DefaultOpen(in.TargetStatus)
-	in.TargetStatus = string(normalizedTarget)
+	if strings.TrimSpace(in.TargetStatus) != "" {
+		in.TargetStatus = string(model.DefaultOpen(in.TargetStatus))
+	}
 	actions, err := statusTransitionActionsForApplyUpdate(current.StatusValue(), in.TargetStatus)
 	if err != nil {
 		return model.Issue{}, err
