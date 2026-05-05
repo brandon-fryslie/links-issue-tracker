@@ -127,9 +127,9 @@ func ProjectPath(workspaceRoot string, name string) string {
 // ActiveOverride returns the highest-priority existing override (project > global)
 // for name. When neither layer has a file, the returned path is empty and content
 // is nil. Filesystem errors other than "not exist" are propagated.
-// [LAW:one-source-of-truth] Source is the single canonical enum for template-origin
-// state; callers that need the layer can distinguish project vs global from the
-// returned path.
+// [LAW:one-source-of-truth] This helper resolves only the project/global override
+// layers; callers that need to know which override layer was selected can infer it
+// from the returned path.
 func ActiveOverride(workspaceRoot string, name string) (path string, content []byte, err error) {
 	// [LAW:dataflow-not-control-flow] Inspect both layers in fixed order; presence/absence is data, not branching.
 	candidatePaths := []string{
