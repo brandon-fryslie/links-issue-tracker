@@ -250,6 +250,42 @@ func TestQuickstartRefreshShowsGlobalSourceForAgentsSection(t *testing.T) {
 	}
 }
 
+func TestQuickstartRefreshShowsProjectSourceForAgentsSection(t *testing.T) {
+	xdg := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", xdg)
+	repo := t.TempDir()
+	runGit(t, repo, "init")
+
+	embedded, err := templates.EmbeddedDefault(templates.AgentsSectionTemplateName)
+	if err != nil {
+		t.Fatalf("EmbeddedDefault() error = %v", err)
+	}
+	projectPath := filepath.Join(repo, ".lit", "templates", templates.AgentsSectionTemplateName)
+	if err := os.MkdirAll(filepath.Dir(projectPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(project templates) error = %v", err)
+	}
+	if err := os.WriteFile(projectPath, embedded, 0o644); err != nil {
+		t.Fatalf("WriteFile(project override) error = %v", err)
+	}
+
+	prevWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("Getwd() error = %v", err)
+	}
+	if err := os.Chdir(repo); err != nil {
+		t.Fatalf("Chdir(repo) error = %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prevWD) })
+
+	output := runQuickstartRefresh(t)
+	if !strings.Contains(output, "AGENTS.md (via project)") {
+		t.Fatalf("quickstart refresh output = %q, want agents source = via project", output)
+	}
+	if !strings.Contains(output, "CLAUDE.md (via project)") {
+		t.Fatalf("quickstart refresh output = %q, want claude source = via project", output)
+	}
+}
+
 func runQuickstartRefresh(t *testing.T) string {
 	t.Helper()
 	var stdout bytes.Buffer

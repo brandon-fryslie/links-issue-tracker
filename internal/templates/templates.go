@@ -124,42 +124,32 @@ func ProjectPath(workspaceRoot string, name string) string {
 	return projectTemplatePath(workspaceRoot, name)
 }
 
-// OverrideLayer identifies which override layer a resolved file came from.
-type OverrideLayer string
-
-const (
-	OverrideLayerNone    OverrideLayer = ""
-	OverrideLayerProject OverrideLayer = "project"
-	OverrideLayerGlobal  OverrideLayer = "global"
-)
-
 // ActiveOverride returns the highest-priority existing override (project > global)
-// for name. When neither layer has a file, the returned path is empty, content is
-// nil, and Layer is OverrideLayerNone. Filesystem errors other than "not exist" are
-// propagated.
-func ActiveOverride(workspaceRoot string, name string) (path string, content []byte, layer OverrideLayer, err error) {
+// for name. When neither layer has a file, the returned path is empty and content
+// is nil. Filesystem errors other than "not exist" are propagated.
+// [LAW:one-source-of-truth] Source is the single canonical enum for template-origin
+// state; callers that need the layer can distinguish project vs global from the
+// returned path.
+func ActiveOverride(workspaceRoot string, name string) (path string, content []byte, err error) {
 	// [LAW:dataflow-not-control-flow] Inspect both layers in fixed order; presence/absence is data, not branching.
-	candidates := []struct {
-		layer OverrideLayer
-		path  string
-	}{
-		{OverrideLayerProject, projectTemplatePath(workspaceRoot, name)},
-		{OverrideLayerGlobal, GlobalPath(name)},
+	candidatePaths := []string{
+		projectTemplatePath(workspaceRoot, name),
+		GlobalPath(name),
 	}
-	for _, c := range candidates {
-		if strings.TrimSpace(c.path) == "" {
+	for _, p := range candidatePaths {
+		if strings.TrimSpace(p) == "" {
 			continue
 		}
-		raw, readErr := os.ReadFile(c.path)
+		raw, readErr := os.ReadFile(p)
 		if readErr != nil {
 			if errors.Is(readErr, os.ErrNotExist) {
 				continue
 			}
-			return "", nil, OverrideLayerNone, readErr
+			return "", nil, readErr
 		}
-		return c.path, raw, c.layer, nil
+		return p, raw, nil
 	}
-	return "", nil, OverrideLayerNone, nil
+	return "", nil, nil
 }
 
 func readOptionalFile(path string) (string, error) {
