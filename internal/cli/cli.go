@@ -939,7 +939,11 @@ func runTransition(ctx context.Context, stdout io.Writer, ap *app.App, args []st
 
 	issueID := remaining[0]
 	isJSON := *jsonOut || outputModeFromWriter(stdout) == outputModeJSON
-	applyRequested := *applyVal != ""
+	// [LAW:types-are-the-program] Apply intent is "did the caller pass --apply
+	// in any form" — both `--apply` (no value) and `--apply=` (explicit empty)
+	// are apply attempts whose tokens cannot match the expected hash.
+	// `*applyVal != ""` would mis-classify the empty-value form as "no apply".
+	applyRequested := fs.Changed("apply")
 
 	// [LAW:dataflow-not-control-flow] Pre-guidance template existence is the data
 	// that activates the two-phase (preview/apply) flow. When the template exists
@@ -954,6 +958,15 @@ func runTransition(ctx context.Context, stdout io.Writer, ap *app.App, args []st
 	guided := hasPreGuidance && !isJSON
 
 	if guided {
+		// [LAW:types-are-the-program] In guided mode the pre-guidance template
+		// is the only surface that communicates the apply token to the agent.
+		// A template that omits `<token>` cannot satisfy that contract — apply
+		// would refuse with no way to discover the token. Refuse at load time
+		// and name the offending override so the user can fix it.
+		if err := requireTokenPlaceholder(preGuidance, action, ap.Workspace.RootDir); err != nil {
+			return err
+		}
+
 		// [LAW:types-are-the-program] The token is a function of the plan
 		// (action + id + the issue's UpdatedAt fingerprint). Reading the issue
 		// before transitioning lets the apply phase recompute the same hash and

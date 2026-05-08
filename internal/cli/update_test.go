@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -125,6 +127,72 @@ func TestRunTransitionDoneApplyWithoutTokenRefusesWithShortMessage(t *testing.T)
 	}
 	if detail.Issue.State() != model.StateInProgress {
 		t.Fatalf("issue should still be in_progress after refusal, got %q", detail.Issue.State())
+	}
+}
+
+func TestRunTransitionDoneApplyEmptyValueIsRefused(t *testing.T) {
+	ctx := context.Background()
+	ap := newTestCLIApp(t)
+
+	issue, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{Prefix: "test",
+		Title: "Empty-value test", Topic: "guidance", IssueType: "task", Priority: 0,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue() error = %v", err)
+	}
+	if _, err := ap.Store.TransitionIssue(ctx, store.TransitionIssueInput{IssueID: issue.ID, Action: "start", CreatedBy: "tester"}); err != nil {
+		t.Fatalf("TransitionIssue(start) error = %v", err)
+	}
+
+	// `--apply=` (explicit empty value) is an apply attempt with a malformed
+	// token, not a missing flag — it must refuse just like `--apply` and
+	// `--apply=deadbeef`.
+	var stdout bytes.Buffer
+	err = runTransition(ctx, &stdout, ap, []string{issue.ID, "--apply="}, "done")
+	if err == nil {
+		t.Fatal("runTransition(done --apply=) returned nil; expected refusal")
+	}
+	want := "run `lit done " + issue.ID + "` first"
+	if err.Error() != want {
+		t.Fatalf("error = %q, want %q", err.Error(), want)
+	}
+}
+
+func TestRunTransitionDonePreGuidanceMissingTokenPlaceholderRefusesAtLoad(t *testing.T) {
+	ctx := context.Background()
+	ap := newTestCLIApp(t)
+
+	// Project override that omits the required <token> placeholder. Without
+	// the placeholder, the agent could not discover the apply token, so the
+	// command refuses at load time and names the file to fix.
+	overridePath := filepath.Join(ap.Workspace.RootDir, ".lit", "templates", "guidance-done-pre.md")
+	if err := os.MkdirAll(filepath.Dir(overridePath), 0o755); err != nil {
+		t.Fatalf("MkdirAll() error = %v", err)
+	}
+	if err := os.WriteFile(overridePath, []byte("Run `lit done <id> --apply` to close.\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile() error = %v", err)
+	}
+
+	issue, err := ap.Store.CreateIssue(ctx, store.CreateIssueInput{Prefix: "test",
+		Title: "Missing-token test", Topic: "guidance", IssueType: "task", Priority: 0,
+	})
+	if err != nil {
+		t.Fatalf("CreateIssue() error = %v", err)
+	}
+	if _, err := ap.Store.TransitionIssue(ctx, store.TransitionIssueInput{IssueID: issue.ID, Action: "start", CreatedBy: "tester"}); err != nil {
+		t.Fatalf("TransitionIssue(start) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	err = runTransition(ctx, &stdout, ap, []string{issue.ID}, "done")
+	if err == nil {
+		t.Fatal("runTransition(done) returned nil; expected template-validation error")
+	}
+	if !strings.Contains(err.Error(), "<token>") {
+		t.Fatalf("error = %q, want mention of <token>", err.Error())
+	}
+	if !strings.Contains(err.Error(), overridePath) {
+		t.Fatalf("error = %q, want override path %q", err.Error(), overridePath)
 	}
 }
 
