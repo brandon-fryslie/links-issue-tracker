@@ -32,6 +32,7 @@ var smokeProbes = []smokeProbe{
 	{Name: "issue_events", SQL: "SELECT id, issue_id, action, reason, actor FROM issue_events LIMIT 1"},
 	{Name: "issue_event_changes", SQL: "SELECT event_id, field, from_value, to_value FROM issue_event_changes LIMIT 1"},
 	{Name: "migration_quarantine", SQL: "SELECT version_id, reason, quarantined_at FROM migration_quarantine LIMIT 1"},
+	{Name: "migration_log", SQL: "SELECT id, version, status FROM migration_log LIMIT 1"},
 }
 
 // runSmokeTests executes every probe in registration order. Returns the

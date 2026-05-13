@@ -18,7 +18,7 @@ import (
 // are the two writers of "what version range this binary supports". The
 // compat-window gate (checkCompatWindow) is the runtime check that catches
 // drift between them.
-const codeVersion int64 = 2
+const codeVersion int64 = 3
 
 // testBinaryCodeVersionOverride, when non-nil, replaces codeVersion for the
 // duration of a test so skew tests can simulate an older or newer binary
@@ -49,6 +49,8 @@ var migrationMinCodeVersions = map[int64]int64{
 	// 2: 1 — migration_quarantine table; runner-managed, no new code surface
 	//        callers depend on, so an older binary can still operate workspaces
 	//        where it is present (the runner just sees the empty table).
+	// 3: 1 — migration_log table; write-only observability surface, no callers
+	//        depend on reading it, so an older binary can still operate.
 }
 
 // minCodeVersionFor returns the minimum binary codeVersion required to
