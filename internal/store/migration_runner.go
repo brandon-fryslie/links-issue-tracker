@@ -53,7 +53,17 @@ func (s *Store) runMigrations(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("apply pending migrations: %w", err)
 	}
-	return adopted || len(results) > 0, nil
+	applied := make([]int64, 0, len(results))
+	for _, r := range results {
+		if r != nil && r.Source != nil {
+			applied = append(applied, r.Source.Version)
+		}
+	}
+	floorChanged, err := s.advanceCompatFloor(ctx, collectSettledVersions(adopted, applied))
+	if err != nil {
+		return false, fmt.Errorf("advance code_compat_floor: %w", err)
+	}
+	return adopted || len(results) > 0 || floorChanged, nil
 }
 
 // adoptPreGooseWorkspace detects workspaces that predate goose (application
