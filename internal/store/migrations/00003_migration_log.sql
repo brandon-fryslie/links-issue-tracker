@@ -3,9 +3,11 @@
 -- [LAW:one-source-of-truth] goose_db_version is the authority on "applied".
 -- migration_log exists solely for operator and CI inspection.
 --
--- Rows survive failures; deleting on failure would erase the most useful
--- record. A `running` row that has no matching `success`/`failure` row
--- indicates a process crash mid-migration.
+-- Rows are written only after a migration completes (success after
+-- ApplyVersion, failure after the auto-revert reset). The status column
+-- carries 'success' or 'failure'; there is no in-flight 'running' state
+-- today. Absence of a row for a given version means the migration never
+-- ran on this workspace, not that the process crashed mid-way.
 
 -- +goose Up
 -- +goose StatementBegin

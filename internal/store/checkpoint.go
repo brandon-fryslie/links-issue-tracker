@@ -62,10 +62,13 @@ func (s *Store) CreateCheckpoint(ctx context.Context, prefix string, retain int)
 	return cp, nil
 }
 
-// ResetToCheckpoint hard-resets the active branch (master) to the named
-// checkpoint. Caller must hold the commit lock; the reset moves HEAD and
-// clears any unstaged working set, so any concurrent reader would otherwise
-// see torn state.
+// ResetToCheckpoint hard-resets the connection's active Dolt branch to the
+// named checkpoint. The store may operate on any branch (bootstrap renames
+// brand-new single-branch repos to master, but already-initialized repos
+// keep whichever branch they were opened on), so the reset moves *that*
+// branch, not necessarily master. Caller must hold the commit lock; the
+// reset moves HEAD and clears any unstaged working set, so any concurrent
+// reader would otherwise see torn state.
 func (s *Store) ResetToCheckpoint(ctx context.Context, name string) error {
 	trimmed := strings.TrimSpace(name)
 	if trimmed == "" {
@@ -82,6 +85,16 @@ func (s *Store) ResetToCheckpoint(ctx context.Context, name string) error {
 // silently skipped — only this file authors checkpoint names, so a
 // non-parsing suffix means the branch came from elsewhere and is not part of
 // the checkpoint set.
+//
+// Limitation: checkpoint names are scoped by prefix + timestamp only, not
+// by which Dolt branch authored them. The store's typical usage pattern
+// keeps each workspace on a single application branch (master in the
+// common case), so cross-branch collisions are not currently observable.
+// If a future feature operates the same workspace across multiple Dolt
+// branches concurrently, the prefix scheme will need an active-branch
+// component to disambiguate. [LAW:single-enforcer] this file owns the
+// naming scheme, so a future migration can update format + parser
+// together.
 func (s *Store) ListCheckpoints(ctx context.Context, prefix string) ([]Checkpoint, error) {
 	if !checkpointPrefixPattern.MatchString(prefix) {
 		return nil, fmt.Errorf("checkpoint prefix %q is invalid (must match %s)", prefix, checkpointPrefixPattern)

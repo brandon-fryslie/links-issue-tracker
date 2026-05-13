@@ -45,12 +45,21 @@ func effectiveCodeVersion() int64 {
 // migration is applied cannot be opened by binaries with codeVersion below
 // this number. The compat-window gate enforces that.
 var migrationMinCodeVersions = map[int64]int64{
+	// Each migration's min_code_version controls only the workspace's
+	// code_compat_floor — the lower bound that `workspace_requires_newer_binary`
+	// checks against. checkCompatWindow ALSO refuses workspaces whose
+	// goose_db_version MAX exceeds the binary's codeVersion regardless of
+	// min_code_version, so the entries below describe how *much* of the
+	// floor each migration claims, not whether older binaries can run it.
+	// The "no code surface required" framing matters when a future migration
+	// declares min_code_version > 1 (then it locks out older binaries even
+	// though its data shape might be inert).
+	//
 	// 1: 1 — baseline; default. Listed for documentation only.
-	// 2: 1 — migration_quarantine table; runner-managed, no new code surface
-	//        callers depend on, so an older binary can still operate workspaces
-	//        where it is present (the runner just sees the empty table).
-	// 3: 1 — migration_log table; write-only observability surface, no callers
-	//        depend on reading it, so an older binary can still operate.
+	// 2: 1 — migration_quarantine table; runner-managed, no caller surface
+	//        depends on it, so its floor stays at 1.
+	// 3: 1 — migration_log table; write-only observability surface, no
+	//        caller depends on reading it, so its floor stays at 1.
 }
 
 // minCodeVersionFor returns the minimum binary codeVersion required to

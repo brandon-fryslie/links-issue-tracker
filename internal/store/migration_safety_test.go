@@ -26,7 +26,9 @@ func TestRunnerAutoRevertsBrokenMigration(t *testing.T) {
 	doltRoot := filepath.Join(t.TempDir(), "dolt")
 	const wsID = "auto-revert-id"
 
-	// First Open with no extras: workspace lands on baseline + 00002.
+	// First Open with no extras: workspace lands on baseline + every
+	// post-baseline SQL migration (00002 migration_quarantine + 00003
+	// migration_log).
 	first, err := Open(ctx, doltRoot, wsID)
 	if err != nil {
 		t.Fatalf("first Open() error = %v", err)

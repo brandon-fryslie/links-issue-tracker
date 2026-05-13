@@ -102,11 +102,18 @@ var extraMigrationProviderOptions func() []goose.ProviderOption
 // every line is one valid JSON object regardless of what callers pass.
 func emitMigrationEvent(name string, fields map[string]any) {
 	m := make(map[string]any, len(fields)+2)
-	m["ts"] = time.Now().UTC().Format(time.RFC3339)
-	m["event"] = name
+	// Merge caller fields first, then write the mandatory ts/event keys so
+	// they can never be overwritten by a stray caller. The runner itself
+	// never passes ts/event in fields; this guard exists to keep the event
+	// contract honored even if a future caller drifts.
 	for k, v := range fields {
+		if k == "ts" || k == "event" {
+			continue
+		}
 		m[k] = v
 	}
+	m["ts"] = time.Now().UTC().Format(time.RFC3339)
+	m["event"] = name
 	b, err := json.Marshal(m)
 	if err != nil {
 		fallback, _ := json.Marshal(map[string]any{
@@ -145,15 +152,6 @@ func (s *Store) runMigrations(ctx context.Context) (bool, error) {
 	// code path regardless.
 	dryRun := os.Getenv("LIT_MIGRATE_DRY_RUN") == "1"
 
-	safety, err := s.CreateCheckpoint(ctx, preMigrateCheckpointPrefix, preMigrateCheckpointRetain)
-	if err != nil {
-		return false, &MigrationError{Phase: "checkpoint", Cause: fmt.Errorf("create pre-migrate safety branch: %w", err)}
-	}
-	emitMigrationEvent("safety_branch.created", map[string]any{
-		"name":   safety.Name,
-		"commit": safety.CommitSHA,
-	})
-
 	quarantined, err := readQuarantinedVersions(ctx, s.db)
 	if err != nil {
 		return false, &MigrationError{Phase: "quarantine_read", Cause: err}
@@ -163,6 +161,71 @@ func (s *Store) runMigrations(ctx context.Context) (bool, error) {
 			"version": v,
 		})
 	}
+
+	opts := []goose.ProviderOption{}
+	if len(quarantined) > 0 {
+		opts = append(opts, goose.WithExcludeVersions(quarantined))
+	}
+	if extraMigrationProviderOptions != nil {
+		opts = append(opts, extraMigrationProviderOptions()...)
+	}
+
+	adoptionNeeded, err := needsAdoption(ctx, s.db)
+	if err != nil {
+		return false, &MigrationError{Phase: "adoption", Cause: fmt.Errorf("probe adoption: %w", err)}
+	}
+
+	// Skip the safety branch entirely when there's no work to do. Without
+	// this short-circuit every Open would accumulate a `pre-migrate-<ns>`
+	// branch at the current HEAD, which is wasted retention budget and —
+	// more importantly — would let `lit doctor --reset-to-pre-migration`
+	// pick a checkpoint that is "the state right before this no-op Open",
+	// i.e. the same as current state. The reset is meaningful only when
+	// the runner is about to mutate, so the checkpoint is created only
+	// then. [LAW:dataflow-not-control-flow] every Open still runs the
+	// same probe sequence; what varies is the data (whether adoption or
+	// pending migrations exist) and therefore whether the work block runs.
+	//
+	// When adoption is needed we know there's work (adoption itself
+	// qualifies) without inspecting pending — and crucially, we must NOT
+	// build the goose Provider here because Provider construction creates
+	// the `goose_db_version` table, which would flip the adoption probe to
+	// "already on goose" and skip the reconciliation path that pre-goose
+	// workspaces require.
+	var provider *goose.Provider
+	if !adoptionNeeded {
+		provider, err = goose.NewProvider(gooseDialect, s.db, migrations.FS, opts...)
+		if err != nil {
+			return false, &MigrationError{Phase: "provider", Cause: fmt.Errorf("build goose provider: %w", err)}
+		}
+		pending, err := pendingMigrations(ctx, provider)
+		if err != nil {
+			return false, &MigrationError{Phase: "status", Cause: fmt.Errorf("get pending migrations: %w", err)}
+		}
+		if len(pending) == 0 {
+			floorChanged, err := s.advanceCompatFloor(ctx, collectSettledVersions(false, nil))
+			if err != nil {
+				return false, &MigrationError{Phase: "advance_floor", Cause: fmt.Errorf("advance code_compat_floor: %w", err)}
+			}
+			if dryRun {
+				emitMigrationEvent("dry_run.summary", map[string]any{
+					"pending":   0,
+					"validated": 0,
+				})
+				return false, ErrDryRun
+			}
+			return floorChanged, nil
+		}
+	}
+
+	safety, err := s.CreateCheckpoint(ctx, preMigrateCheckpointPrefix, preMigrateCheckpointRetain)
+	if err != nil {
+		return false, &MigrationError{Phase: "checkpoint", Cause: fmt.Errorf("create pre-migrate safety branch: %w", err)}
+	}
+	emitMigrationEvent("safety_branch.created", map[string]any{
+		"name":   safety.Name,
+		"commit": safety.CommitSHA,
+	})
 
 	adopted, err := s.adoptPreGooseWorkspace(ctx)
 	if err != nil {
@@ -193,23 +256,21 @@ func (s *Store) runMigrations(ctx context.Context) (bool, error) {
 		}
 	}
 
-	opts := []goose.ProviderOption{}
-	if len(quarantined) > 0 {
-		opts = append(opts, goose.WithExcludeVersions(quarantined))
-	}
-	if extraMigrationProviderOptions != nil {
-		opts = append(opts, extraMigrationProviderOptions()...)
-	}
-	provider, err := goose.NewProvider(gooseDialect, s.db, migrations.FS, opts...)
-	if err != nil {
-		if dryRun {
-			return false, s.revertDryRun(ctx, safety, "provider", 0, fmt.Errorf("build goose provider: %w", err))
+	// Build (or rebuild) the provider after adoption: goose's Provider
+	// snapshots state at construction time, so the post-stamp pending
+	// list must come from a Provider built AFTER stampGooseBaseline.
+	// When adoption was needed we deferred provider construction until
+	// here; when no adoption fired, we rebuild to pick up any state goose
+	// itself produced during its initial Status query above.
+	if adopted || provider == nil {
+		provider, err = goose.NewProvider(gooseDialect, s.db, migrations.FS, opts...)
+		if err != nil {
+			if dryRun {
+				return false, s.revertDryRun(ctx, safety, "provider", 0, fmt.Errorf("build goose provider: %w", err))
+			}
+			return false, s.revertWithQuarantine(ctx, safety, "provider", 0, fmt.Errorf("build goose provider: %w", err))
 		}
-		return false, s.revertWithQuarantine(ctx, safety, "provider", 0, fmt.Errorf("build goose provider: %w", err))
 	}
-	// Apply migrations one at a time so each successful migration gets its
-	// own Dolt commit. goose's Provider has no per-migration commit hook, so
-	// we drive it with ApplyVersion in version order.
 	pending, err := pendingMigrations(ctx, provider)
 	if err != nil {
 		if dryRun {
@@ -236,7 +297,15 @@ func (s *Store) runMigrations(ctx context.Context) (bool, error) {
 			// same Dolt commit as the migration's schema changes.
 			s.writeMigrationLogSuccess(ctx, m.version, m.name, result.Duration.Milliseconds())
 			if err := s.commitMigration(ctx, result); err != nil {
-				return false, s.revertWithQuarantine(ctx, safety, "up", m.version, fmt.Errorf("commit migration v%d: %w", m.version, err))
+				// Phase is "commit", NOT "up", and version=0 so the migration
+				// is NOT quarantined: the body applied cleanly and the
+				// migration is logically correct. We still revert to the
+				// safety branch so the workspace stays consistent, but on
+				// the next Open the migration will be re-applied (retried)
+				// rather than excluded. [LAW:single-enforcer] quarantine is
+				// for migrations whose *body* is bad, not commits whose
+				// *commit step* failed transiently.
+				return false, s.revertWithQuarantine(ctx, safety, "commit", 0, fmt.Errorf("commit migration v%d: %w", m.version, err))
 			}
 		}
 		results = append(results, result)
@@ -296,6 +365,13 @@ const migrationCommitAuthor = "lit-migrate <bot@local>"
 // commitMigration writes a structured Dolt commit for a single applied
 // migration. The commit message body carries machine-parseable key=value
 // fields for forensic log inspection. Author is always migrationCommitAuthor.
+//
+// The actual DOLT_COMMIT runs inside retryTransientManifestReadOnly so a
+// transient manifest-read-only error during a per-migration commit gets
+// the same retry treatment as user-driven commits do via commitWorkingSet.
+// [LAW:single-enforcer] retryTransientManifestReadOnly is the single
+// transient-commit retry policy; bypassing it here would make migration
+// commits more brittle than ordinary mutations.
 func (s *Store) commitMigration(ctx context.Context, result *goose.MigrationResult) error {
 	if result == nil || result.Source == nil {
 		return nil
@@ -306,16 +382,27 @@ func (s *Store) commitMigration(ctx context.Context, result *goose.MigrationResu
 		result.Duration.Milliseconds(),
 		result.Source.Path)
 	var commitHash string
-	if err := s.db.QueryRowContext(ctx, `CALL DOLT_COMMIT('-Am', ?, '--author', ?)`, msg, migrationCommitAuthor).Scan(&commitHash); err != nil {
-		if strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
-			emitMigrationEvent("migrate.commit", map[string]any{
-				"version":     result.Source.Version,
-				"duration_ms": result.Duration.Milliseconds(),
-				"noop":        true,
-			})
-			return nil
+	var noop bool
+	err := retryTransientManifestReadOnly(ctx, func(ctx context.Context) error {
+		if cerr := s.db.QueryRowContext(ctx, `CALL DOLT_COMMIT('-Am', ?, '--author', ?)`, msg, migrationCommitAuthor).Scan(&commitHash); cerr != nil {
+			if strings.Contains(strings.ToLower(cerr.Error()), "nothing to commit") {
+				noop = true
+				return nil
+			}
+			return cerr
 		}
+		return nil
+	}, transientManifestRetryDelay, waitWithContext)
+	if err != nil {
 		return fmt.Errorf("commit migration v%d: %w", result.Source.Version, err)
+	}
+	if noop {
+		emitMigrationEvent("migrate.commit", map[string]any{
+			"version":     result.Source.Version,
+			"duration_ms": result.Duration.Milliseconds(),
+			"noop":        true,
+		})
+		return nil
 	}
 	emitMigrationEvent("migrate.commit", map[string]any{
 		"version":     result.Source.Version,
@@ -327,10 +414,16 @@ func (s *Store) commitMigration(ctx context.Context, result *goose.MigrationResu
 
 // writeMigrationLogSuccess writes a success row to migration_log. It is
 // called BEFORE commitMigration so the row is included in the same Dolt
-// commit as the migration's schema changes. Best-effort: if migration_log
-// does not yet exist (migrations 1 and 2 run before migration 3 creates it)
-// the write fails silently via the event log.
+// commit as the migration's schema changes. On a fresh workspace
+// migrations 1 and 2 run before migration 3 creates the table — we probe
+// for its existence first and silently skip when absent, so the happy
+// path stays clean. Real write failures (table exists but the INSERT
+// errors) still surface as `migration_log.write_failed` events.
 func (s *Store) writeMigrationLogSuccess(ctx context.Context, version int64, name string, durationMs int64) {
+	exists, err := tableExists(ctx, s.db, "migration_log")
+	if err != nil || !exists {
+		return
+	}
 	finishedAt := time.Now().UTC()
 	startedAt := finishedAt.Add(-time.Duration(durationMs) * time.Millisecond)
 	if _, err := s.db.ExecContext(ctx,
@@ -347,9 +440,13 @@ func (s *Store) writeMigrationLogSuccess(ctx context.Context, version int64, nam
 
 // writeMigrationLogFailure writes a failure row to migration_log. It is
 // called AFTER ResetToCheckpoint in revertWithQuarantine so the row survives
-// the reset and is committed alongside the quarantine row. Best-effort: same
-// table-existence caveat as writeMigrationLogSuccess.
+// the reset and is committed alongside the quarantine row. Same probe-then-
+// write shape as writeMigrationLogSuccess so happy paths stay clean.
 func (s *Store) writeMigrationLogFailure(ctx context.Context, version int64, errText string) {
+	exists, err := tableExists(ctx, s.db, "migration_log")
+	if err != nil || !exists {
+		return
+	}
 	now := time.Now().UTC()
 	if _, err := s.db.ExecContext(ctx,
 		`INSERT INTO migration_log
@@ -500,6 +597,25 @@ func collectSettledVersions(adopted bool, results []*goose.MigrationResult) []in
 		}
 	}
 	return versions
+}
+
+// needsAdoption returns true iff the workspace requires the legacy
+// pre-goose reconciliation path: application tables are present but
+// goose_db_version is not. Read-only probe; runMigrations uses it to
+// decide whether to create a safety branch before any state mutates.
+func needsAdoption(ctx context.Context, db *sql.DB) (bool, error) {
+	gooseExists, err := tableExists(ctx, db, gooseVersionTable)
+	if err != nil {
+		return false, err
+	}
+	if gooseExists {
+		return false, nil
+	}
+	appExists, err := tableExists(ctx, db, "issues")
+	if err != nil {
+		return false, err
+	}
+	return appExists, nil
 }
 
 // adoptPreGooseWorkspace detects workspaces that predate goose (application

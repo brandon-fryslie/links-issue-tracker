@@ -450,12 +450,10 @@ func TestMigrationCommitMessageFormat(t *testing.T) {
 	}
 }
 
-// TestMigrationLogSuccessRow verifies that after a successful Open the
-// migration_log table contains at least one row with status='success', NULL
 // parseMigrateCommitEvents scans migrationEventWriter output for JSON
 // lines with event="migrate.commit" and returns the version numbers in the
-// order they appear.  Used by per-migration-commit tests to assert order and
-// completeness without depending on dolt_log state after a rollback.
+// order they appear. Used by per-migration-commit tests to assert order
+// and completeness without depending on dolt_log state after a rollback.
 func parseMigrateCommitEvents(t *testing.T, output string) []int64 {
 	t.Helper()
 	var versions []int64

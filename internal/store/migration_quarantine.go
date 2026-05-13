@@ -104,13 +104,13 @@ var ErrNoPreMigrationCheckpoint = errors.New("no pre-migrate safety branch found
 // Order matters here:
 //   - Read goose_db_version BEFORE reset (the rows for the offending
 //     versions are about to vanish).
-//   - Reset master to the safety branch.
-//   - Insert quarantine rows on the now-pre-migration master.
+//   - Reset the connection's active Dolt branch to the safety branch.
+//   - Insert quarantine rows on the now-pre-migration active branch.
 //   - Commit.
 //
 // Inserting before reset would write the quarantine row to a commit that
 // the reset then discards. The current ordering keeps the quarantine on
-// the live master after reset.
+// the live active branch after reset.
 //
 // [LAW:single-enforcer] This function is the only writer of the
 // "manual reset + quarantine" flow; the auto-revert path owns the

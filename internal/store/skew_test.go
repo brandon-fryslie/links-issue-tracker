@@ -26,8 +26,15 @@ func TestSkewFloorAdvancedByMigrationGatesOlderBinary(t *testing.T) {
 
 	// Declare migration 3 as requiring the current codeVersion so the runner
 	// advances the floor to codeVersion after it applies.
+	prevMin, hadPrev := migrationMinCodeVersions[3]
 	migrationMinCodeVersions[3] = codeVersion
-	t.Cleanup(func() { delete(migrationMinCodeVersions, 3) })
+	t.Cleanup(func() {
+		if hadPrev {
+			migrationMinCodeVersions[3] = prevMin
+		} else {
+			delete(migrationMinCodeVersions, 3)
+		}
+	})
 
 	// First Open: applies migrations 1–3; advanceCompatFloor bumps floor to codeVersion.
 	first, err := Open(ctx, doltRoot, wsID)
@@ -59,10 +66,24 @@ func TestSkewFloorAdvancedByMigrationGatesOlderBinary(t *testing.T) {
 	}
 }
 
-// TestSkewAppliesPendingMigrationWhenBehind covers the DB-behind-binary case:
-// the runner advances a workspace that has a pending migration the binary
-// knows about, and succeeds.
-func TestSkewAppliesPendingMigrationWhenBehind(t *testing.T) {
+// TestSkewAppliesInjectedPendingMigrationWhenInWindow covers the runner's
+// happy path for advancing a workspace through a pending migration that
+// would (after applying) keep the workspace within the binary's
+// compat-window:
+//   - first Open settles at real migrations 1–3 (top=3, codeVersion=3,
+//     in-window).
+//   - the test seam registers an extra Go migration at pendingVersion and
+//     lifts the effective binary codeVersion to pendingVersion so the gate
+//     accepts the post-apply state.
+//   - second Open applies the pending migration successfully and ends with
+//     goose_db_version=pendingVersion.
+//
+// (The earlier framing of "DB behind binary" was misleading — the version
+// numbers here exist only as test injections, not as a real older-vs-newer
+// binary scenario. checkCompatWindow refuses workspaces whose goose top
+// exceeds codeVersion, so the override is necessary to keep the second
+// Open's post-apply state in-window.)
+func TestSkewAppliesInjectedPendingMigrationWhenInWindow(t *testing.T) {
 	ctx := context.Background()
 	doltRoot := filepath.Join(t.TempDir(), "dolt")
 	const wsID = "skew-advance-id"
@@ -79,6 +100,12 @@ func TestSkewAppliesPendingMigrationWhenBehind(t *testing.T) {
 
 	// Register v99993 as a pending successful migration.
 	t.Cleanup(installSuccessfulMigration(pendingVersion))
+	// Override binary codeVersion so the post-apply state (top=99993) is
+	// still in-window — otherwise checkCompatWindow refuses the second Open.
+	override := pendingVersion
+	prevOverride := testBinaryCodeVersionOverride
+	testBinaryCodeVersionOverride = &override
+	t.Cleanup(func() { testBinaryCodeVersionOverride = prevOverride })
 
 	// Second Open: runner sees v99993 pending → applies it → succeeds.
 	second, err := Open(ctx, doltRoot, wsID)
