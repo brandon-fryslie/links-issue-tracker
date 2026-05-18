@@ -5,11 +5,27 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/bmf/links-issue-tracker/internal/model"
 	"github.com/bmf/links-issue-tracker/internal/rank"
 )
+
+// CurrentSchemaVersion is the schema version this binary knows how to produce.
+// Bumped exactly when a new migration step is appended to slowPathReconcile.
+// Paired with the workspace's `meta.schema_version` row — equality routes
+// Open() to the fast path; inequality routes to slow-path reconciliation.
+// See design-docs/MIGRATION-ARCHITECTURE.md.
+// [LAW:one-source-of-truth] Single integer the migration contract pivots on.
+const CurrentSchemaVersion = 1
+
+// schemaVersionAbsent is the sentinel readSchemaStamp returns when the meta
+// table is missing (fresh database), no schema_version row exists, or the
+// stored value does not parse as a non-negative integer. All three are
+// equivalent to "stamp absent" for routing purposes — the slow path treats
+// them identically.
+const schemaVersionAbsent = -1
 
 // priorityCheckClause is the schema-level encoding of the priority range
 // invariant. Derived from the canonical model.Priority* constants and shared
@@ -50,7 +66,133 @@ func createIssuesTableStmt() string {
 		);`, canonicalStatusCheckClause, priorityCheckClause)
 }
 
+// MigrationQueryCount returns the number of SQL queries the most recent
+// migrate() call issued. Exposed for the no-op-Open query-count assertion;
+// callers outside tests should ignore this. See
+// design-docs/MIGRATION-ARCHITECTURE.md.
+func (s *Store) MigrationQueryCount() int {
+	return s.migrationQueryCount
+}
+
+// migrate is the single entrypoint Open and OpenForRead use to bring the
+// workspace into a state the binary can talk to. Two paths exist; the
+// workspace stamp picks one:
+//
+//   - Fast path (stamp == CurrentSchemaVersion): three queries — read stamp,
+//     ensure workspace_id, smoke probe. No DDL, no information_schema, no
+//     reconciliation. This is the steady-state cost of every CLI invocation.
+//   - Slow path (everything else): take a snapshot once r5v9.5 lands, run the
+//     idempotent reconciliation block below, then write the stamp atomically
+//     with the schema change.
+//
+// [LAW:types-are-the-program] The stamp is the discriminator; path selection
+// follows from data, not probe results.
+// [LAW:single-enforcer] Stamp comparison happens here exactly once — the rest
+// of the store treats whichever path ran as authoritative.
 func (s *Store) migrate(ctx context.Context) error {
+	s.migrationQueryCount = 0
+	stamp, err := s.readSchemaStamp(ctx)
+	if err != nil {
+		return err
+	}
+	if stamp == CurrentSchemaVersion {
+		return s.fastPath(ctx)
+	}
+	return s.slowPathReconcile(ctx, stamp)
+}
+
+// readSchemaStamp returns the workspace's recorded schema version, or
+// schemaVersionAbsent when the meta table or row is missing or the value is
+// unparseable. Counted as one migration query.
+func (s *Store) readSchemaStamp(ctx context.Context) (int, error) {
+	s.migrationQueryCount++
+	var raw string
+	err := s.db.QueryRowContext(ctx, `SELECT meta_value FROM meta WHERE meta_key = ?`, "schema_version").Scan(&raw)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) || isMissingMetaTableError(err) {
+			return schemaVersionAbsent, nil
+		}
+		return schemaVersionAbsent, fmt.Errorf("read schema stamp: %w", err)
+	}
+	parsed, parseErr := strconv.Atoi(strings.TrimSpace(raw))
+	if parseErr != nil || parsed < 0 {
+		return schemaVersionAbsent, nil
+	}
+	return parsed, nil
+}
+
+// fastPath is the steady-state Open contract: workspace_id ensure + smoke
+// probe. Two more queries on top of the stamp read, giving ≤3 total on a
+// no-op Open. Issues a workspace_id write + commit only when the recorded
+// value diverges from the configured workspaceID — rare in steady state.
+//
+// [LAW:dataflow-not-control-flow] Same two operations every fast path. The
+// workspace_id mismatch case adds writes through the same commitWorkingSet
+// path every other mutation uses; no fast-path-specific branching beyond the
+// equality test inherent to ensure-style writes.
+func (s *Store) fastPath(ctx context.Context) error {
+	if err := s.fastPathEnsureWorkspaceID(ctx); err != nil {
+		return err
+	}
+	return s.fastPathSmoke(ctx)
+}
+
+func (s *Store) fastPathEnsureWorkspaceID(ctx context.Context) error {
+	s.migrationQueryCount++
+	var current string
+	err := s.db.QueryRowContext(ctx, `SELECT meta_value FROM meta WHERE meta_key = ?`, "workspace_id").Scan(&current)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("fast path read workspace_id: %w", err)
+	}
+	if current == s.workspaceID {
+		return nil
+	}
+	s.migrationQueryCount++
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO meta(meta_key, meta_value) VALUES (?, ?)
+			ON DUPLICATE KEY UPDATE meta_value = VALUES(meta_value)`, "workspace_id", s.workspaceID); err != nil {
+		return fmt.Errorf("fast path write workspace_id: %w", err)
+	}
+	s.migrationQueryCount++
+	return s.commitWorkingSet(ctx, "Refresh workspace_id")
+}
+
+// fastPathSmoke verifies that the canonical leaf table is reachable through
+// the current connection. Caught here so a botched workspace fails on Open
+// with a clear schema error rather than a downstream operation surfacing a
+// cryptic "table doesn't exist." Single query; tolerates the empty-table
+// case.
+func (s *Store) fastPathSmoke(ctx context.Context) error {
+	s.migrationQueryCount++
+	var probe int
+	err := s.db.QueryRowContext(ctx, `SELECT 1 FROM issues LIMIT 1`).Scan(&probe)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("schema smoke: %w", err)
+	}
+	return nil
+}
+
+// isMissingMetaTableError is true for the Dolt/MySQL "table doesn't exist"
+// error shape readSchemaStamp may receive on a fresh database. Tolerated
+// because the slow path is the safety net: a missing meta table provably
+// means migration is needed, so the fast path's role is to route there
+// cleanly rather than surface the error.
+func isMissingMetaTableError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "table not found") ||
+		strings.Contains(msg, "doesn't exist") ||
+		strings.Contains(msg, "does not exist")
+}
+
+// slowPathReconcile runs the full idempotent reconciliation. Entered when the
+// workspace stamp is absent, lower than CurrentSchemaVersion, or — as a
+// safety net — higher (a future r5v9.4 will turn the "higher" case into a
+// hard refusal). Every step here must be safe to re-run; the stamp comparison
+// already filtered the no-op case, so any redundancy hits this code in tests
+// and at compat-boundary moments only.
+func (s *Store) slowPathReconcile(ctx context.Context, currentStamp int) error {
 	changed := false
 	schema := []string{
 		`CREATE TABLE meta (
@@ -208,19 +350,44 @@ func (s *Store) migrate(ctx context.Context) error {
 		return err
 	}
 	changed = changed || workspaceChanged
-	schemaVersionChanged, err := s.ensureMetaDefault(ctx, "schema_version", "1")
+	stampChanged, err := s.writeSchemaStampForward(ctx, currentStamp)
 	if err != nil {
 		return err
 	}
-	changed = changed || schemaVersionChanged
+	changed = changed || stampChanged
 	if !changed {
 		return nil
 	}
-	// [LAW:dataflow-not-control-flow] Startup migration always runs the same reconciliation stages; only the derived `changed` value selects commit input.
+	// [LAW:dataflow-not-control-flow] Slow-path reconciliation always runs the
+	// same stages; the derived `changed` value alone decides whether a Dolt
+	// commit is needed. The stamp write above is sequenced last so it enters
+	// the same commitWorkingSet as the DDL — the atomicity guarantee in
+	// design-docs/MIGRATION-ARCHITECTURE.md.
 	if err := s.commitWorkingSet(ctx, "Initialize links schema"); err != nil {
 		return err
 	}
 	return nil
+}
+
+// writeSchemaStampForward stamps the workspace at CurrentSchemaVersion when
+// the workspace is at or below it; preserves higher stamps untouched. Higher
+// stamps mean the workspace was last written by a newer binary — downgrading
+// silently would be a forward-compat hazard, and r5v9.4 will turn this case
+// into a hard refusal at the path-selection boundary. Returns whether a write
+// happened (the slow path uses this to decide whether to commitWorkingSet).
+// [LAW:no-defensive-null-guards] currentStamp == schemaVersionAbsent is the
+// fresh-DB sentinel, handled explicitly rather than masked.
+func (s *Store) writeSchemaStampForward(ctx context.Context, currentStamp int) (bool, error) {
+	if currentStamp != schemaVersionAbsent && currentStamp > CurrentSchemaVersion {
+		return false, nil
+	}
+	if currentStamp == CurrentSchemaVersion {
+		return false, nil
+	}
+	if err := s.setMeta(ctx, nil, "schema_version", strconv.Itoa(CurrentSchemaVersion)); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 type issueCheckConstraint struct {

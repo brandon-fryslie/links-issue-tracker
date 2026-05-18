@@ -33,6 +33,12 @@ type Store struct {
 	doltRootDir    string
 	commitLockPath string
 	telemetryDir   string
+	// migrationQueryCount tracks SQL queries issued by the most recent
+	// migrate() invocation. Reset to 0 at every migrate() entry. Exposed via
+	// MigrationQueryCount() for the schema-rebuild query-count assertion
+	// (design-docs/MIGRATION-ARCHITECTURE.md). Not concurrent-safe — migrate
+	// runs serially under withCommitLock.
+	migrationQueryCount int
 }
 
 type NotFoundError struct {
@@ -1181,21 +1187,6 @@ func (s *Store) ensureMetaValue(ctx context.Context, key, value string) (bool, e
 	if current == value {
 		return false, nil
 	}
-	if err := s.setMeta(ctx, nil, key, value); err != nil {
-		return false, err
-	}
-	return true, nil
-}
-
-func (s *Store) ensureMetaDefault(ctx context.Context, key, value string) (bool, error) {
-	current, err := s.getMeta(ctx, nil, key)
-	if err != nil {
-		return false, err
-	}
-	if strings.TrimSpace(current) != "" {
-		return false, nil
-	}
-	// [LAW:one-source-of-truth] Schema-version writes preserve the recorded version as the canonical migration state once it exists.
 	if err := s.setMeta(ctx, nil, key, value); err != nil {
 		return false, err
 	}

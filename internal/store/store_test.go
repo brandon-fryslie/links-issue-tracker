@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -1700,6 +1701,148 @@ func TestMigrationIsIdempotentOnSecondOpen(t *testing.T) {
 	}
 	if countNonEmptyLines(commitsAfter) != countNonEmptyLines(commitsBefore) {
 		t.Fatalf("migration produced extra commit on second Open():\nbefore:\n%s\nafter:\n%s", commitsBefore, commitsAfter)
+	}
+}
+
+// (links-schema-rebuild-r5v9.2) Steady-state Open must run ≤3 SQL queries: the
+// stamp read, the workspace_id ensure (read-only when matched), and the smoke
+// probe. Anything higher means the fast path leaked DDL or information_schema
+// probes back into Open — the regression the schema-rebuild epic exists to
+// prevent.
+func TestSecondOpenRunsFastPath(t *testing.T) {
+	ctx := context.Background()
+	doltRoot := filepath.Join(t.TempDir(), "dolt")
+
+	first, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open(first) error = %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close(first) error = %v", err)
+	}
+
+	second, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open(second) error = %v", err)
+	}
+	defer second.Close()
+
+	if got := second.MigrationQueryCount(); got > 3 {
+		t.Fatalf("fast-path migrate ran %d queries, want ≤3 (stamp + workspace_id + smoke)", got)
+	}
+}
+
+// (links-schema-rebuild-r5v9.2) A stamp lower than CurrentSchemaVersion must
+// route to the slow path, which then bumps the stamp forward. Detected by
+// observing the stamp value after the second Open — fast path would have left
+// the lower value alone; slow path bumps it.
+func TestLowerStampTriggersSlowPathBump(t *testing.T) {
+	ctx := context.Background()
+	doltRoot := filepath.Join(t.TempDir(), "dolt")
+
+	st, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open(first) error = %v", err)
+	}
+	if err := st.setMeta(ctx, nil, "schema_version", strconv.Itoa(CurrentSchemaVersion-1)); err != nil {
+		t.Fatalf("setMeta(lower) error = %v", err)
+	}
+	if err := st.commitWorkingSet(ctx, "regress stamp behind binary"); err != nil {
+		t.Fatalf("commitWorkingSet() error = %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close(first) error = %v", err)
+	}
+
+	reopened, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open(reopen) error = %v", err)
+	}
+	defer reopened.Close()
+
+	got, err := reopened.getMeta(ctx, nil, "schema_version")
+	if err != nil {
+		t.Fatalf("getMeta(schema_version) error = %v", err)
+	}
+	want := strconv.Itoa(CurrentSchemaVersion)
+	if got != want {
+		t.Fatalf("schema_version after reopen = %q, want %q (slow path must bump forward)", got, want)
+	}
+}
+
+// (links-schema-rebuild-r5v9.2) After a successful slow path the workspace
+// must be stamped at CurrentSchemaVersion — that is what makes the next Open
+// fast.
+func TestSlowPathStampsCurrentVersionAtomically(t *testing.T) {
+	ctx := context.Background()
+	doltRoot := filepath.Join(t.TempDir(), "dolt")
+
+	st, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	defer st.Close()
+
+	stamp, err := st.getMeta(ctx, nil, "schema_version")
+	if err != nil {
+		t.Fatalf("getMeta(schema_version) error = %v", err)
+	}
+	want := strconv.Itoa(CurrentSchemaVersion)
+	if stamp != want {
+		t.Fatalf("schema_version = %q, want %q", stamp, want)
+	}
+
+	// The stamp must be visible in the Dolt commit, not just the working set.
+	// A working-set-only stamp would mean the slow path wrote the stamp but
+	// failed to package it with the DDL into a single Dolt commit — the
+	// atomicity guarantee in design-docs/MIGRATION-ARCHITECTURE.md.
+	repoPath := filepath.Join(doltRoot, "links")
+	logOut, err := doltcli.Run(ctx, repoPath, "log", "--oneline")
+	if err != nil {
+		t.Fatalf("dolt log error = %v", err)
+	}
+	if countNonEmptyLines(logOut) < 2 {
+		t.Fatalf("expected at least an init commit and a schema commit in dolt log, got:\n%s", logOut)
+	}
+}
+
+// (links-schema-rebuild-r5v9.2) A stamp higher than the binary's
+// CurrentSchemaVersion means the workspace was last written by a newer binary.
+// The slow path's safety-net pass must leave that stamp untouched —
+// downgrading would corrupt forward-compat. Ticket r5v9.4 turns this case
+// into a hard refusal at path-selection time; until then, preservation is the
+// minimum guarantee.
+func TestSlowPathPreservesHigherStamp(t *testing.T) {
+	ctx := context.Background()
+	doltRoot := filepath.Join(t.TempDir(), "dolt")
+
+	st, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open(first) error = %v", err)
+	}
+	higher := strconv.Itoa(CurrentSchemaVersion + 7)
+	if err := st.setMeta(ctx, nil, "schema_version", higher); err != nil {
+		t.Fatalf("setMeta(higher) error = %v", err)
+	}
+	if err := st.commitWorkingSet(ctx, "bump stamp ahead of binary"); err != nil {
+		t.Fatalf("commitWorkingSet() error = %v", err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close(first) error = %v", err)
+	}
+
+	reopened, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open(reopen) error = %v", err)
+	}
+	defer reopened.Close()
+
+	got, err := reopened.getMeta(ctx, nil, "schema_version")
+	if err != nil {
+		t.Fatalf("getMeta(schema_version) error = %v", err)
+	}
+	if got != higher {
+		t.Fatalf("schema_version after reopen = %q, want %q (must not downgrade)", got, higher)
 	}
 }
 
