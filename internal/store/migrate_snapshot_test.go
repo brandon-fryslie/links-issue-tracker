@@ -373,7 +373,7 @@ func withGooseHistoryDropped(t *testing.T, ctx context.Context, doltRoot string)
 	if err != nil {
 		t.Fatalf("withGooseHistoryDropped Open error = %v", err)
 	}
-	if err := st.ExecRawForTest(ctx, `DROP TABLE goose_db_version`); err != nil {
+	if err := st.ExecRawForTest(ctx, `DROP TABLE IF EXISTS goose_db_version`); err != nil {
 		_ = st.Close()
 		t.Fatalf("ExecRawForTest drop goose_db_version error = %v", err)
 	}

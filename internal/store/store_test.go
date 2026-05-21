@@ -1424,12 +1424,14 @@ func TestOpenForReadDoesNotCreateDatabaseWhenMissing(t *testing.T) {
 	}
 }
 
-// TestOpenRefusesPartialPreGooseSchema pins the adoption gate's refusal
+// TestOpenForReadRefusesPartialPreGooseSchema pins the adoption gate's refusal
 // contract: a workspace carrying SOME canonical tables but missing others, and
-// with no goose history, must NOT be silently stamped at baseline. Open fails
-// loudly naming the missing tables. This is the PR #119 bug-class fix — its
-// adoption stamped baseline on workspaces that were not actually at baseline.
-func TestOpenRefusesPartialPreGooseSchema(t *testing.T) {
+// with no goose history, must NOT be silently stamped at baseline — it fails
+// loudly naming the missing tables. Exercised via OpenForRead; Open shares the
+// same migrate -> classifyMigrationState path, so the contract holds for both.
+// This is the PR #119 bug-class fix — its adoption stamped baseline on
+// workspaces that were not actually at baseline.
+func TestOpenForReadRefusesPartialPreGooseSchema(t *testing.T) {
 	ctx := context.Background()
 	doltRoot := filepath.Join(t.TempDir(), "dolt")
 
