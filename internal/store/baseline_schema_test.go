@@ -50,7 +50,7 @@ func TestBaselineSchemaParsesEmbeddedMigration(t *testing.T) {
 
 // TestOpenRefusesPreConvergedColumnShape pins the column-level adoption gate: a
 // workspace carrying every baseline table but with a pre-converged column shape
-// (here, issues missing the topic/item_rank columns that later schema added)
+// (here, issues missing the topic column that the baseline requires)
 // must be refused, not silently stamped at v1. Table presence alone is not
 // "at baseline" — this is the deeper PR #119 failure shape.
 func TestOpenRefusesPreConvergedColumnShape(t *testing.T) {
