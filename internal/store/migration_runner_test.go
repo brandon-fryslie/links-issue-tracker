@@ -131,7 +131,7 @@ func TestAdoptionDeletesLegacySchemaVersionKey(t *testing.T) {
 
 // stampGooseVersionAhead records an applied goose version one past the registry
 // max, simulating a workspace written by a newer binary. It commits the working
-// set so a subsequent Open observes the stamp from the checkpoint state.
+// set so a subsequent Open observes the stamp from the committed working set.
 func stampGooseVersionAhead(t *testing.T, ctx context.Context, doltRoot string) int64 {
 	t.Helper()
 	registryMax, err := registryMaxVersion()
