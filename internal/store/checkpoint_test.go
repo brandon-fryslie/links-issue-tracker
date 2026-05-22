@@ -203,7 +203,10 @@ func TestCheckpointPruneEnforcesRetention(t *testing.T) {
 		names = append(names, cp.Name)
 	}
 
-	before, _ := st.ListCheckpoints(ctx, "cp-test")
+	before, err := st.ListCheckpoints(ctx, "cp-test")
+	if err != nil {
+		t.Fatalf("ListCheckpoints before prune error = %v", err)
+	}
 	if len(before) != total {
 		t.Fatalf("before prune count = %d, want %d", len(before), total)
 	}

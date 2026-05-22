@@ -224,7 +224,7 @@ func (s *Store) runMigration(ctx context.Context, guard *snapshotGuard) error {
 	if err := s.commitWorkingSet(ctx, "migrate: ensure migration_quarantine table"); err != nil {
 		return fmt.Errorf("commit quarantine table: %w", err)
 	}
-	return s.applyPendingMigrations(ctx, state)
+	return s.applyPendingMigrations(ctx)
 }
 
 // applyPendingMigrations runs each pending migration through goose and records
@@ -240,18 +240,20 @@ func (s *Store) runMigration(ctx context.Context, guard *snapshotGuard) error {
 // [LAW:dataflow-not-control-flow] The same sequence (checkpoint → goose loop
 // → prune) runs on every call; variability lives in the applied-vs-registry
 // set, not in whether stages execute.
-func (s *Store) applyPendingMigrations(ctx context.Context, state migrationState) error {
+func (s *Store) applyPendingMigrations(ctx context.Context) error {
+	// Construct the provider before creating the checkpoint so a provider
+	// construction failure leaves no orphaned branch behind.
+	provider, err := newGooseProvider(s.db)
+	if err != nil {
+		return fmt.Errorf("construct migration provider: %w", err)
+	}
+
 	// Create Dolt checkpoint before any mutation. The quarantine table is
 	// already committed (ensureQuarantineTable ran before this call), so
 	// the checkpoint state includes it — the table survives a hard reset.
 	checkpoint, err := s.CreateCheckpoint(ctx, migrationCheckpointPrefix)
 	if err != nil {
 		return fmt.Errorf("create migration checkpoint: %w", err)
-	}
-
-	provider, err := newGooseProvider(s.db)
-	if err != nil {
-		return fmt.Errorf("construct migration provider: %w", err)
 	}
 	upByOne := func(ctx context.Context) (*goose.MigrationResult, error) {
 		if hook := migrationUpByOneForTest; hook != nil {
