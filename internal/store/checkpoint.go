@@ -96,6 +96,9 @@ func (s *Store) ListCheckpoints(ctx context.Context, prefix string) ([]Checkpoin
 // PruneCheckpoints deletes the oldest checkpoint branches for the given
 // prefix until at most retain branches remain. retain=0 deletes all.
 func (s *Store) PruneCheckpoints(ctx context.Context, prefix string, retain int) error {
+	if retain < 0 {
+		return fmt.Errorf("checkpoint: retain must be non-negative, got %d", retain)
+	}
 	cps, err := s.ListCheckpoints(ctx, prefix)
 	if err != nil {
 		return err

@@ -414,10 +414,13 @@ func TestReopenBlockedByQuarantineOnAdoptionPath(t *testing.T) {
 		t.Fatalf("Open(first) error = %v", err)
 	}
 
-	// Seed a quarantine row for v1 so checkPendingQuarantine(appliedVersion=0)
-	// finds it on the next adoption-path Open.
+	// Seed a quarantine row for a hypothetical v2 (above the baseline).
+	// After adoption stamps v1, appliedVersion becomes baselineVersion (1), so
+	// checkPendingQuarantine(1) finds this v2 row and returns QuarantineBlockError.
+	// A quarantine row for v1 itself must NOT block after adoption because
+	// adoption confirmed the baseline schema is present and stamped v1.
 	if err := first.ExecRawForTest(ctx,
-		`INSERT INTO migration_quarantine (version, name, error_text, created_at) VALUES (1, '00001_baseline.sql', 'simulated failure', '2026-01-01T00:00:00Z')`,
+		`INSERT INTO migration_quarantine (version, name, error_text, created_at) VALUES (2, '00002_hypothetical.sql', 'simulated failure', '2026-01-01T00:00:00Z')`,
 	); err != nil {
 		t.Fatalf("seed quarantine row error = %v", err)
 	}
@@ -428,9 +431,9 @@ func TestReopenBlockedByQuarantineOnAdoptionPath(t *testing.T) {
 		t.Fatalf("Close(first) error = %v", err)
 	}
 
-	// Drop goose history so the next Open classifies as phaseAdopt
-	// (appliedVersion=0). checkPendingQuarantine(0) finds the v1 row and
-	// returns QuarantineBlockError before any migration or checkpoint runs.
+	// Drop goose history so the next Open classifies as phaseAdopt.
+	// adoption stamps v1 → state.appliedVersion = baselineVersion → checkPendingQuarantine(1)
+	// finds the v2 row → QuarantineBlockError.
 	withGooseHistoryDropped(t, ctx, doltRoot)
 
 	openErr := func() error {
@@ -448,8 +451,8 @@ func TestReopenBlockedByQuarantineOnAdoptionPath(t *testing.T) {
 	if !errors.As(openErr, &qErr) {
 		t.Fatalf("Open() error = %v (%T); expected *QuarantineBlockError in chain", openErr, openErr)
 	}
-	if qErr.Version != 1 {
-		t.Errorf("QuarantineBlockError.Version = %d, want 1", qErr.Version)
+	if qErr.Version != 2 {
+		t.Errorf("QuarantineBlockError.Version = %d, want 2", qErr.Version)
 	}
 }
 
