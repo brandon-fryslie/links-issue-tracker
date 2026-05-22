@@ -266,7 +266,14 @@ func (s *Store) applyPendingMigrations(ctx context.Context) error {
 			return nil
 		}
 		if gooseErr != nil {
-			return s.handleMigrationFailure(ctx, result, gooseErr, checkpoint)
+			cpErr := s.handleMigrationFailure(ctx, result, gooseErr, checkpoint)
+			// Prune on the failure path too: normal failures insert a quarantine row
+			// so future Opens are blocked before creating a new checkpoint, but
+			// nil-result failures skip quarantine insertion, leaving the door open
+			// for repeated manual retries to accumulate branches. Error ignored —
+			// the migration failure is the primary concern.
+			_ = s.PruneCheckpoints(ctx, migrationCheckpointPrefix, migrationCheckpointRetention)
+			return cpErr
 		}
 		// commitWorkingSet (not ...Once) so each migration commit gets the
 		// transient-manifest retry — startup migration is a critical path and a
