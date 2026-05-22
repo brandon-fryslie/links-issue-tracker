@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pressly/goose/v3"
@@ -300,10 +301,10 @@ func TestMigrationFailureCheckpointPath(t *testing.T) {
 
 	// Error message must mention the checkpoint name and the restore command.
 	msg := rollback.Error()
-	if !contains(msg, cpErr.Checkpoint.Name) {
+	if !strings.Contains(msg, cpErr.Checkpoint.Name) {
 		t.Errorf("error message missing checkpoint name %q: %s", cpErr.Checkpoint.Name, msg)
 	}
-	if !contains(msg, "lit snapshots restore") {
+	if !strings.Contains(msg, "lit snapshots restore") {
 		t.Errorf("error message missing 'lit snapshots restore': %s", msg)
 	}
 
@@ -339,7 +340,7 @@ func TestMigrationFailureCheckpointPath(t *testing.T) {
 	if err := secondForList.db.QueryRowContext(ctx, `SELECT message FROM dolt_log() LIMIT 1`).Scan(&topMessage); err != nil {
 		t.Fatalf("query dolt_log error = %v", err)
 	}
-	if !contains(topMessage, "quarantine") {
+	if !strings.Contains(topMessage, "quarantine") {
 		t.Errorf("top dolt commit message %q does not mention quarantine", topMessage)
 	}
 }
@@ -446,14 +447,14 @@ func TestCheckpointResetErrorUnknownVersion(t *testing.T) {
 	}
 
 	msg := cpErr.Error()
-	if !contains(msg, "version unknown") {
+	if !strings.Contains(msg, "version unknown") {
 		t.Errorf("error message missing 'version unknown': %s", msg)
 	}
-	if contains(msg, "DELETE FROM migration_quarantine") {
+	if strings.Contains(msg, "DELETE FROM migration_quarantine") {
 		t.Errorf("error message must not contain quarantine-clear SQL when version is unknown: %s", msg)
 	}
-	if !contains(msg, "lit snapshots restore") {
-		t.Errorf("error message missing 'lit snapshots restore' recovery instruction: %s", msg)
+	if !strings.Contains(msg, "recovery snapshot") {
+		t.Errorf("error message missing 'recovery snapshot' instruction: %s", msg)
 	}
 }
 
@@ -518,18 +519,4 @@ func TestReopenBlockedByQuarantineOnAdoptionPath(t *testing.T) {
 	if _, ok := asMigrationRollbackError(openErr); ok {
 		t.Errorf("QuarantineBlockError must not be wrapped in MigrationRollbackError; quarantine fast-fail must fire before guard.ensure()")
 	}
-}
-
-// contains is a strings.Contains helper used in test assertions.
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && (s == substr || len(substr) == 0 || containsAt(s, substr))
-}
-
-func containsAt(s, sub string) bool {
-	for i := 0; i <= len(s)-len(sub); i++ {
-		if s[i:i+len(sub)] == sub {
-			return true
-		}
-	}
-	return false
 }

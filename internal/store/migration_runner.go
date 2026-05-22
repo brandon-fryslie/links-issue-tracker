@@ -43,7 +43,7 @@ func (e *CheckpointResetError) Error() string {
 		return fmt.Sprintf(
 			"migration failed (version unknown): %v\n\n"+
 				"the working set was automatically reset to Dolt checkpoint %q\n"+
-				"restore from a dbsnapshot to recover: lit snapshots restore <name>",
+				"restore from the pre-migration recovery snapshot",
 			e.Cause, e.Checkpoint.Name,
 		)
 	}
@@ -302,22 +302,22 @@ func (s *Store) handleMigrationFailure(ctx context.Context, result *goose.Migrat
 
 	if resetErr := s.ResetToCheckpoint(ctx, checkpoint.Name); resetErr != nil {
 		return fmt.Errorf(
-			"migration v%d failed and Dolt reset failed (%v); restore from dbsnapshot. Root cause: %w",
-			version, resetErr, cause,
+			"migration v%d failed and Dolt reset to %q failed (%v); restore from dbsnapshot. Root cause: %w",
+			version, checkpoint.Name, resetErr, cause,
 		)
 	}
 
 	if version > 0 {
 		if recordErr := s.recordQuarantine(ctx, version, name, cause.Error()); recordErr != nil {
 			return fmt.Errorf(
-				"migration v%d failed and quarantine insert failed (%v); restore from dbsnapshot. Root cause: %w",
-				version, recordErr, cause,
+				"migration v%d failed (reset to %q); quarantine insert failed (%v); restore from dbsnapshot. Root cause: %w",
+				version, checkpoint.Name, recordErr, cause,
 			)
 		}
 		if commitErr := s.commitWorkingSet(ctx, fmt.Sprintf("migrate: quarantine v%d %s", version, name)); commitErr != nil {
 			return fmt.Errorf(
-				"migration v%d failed and quarantine commit failed (%v); restore from dbsnapshot. Root cause: %w",
-				version, commitErr, cause,
+				"migration v%d failed (reset to %q); quarantine commit failed (%v); restore from dbsnapshot. Root cause: %w",
+				version, checkpoint.Name, commitErr, cause,
 			)
 		}
 	}
