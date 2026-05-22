@@ -402,10 +402,66 @@ func TestMigrationCheckpointRetentionBounded(t *testing.T) {
 	}
 }
 
+// TestCheckpointResetErrorUnknownVersion pins that CheckpointResetError.Error
+// emits a "version unknown" message (without a quarantine-clear SQL instruction)
+// when goose returns a nil MigrationResult so Version stays 0. Without this
+// branch, the operator would see misleading output like v0 "" and a DELETE
+// targeting a quarantine row that was never inserted.
+func TestCheckpointResetErrorUnknownVersion(t *testing.T) {
+	ctx := context.Background()
+	doltRoot := filepath.Join(t.TempDir(), "dolt")
+
+	first, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open(first) error = %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close(first) error = %v", err)
+	}
+
+	withGooseHistoryDropped(t, ctx, doltRoot)
+
+	sentinel := errors.New("simulated nil-result error")
+	migrationUpByOneForTest = func(ctx context.Context, provider *goose.Provider) (*goose.MigrationResult, error) {
+		return nil, sentinel
+	}
+	t.Cleanup(func() { migrationUpByOneForTest = nil })
+
+	_, openErr := Open(ctx, doltRoot, "test-workspace-id")
+	migrationUpByOneForTest = nil
+	if openErr == nil {
+		t.Fatal("Open() returned nil error; expected CheckpointResetError")
+	}
+
+	rollback, ok := asMigrationRollbackError(openErr)
+	if !ok {
+		t.Fatalf("error = %v (%T); expected *MigrationRollbackError", openErr, openErr)
+	}
+	var cpErr *CheckpointResetError
+	if !errors.As(rollback.Cause, &cpErr) {
+		t.Fatalf("rollback.Cause = %v (%T); expected *CheckpointResetError", rollback.Cause, rollback.Cause)
+	}
+	if cpErr.Version != 0 {
+		t.Errorf("CheckpointResetError.Version = %d, want 0 (nil result)", cpErr.Version)
+	}
+
+	msg := cpErr.Error()
+	if !contains(msg, "version unknown") {
+		t.Errorf("error message missing 'version unknown': %s", msg)
+	}
+	if contains(msg, "DELETE FROM migration_quarantine") {
+		t.Errorf("error message must not contain quarantine-clear SQL when version is unknown: %s", msg)
+	}
+	if !contains(msg, "lit snapshots restore") {
+		t.Errorf("error message missing 'lit snapshots restore' recovery instruction: %s", msg)
+	}
+}
+
 // TestReopenBlockedByQuarantineOnAdoptionPath pins that Open returns a
-// QuarantineBlockError (inside MigrationRollbackError) when the adoption path
-// (phaseAdopt, appliedVersion=0) encounters a quarantine row for a pending
-// version. This tests criterion 2 end-to-end through Open() itself.
+// QuarantineBlockError NOT wrapped in MigrationRollbackError when the adoption
+// path encounters a quarantine row for a version above the baseline. The
+// quarantine fast-fail fires before guard.ensure(), so no recovery snapshot is
+// created. This tests criterion 2 end-to-end through Open() itself.
 func TestReopenBlockedByQuarantineOnAdoptionPath(t *testing.T) {
 	ctx := context.Background()
 	doltRoot := filepath.Join(t.TempDir(), "dolt")
