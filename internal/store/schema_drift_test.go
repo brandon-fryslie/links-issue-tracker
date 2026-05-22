@@ -72,7 +72,9 @@ func TestSchemaSnapshotMatchesConvergedSchema(t *testing.T) {
 			"If this change is intended, route it through a migration in "+
 			"internal/store/migrations and regenerate:\n"+
 			"  go test ./internal/store -run %s -update-schema-snapshot",
-			schemaSnapshotFile, unifiedSchemaDiff(string(wantBytes), got), t.Name())
+			schemaSnapshotFile,
+			unifiedSchemaDiff(schemaSnapshotFile+" (checked in)", "live converged schema", string(wantBytes), got),
+			t.Name())
 	}
 }
 
@@ -86,7 +88,7 @@ func TestConvergedSchemaDumpIsDeterministic(t *testing.T) {
 	second := dumpFreshWorkspaceSchema(t)
 	if first != second {
 		t.Fatalf("converged-schema dump is not deterministic across fresh workspaces:\n%s",
-			unifiedSchemaDiff(first, second))
+			unifiedSchemaDiff("fresh workspace #1", "fresh workspace #2", first, second))
 	}
 }
 
@@ -173,18 +175,22 @@ func showCreateTable(ctx context.Context, db *sql.DB, table string) (string, err
 	return ddl, nil
 }
 
-func unifiedSchemaDiff(want, got string) string {
+// unifiedSchemaDiff renders a from/to diff. The side labels are parameters, not
+// baked in, so the helper reads truthfully at both call sites — snapshot-vs-live
+// for drift, workspace-vs-workspace for determinism.
+func unifiedSchemaDiff(fromLabel, toLabel, from, to string) string {
 	out, err := difflib.GetUnifiedDiffString(difflib.UnifiedDiff{
-		A:        difflib.SplitLines(want),
-		B:        difflib.SplitLines(got),
-		FromFile: schemaSnapshotFile + " (checked in)",
-		ToFile:   "live converged schema",
+		A:        difflib.SplitLines(from),
+		B:        difflib.SplitLines(to),
+		FromFile: fromLabel,
+		ToFile:   toLabel,
 		Context:  3,
 	})
 	if err != nil {
 		// A failed diff must not collapse to an empty string — the drift would
 		// then be invisible. Surface the error and the full documents instead.
-		return fmt.Sprintf("(unified diff unavailable: %v)\n--- want ---\n%s\n--- got ---\n%s", err, want, got)
+		return fmt.Sprintf("(unified diff unavailable: %v)\n--- %s ---\n%s\n--- %s ---\n%s",
+			err, fromLabel, from, toLabel, to)
 	}
 	return out
 }
