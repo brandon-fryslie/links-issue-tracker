@@ -116,8 +116,6 @@ func TestDepAddRejectsSameEpicBlocks(t *testing.T) {
 		t.Fatalf("CreateIssue(siblingB) error = %v", err)
 	}
 
-	wantMsg := "Do not set 'blocks' relationships between two issues in the same epic.  Use rank to specify that one issue must be completed before another issue"
-
 	cases := []struct {
 		name string
 		args []string
@@ -134,8 +132,11 @@ func TestDepAddRejectsSameEpicBlocks(t *testing.T) {
 			if err == nil {
 				t.Fatalf("dep add should reject same-epic block, got nil; stdout=%q", stdout.String())
 			}
-			if err.Error() != wantMsg {
-				t.Fatalf("error = %q, want %q", err.Error(), wantMsg)
+			if err.Error() != sameEpicBlocksRejectionMessage {
+				t.Fatalf("error = %q, want %q", err.Error(), sameEpicBlocksRejectionMessage)
+			}
+			if code := ExitCode(err); code != ExitValidation {
+				t.Fatalf("ExitCode(err) = %d, want %d (ExitValidation)", code, ExitValidation)
 			}
 		})
 	}

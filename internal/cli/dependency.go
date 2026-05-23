@@ -165,9 +165,13 @@ func depRelationForCLI(rel model.Relation) model.Relation {
 	return rel
 }
 
+// [LAW:one-source-of-truth] The rejection text is part of the user-facing CLI
+// contract and is asserted verbatim in tests; both sites read it from here so
+// they cannot drift.
+const sameEpicBlocksRejectionMessage = "Do not set 'blocks' relationships between two issues in the same epic.  Use rank to specify that one issue must be completed before another issue"
+
 // rejectSameEpicBlocks errors when both endpoints resolve to the same epic
-// membership. The exact message is part of the user-facing contract: do not
-// reword without coordinating with the agent-facing docs.
+// membership.
 func rejectSameEpicBlocks(ctx context.Context, ap *app.App, fromID, toID string) error {
 	fromEpic, err := issueEpicID(ctx, ap, fromID)
 	if err != nil {
@@ -178,7 +182,7 @@ func rejectSameEpicBlocks(ctx context.Context, ap *app.App, fromID, toID string)
 		return err
 	}
 	if fromEpic != "" && fromEpic == toEpic {
-		return errors.New("Do not set 'blocks' relationships between two issues in the same epic.  Use rank to specify that one issue must be completed before another issue")
+		return errors.New(sameEpicBlocksRejectionMessage)
 	}
 	return nil
 }
