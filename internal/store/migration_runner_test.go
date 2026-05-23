@@ -212,11 +212,11 @@ func TestOpenReconcilesAheadOfRegistryWhenBaselineIntact(t *testing.T) {
 }
 
 // TestOpenReconcilesAheadOfRegistryWhenGooseHistoryCorrupt pins the post-DELETE
-// invariant: even if goose_db_version is corrupted (every row above ahead is
-// removed before recovery runs), reconciliation must leave recordedMigrationVersion
-// equal to registryMaxVers — not 0 or any other value < registryMaxVers. Without
-// the restamp, the next Open would see applied=0 and try to re-baseline against
-// an already-initialized schema.
+// invariant: even if goose_db_version is corrupted (rows at or below registryMax
+// are missing, leaving only the ahead row), reconciliation must leave
+// recordedMigrationVersion equal to registryMaxVers — not 0 or any other value
+// < registryMaxVers. Without the restamp, the next Open would see applied=0
+// and try to re-baseline against an already-initialized schema.
 //
 // [LAW:types-are-the-program] The post-reconcile workspace state must satisfy
 // the invariant "managed at registryMaxVers." This test asserts that invariant
