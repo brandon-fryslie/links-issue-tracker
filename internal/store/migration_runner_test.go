@@ -211,6 +211,72 @@ func TestOpenReconcilesAheadOfRegistryWhenBaselineIntact(t *testing.T) {
 	}
 }
 
+// TestOpenReconcilesAheadOfRegistryWhenGooseHistoryCorrupt pins the post-DELETE
+// invariant: even if goose_db_version is corrupted (every row above ahead is
+// removed before recovery runs), reconciliation must leave recordedMigrationVersion
+// equal to registryMaxVers — not 0 or any other value < registryMaxVers. Without
+// the restamp, the next Open would see applied=0 and try to re-baseline against
+// an already-initialized schema.
+//
+// [LAW:types-are-the-program] The post-reconcile workspace state must satisfy
+// the invariant "managed at registryMaxVers." This test asserts that invariant
+// holds even when the only goose row at recovery time is the ahead row.
+func TestOpenReconcilesAheadOfRegistryWhenGooseHistoryCorrupt(t *testing.T) {
+	ctx := context.Background()
+	doltRoot := filepath.Join(t.TempDir(), "dolt")
+
+	fresh, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open(fresh) error = %v", err)
+	}
+	if err := fresh.Close(); err != nil {
+		t.Fatalf("Close(fresh) error = %v", err)
+	}
+	ahead := stampGooseVersionAhead(t, ctx, doltRoot)
+	registryMax := ahead - 1
+
+	corrupt, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open(corrupt-setup) error = %v; want nil — reconcile ran on prior Open", err)
+	}
+	// Drop every row <= registryMax so the only goose row left is the ahead one
+	// — simulating a workspace whose bookkeeping was corrupted before recovery.
+	// (The previous Open already trimmed the ahead row, so re-insert it.)
+	if err := corrupt.ExecRawForTest(ctx,
+		`DELETE FROM goose_db_version WHERE version_id <= ?`, registryMax,
+	); err != nil {
+		_ = corrupt.Close()
+		t.Fatalf("corrupt goose history error = %v", err)
+	}
+	if err := corrupt.ExecRawForTest(ctx,
+		`INSERT INTO goose_db_version (version_id, is_applied) VALUES (?, 1)`, ahead,
+	); err != nil {
+		_ = corrupt.Close()
+		t.Fatalf("re-insert ahead row error = %v", err)
+	}
+	if err := corrupt.commitWorkingSet(ctx, "test: corrupt goose history"); err != nil {
+		_ = corrupt.Close()
+		t.Fatalf("commit corruption error = %v", err)
+	}
+	if err := corrupt.Close(); err != nil {
+		t.Fatalf("Close(corrupt) error = %v", err)
+	}
+
+	st, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open() of corrupt-but-recoverable workspace returned error = %v; want nil", err)
+	}
+	defer st.Close()
+
+	recorded, err := st.recordedMigrationVersion(ctx)
+	if err != nil {
+		t.Fatalf("recordedMigrationVersion() error = %v", err)
+	}
+	if recorded != registryMax {
+		t.Errorf("post-reconcile recorded version = %d, want %d (restamped after empty DELETE)", recorded, registryMax)
+	}
+}
+
 // TestOpenRefusesAheadOfRegistryWhenBaselineCorrupt pins the refusal branch:
 // when goose is ahead AND the live baseline shape is genuinely missing
 // (e.g. a baseline column was dropped), Open MUST refuse with the

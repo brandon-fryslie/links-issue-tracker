@@ -511,6 +511,37 @@ func (s *Store) recoverAheadOfRegistry(ctx context.Context, guard *snapshotGuard
 	); err != nil {
 		return fmt.Errorf("reconcile ahead goose log: %w", err)
 	}
+	// [LAW:types-are-the-program] "Reconciled" means recordedMigrationVersion()
+	// equals registryMaxVers, not "rows above registryMaxVers were deleted." A
+	// corrupted goose history (e.g., only an ahead row, no rows for baseline)
+	// would leave the table empty after the DELETE — the next Open would see
+	// applied=0 and try to re-baseline against an already-initialized schema.
+	// Restamp registryMaxVers if it is not the post-DELETE max, so the type
+	// of the post-reconcile state is "managed at registryMaxVers" — the only
+	// state runMigration's other branches handle correctly.
+	postDelete, err := s.recordedMigrationVersion(ctx)
+	if err != nil {
+		return fmt.Errorf("read goose version after reconcile: %w", err)
+	}
+	if postDelete < state.registryMaxVers {
+		gooseStore, err := database.NewStore(goose.DialectMySQL, gooseVersionTable)
+		if err != nil {
+			return fmt.Errorf("reconcile: construct goose store: %w", err)
+		}
+		if err := gooseStore.Insert(ctx, s.db, database.InsertRequest{Version: state.registryMaxVers}); err != nil {
+			return fmt.Errorf("reconcile: restamp registry max v%d: %w", state.registryMaxVers, err)
+		}
+		// Final verification: the invariant must hold or the next Open lands in
+		// an inconsistent state. Fail loudly here while the operator still has
+		// context, instead of mutating the workspace into a worse position.
+		verified, err := s.recordedMigrationVersion(ctx)
+		if err != nil {
+			return fmt.Errorf("verify goose version after reconcile: %w", err)
+		}
+		if verified != state.registryMaxVers {
+			return fmt.Errorf("reconcile: post-restamp goose version is v%d, want v%d", verified, state.registryMaxVers)
+		}
+	}
 	if err := s.commitWorkingSet(ctx,
 		fmt.Sprintf("migrate: reconcile ahead-of-registry goose log to v%d (was v%d)",
 			state.registryMaxVers, state.appliedVersion),
