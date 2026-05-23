@@ -212,8 +212,8 @@ func (s *Store) runMigration(ctx context.Context, guard *snapshotGuard) error {
 	// [LAW:types-are-the-program] "Workspace stamped past the registry" is two
 	// distinct states the binary must not collapse: (a) the live application
 	// schema is intact and only goose's bookkeeping row is ahead — recoverable
-	// without touching application data, and (b) the live schema itself is
-	// shapes this binary cannot operate against — genuinely incompatible.
+	// without touching application data, and (b) the live schema itself is in
+	// a shape this binary cannot operate against — genuinely incompatible.
 	// recoverAheadOfRegistry distinguishes them and either reconciles
 	// (case a) or refuses with MissingBaseline naming the gap (case b).
 	if state.appliedVersion > state.registryMaxVers {

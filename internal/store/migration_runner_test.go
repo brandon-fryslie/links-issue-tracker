@@ -175,8 +175,12 @@ func TestOpenReconcilesAheadOfRegistryWhenBaselineIntact(t *testing.T) {
 	ctx := context.Background()
 	doltRoot := filepath.Join(t.TempDir(), "dolt")
 
-	if _, err := Open(ctx, doltRoot, "test-workspace-id"); err != nil {
+	fresh, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
 		t.Fatalf("Open(fresh) error = %v", err)
+	}
+	if err := fresh.Close(); err != nil {
+		t.Fatalf("Close(fresh) error = %v", err)
 	}
 	ahead := stampGooseVersionAhead(t, ctx, doltRoot)
 	registryMax := ahead - 1
