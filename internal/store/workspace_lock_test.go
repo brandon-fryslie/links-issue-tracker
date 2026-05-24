@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -133,6 +134,62 @@ func TestWorkspaceLockExclusiveReleasedAfterClose(t *testing.T) {
 	}
 	if err := release(); err != nil {
 		t.Fatalf("release exclusive error = %v", err)
+	}
+}
+
+// TestOpenForReadAcquiresLockBeforeStat pins the contract that OpenForRead
+// takes the workspace shared lock BEFORE its database-exists stat — so a
+// concurrent lit snapshots restore (which transiently renames the database
+// dir away between rotate and install) cannot make OpenForRead return a
+// false-negative "repository not initialized" error.
+//
+// The test simulates the transient state by:
+//   1. Opening and closing a Store to bootstrap the workspace
+//   2. Renaming the database dir away (mimicking restore's first rename)
+//   3. Calling OpenForRead under a short context and asserting the error
+//      shape: it must be a workspace-busy refusal (because the exclusive
+//      lock is held), NOT a "not initialized" error.
+func TestOpenForReadAcquiresLockBeforeStat(t *testing.T) {
+	ctx := context.Background()
+	doltRoot := filepath.Join(t.TempDir(), "dolt")
+
+	bootstrap, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("bootstrap Open() error = %v", err)
+	}
+	if err := bootstrap.Close(); err != nil {
+		t.Fatalf("bootstrap Close() error = %v", err)
+	}
+
+	// Hold the exclusive workspace lock — the shape lit snapshots restore
+	// takes while it rotates the database directory.
+	release, err := LockWorkspaceExclusive(ctx, doltRoot)
+	if err != nil {
+		t.Fatalf("LockWorkspaceExclusive() error = %v", err)
+	}
+	defer release()
+
+	// Rename the database directory away — mimics the transient
+	// "directory absent" state between dbsnapshot.Restore's rotate-away
+	// and install-snapshot calls. Without the fix, OpenForRead's stat
+	// would observe ENOENT and return "repository not initialized".
+	rotated := doltRoot + ".pre-restore-test"
+	if err := os.Rename(doltRoot, rotated); err != nil {
+		t.Fatalf("rotate dolt dir: %v", err)
+	}
+	defer func() { _ = os.Rename(rotated, doltRoot) }()
+
+	shortCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
+	defer cancel()
+	_, err = OpenForRead(shortCtx, doltRoot, "test-workspace-id")
+	if err == nil {
+		t.Fatal("OpenForRead succeeded while exclusive workspace lock held; expected workspace-busy refusal")
+	}
+	if strings.Contains(err.Error(), "repository not initialized") {
+		t.Fatalf("OpenForRead returned false-negative 'not initialized' instead of workspace-busy: %v", err)
+	}
+	if !strings.Contains(err.Error(), "workspace busy") && !strings.Contains(err.Error(), "deadline exceeded") {
+		t.Fatalf("OpenForRead returned unexpected error shape (want workspace-busy or deadline): %v", err)
 	}
 }
 

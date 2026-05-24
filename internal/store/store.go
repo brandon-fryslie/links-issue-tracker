@@ -196,12 +196,18 @@ func OpenForRead(ctx context.Context, doltRootDir string, workspaceID string) (*
 	if err := validateOpenArgs(doltRootDir, workspaceID); err != nil {
 		return nil, err
 	}
-	if _, err := os.Stat(doltRootDir); errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("repository not initialized with lit — run 'lit init' first")
-	}
+	// [LAW:dataflow-not-control-flow] Acquire the workspace shared lock
+	// BEFORE the existence stat so the stat cannot observe the transient
+	// ENOENT that dbsnapshot.Restore opens between rotate-away and
+	// install-snapshot. The lock blocks until restore releases its
+	// exclusive hold, after which the stat sees a real result every time.
 	release, err := acquireWorkspaceShared(ctx, doltRootDir)
 	if err != nil {
 		return nil, err
+	}
+	if _, err := os.Stat(doltRootDir); errors.Is(err, os.ErrNotExist) {
+		_ = release()
+		return nil, fmt.Errorf("repository not initialized with lit — run 'lit init' first")
 	}
 	s, err := openStoreConnection(doltRootDir, workspaceID)
 	if err != nil {
