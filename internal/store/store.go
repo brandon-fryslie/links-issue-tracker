@@ -161,11 +161,20 @@ type TransitionIssueInput struct {
 }
 
 func Open(ctx context.Context, doltRootDir string, workspaceID string) (*Store, error) {
-	if _, err := EnsureDatabase(ctx, doltRootDir, workspaceID); err != nil {
+	if err := validateOpenArgs(doltRootDir, workspaceID); err != nil {
 		return nil, err
 	}
+	// [LAW:single-enforcer] Workspace shared lock is acquired BEFORE
+	// EnsureDatabase because ensureDoltDatabase opens Dolt SQL connections
+	// to create/initialize the database. Acquiring after would leave a
+	// window in which `lit snapshots restore` could rotate the Dolt
+	// directory while those bootstrap connections were live.
 	release, err := acquireWorkspaceShared(ctx, doltRootDir)
 	if err != nil {
+		return nil, err
+	}
+	if _, err := EnsureDatabase(ctx, doltRootDir, workspaceID); err != nil {
+		_ = release()
 		return nil, err
 	}
 	s, err := openStoreConnection(doltRootDir, workspaceID)

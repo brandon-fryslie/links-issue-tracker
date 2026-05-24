@@ -136,6 +136,35 @@ func TestWorkspaceLockExclusiveReleasedAfterClose(t *testing.T) {
 	}
 }
 
+// TestOpenSyncHoldsWorkspaceLock pins the contract that lit sync's long-lived
+// Store also acquires the shared workspace lock — the same way Open and
+// OpenForRead do. Without this, `lit sync ...` could hold an open Dolt
+// connection while `lit snapshots restore` rotates the directory.
+//
+// [LAW:single-enforcer] All Store constructors that open long-lived Dolt
+// connections route through the same workspace-lock contract; OpenSync is no
+// exception even though it serves a different higher-level purpose.
+func TestOpenSyncHoldsWorkspaceLock(t *testing.T) {
+	ctx := context.Background()
+	doltRoot := filepath.Join(t.TempDir(), "dolt")
+
+	st, err := OpenSync(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("OpenSync() error = %v", err)
+	}
+	defer st.Close()
+
+	// While the sync Store is open, exclusive acquire must refuse.
+	release, err := LockWorkspaceExclusive(ctx, doltRoot)
+	if err == nil {
+		_ = release()
+		t.Fatal("LockWorkspaceExclusive succeeded while OpenSync Store held shared; expected refusal")
+	}
+	if !strings.Contains(err.Error(), "workspace busy") {
+		t.Fatalf("error %q must name workspace-busy", err.Error())
+	}
+}
+
 // TestWorkspaceLockExclusiveSerializes pins that two concurrent exclusive
 // acquisitions cannot both succeed — one wins, the other refuses immediately.
 // Without this invariant, two concurrent lit snapshots restore commands could

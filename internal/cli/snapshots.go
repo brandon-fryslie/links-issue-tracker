@@ -126,7 +126,7 @@ func runSnapshotsList(stdout io.Writer, ws workspace.Info, args []string) error 
 	})
 }
 
-func runSnapshotsRestore(ctx context.Context, stdout io.Writer, ws workspace.Info, args []string) error {
+func runSnapshotsRestore(ctx context.Context, stdout io.Writer, ws workspace.Info, args []string) (err error) {
 	positional, flagArgs := splitArgs(args, 1)
 	fs := newCobraFlagSet("snapshots restore")
 	jsonOut := fs.Bool("json", false, "Output JSON")
@@ -148,7 +148,16 @@ func runSnapshotsRestore(ctx context.Context, stdout io.Writer, ws workspace.Inf
 	if err != nil {
 		return err
 	}
-	defer func() { _ = releaseWorkspace() }()
+	// [LAW:no-silent-fallbacks] A release failure is rare but real (e.g.
+	// EBADF on a torn FD) and signals workspace-lock state the operator
+	// needs to know about; surface it via the named return rather than
+	// discarding. Only overwrites a nil err so the primary failure (if
+	// any) remains the returned error.
+	defer func() {
+		if relErr := releaseWorkspace(); relErr != nil && err == nil {
+			err = relErr
+		}
+	}()
 	var rotated string
 	if err := withCommitLock(ctx, ws, func() error {
 		r, err := dbsnapshot.Restore(ws.DatabasePath, snapshotsDirFor(ws), name)

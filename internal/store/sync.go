@@ -54,11 +54,26 @@ func OpenSync(ctx context.Context, doltRootDir string, workspaceID string) (*Sto
 	if err := requireEmbeddedSyncSupport(); err != nil {
 		return nil, err
 	}
-	// [LAW:single-enforcer] Sync bootstrap reuses the Store database initializer so first-run sync and regular store opens share one creation boundary.
-	if _, err := EnsureDatabase(ctx, doltRootDir, workspaceID); err != nil {
+	// [LAW:single-enforcer] Workspace shared lock is acquired BEFORE
+	// EnsureDatabase so the bootstrap and the long-lived sync connection
+	// are both protected against a concurrent `lit snapshots restore`
+	// rotating the Dolt directory — the same invariant store.Open enforces.
+	release, err := acquireWorkspaceShared(ctx, doltRootDir)
+	if err != nil {
 		return nil, err
 	}
-	return openStoreConnection(doltRootDir, workspaceID)
+	// [LAW:single-enforcer] Sync bootstrap reuses the Store database initializer so first-run sync and regular store opens share one creation boundary.
+	if _, err := EnsureDatabase(ctx, doltRootDir, workspaceID); err != nil {
+		_ = release()
+		return nil, err
+	}
+	s, err := openStoreConnection(doltRootDir, workspaceID)
+	if err != nil {
+		_ = release()
+		return nil, err
+	}
+	s.releaseWorkspaceLock = release
+	return s, nil
 }
 
 func (s *Store) SyncListRemotes(ctx context.Context) ([]SyncRemote, error) {
