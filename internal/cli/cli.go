@@ -577,9 +577,9 @@ func gatherWorkableAnnotated(ctx context.Context, ap *app.App, rf workableFilter
 	statuses := []model.State{model.StateOpen, model.StateInProgress}
 	if rf.Status != "" {
 		// User-supplied status overrides the workable default. Unrecognized
-		// values default to Open via DefaultOpen — the ready command is
-		// lenient, matching store/import behavior rather than strict CLI flag
-		// validation.
+		// values default to Open via DefaultOpen — the shared pipeline mirrors
+		// store/import lenient parsing rather than enforcing strict CLI flag
+		// validation. [LAW:comments-explain-why-only]
 		statuses = []model.State{model.DefaultOpen(rf.Status)}
 	}
 	// [LAW:one-source-of-truth] rank is the canonical ordering; no explicit SortBy
