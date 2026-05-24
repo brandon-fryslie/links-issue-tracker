@@ -29,9 +29,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Latest published goreleaser-cross image. MUST equal release.yml's value;
-  # this workflow validates exactly what that workflow publishes, so any
-  # drift between them means validate proves the wrong pipeline.
+  # goreleaser-cross image tag. MUST equal release.yml's value (validate
+  # proves the same pipeline release.yml publishes). The `v1.x.y` naming is
+  # the cross-image release line, not the bundled goreleaser version — this
+  # image bundles goreleaser v2 (verified end-to-end by this very workflow).
   GORELEASER_CROSS_VERSION: v1.26.2-3
 
 jobs:

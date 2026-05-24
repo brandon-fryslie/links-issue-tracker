@@ -1,12 +1,16 @@
 # goreleaser config for lit.
 #
-# CONFIG VERSION: goreleaser v1.x syntax. We pin to goreleaser-cross v1.26.2-3
-# (the latest published cross-compile image) because gozstd in Dolt requires
-# CGO and the cross image owns the per-target C toolchains. The v2 cross
-# image is not yet published; when it is, bump GORELEASER_CROSS_VERSION in
-# release.yml + release-validate.yml AND migrate this config to v2 syntax
-# (add `version: 2`, change `archives.format` -> `archives.formats`) in the
-# SAME commit. The two cannot drift.
+# CONFIG VERSION: goreleaser v2 syntax. The cross-compile image tag is
+# `goreleaser-cross:v1.26.2-3` — that "v1.x.y" naming is the cross-image
+# release line, NOT the bundled goreleaser version. The image bundles
+# goreleaser v2 (the v1.26.2-3 build picked up "feat: bump goreleaser to
+# v2.16.0" from goreleaser-cross master). release-validate proved this:
+# trying to run it without `version: 2` here failed with "only version: 2
+# configuration files are supported". Do not be tempted by the v1 tag name.
+#
+# CGO is required by gozstd in Dolt; the cross image owns the per-target C
+# toolchains (osxcross / mingw / glibc), invoked via the per-target CC env
+# entries below.
 #
 # [LAW:one-source-of-truth] The version/commit/date a release reports come from
 # a single place: the ldflags injected here. internal/version.{Version,Commit,Date}
@@ -15,6 +19,8 @@
 # [LAW:single-enforcer] release-validate.yml is the one place that proves this
 # config produces a working release; release.yml is the one place that
 # publishes. Same Docker image tag exercises both.
+
+version: 2
 
 project_name: lit
 
@@ -79,10 +85,10 @@ archives:
     # `lit_<version>_<goos>_<goarch>.<ext>` (underscore-separated). If this
     # template changes, that parser changes in the same PR.
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
-    format: tar.gz
+    formats: [tar.gz]
     format_overrides:
       - goos: windows
-        format: zip
+        formats: [zip]
     files:
       - LICENSE*
       - README*
