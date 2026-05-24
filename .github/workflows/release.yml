@@ -1,8 +1,18 @@
 name: Release
 
-# Triggered by tag push matching `v*.*.*`. `workflow_dispatch` runs the same
-# pipeline in --snapshot mode (no publish) so the cross-compile + manifest
-# wiring can be exercised on demand without cutting a real release.
+# Triggered by tag push matching `v*.*.*`. Builds the custom release-builder
+# image (goreleaser-cross + ICU cross-toolchains for every Lit target), runs
+# goreleaser inside it to produce per-platform archives + checksums, runs
+# mkmanifest, then publishes everything atomically via `gh release create`.
+#
+# release-validate.yml exercises this exact path on every PR + master push, so
+# the only way this workflow surprises is when the tag context differs (e.g.,
+# the changelog generation) — those differences are deliberately small.
+#
+# workflow_dispatch runs the same build path in --snapshot mode (no publish)
+# so the pipeline can be exercised on-demand against the current commit
+# without cutting a real release.
+
 on:
   push:
     tags:
@@ -11,18 +21,11 @@ on:
 
 permissions:
   contents: write    # creates the GitHub Release and uploads assets
+  packages: read     # pull goreleaser-cross base image from ghcr
 
 concurrency:
   group: release-${{ github.ref }}
   cancel-in-progress: false
-
-env:
-  # goreleaser-cross image tag. The `v1.x.y` naming is the cross-image
-  # release line, NOT the bundled goreleaser version — v1.26.2-3 bundles
-  # goreleaser v2 (verified by release-validate). The .goreleaser.yml file
-  # uses v2 syntax accordingly. Keep this value in lockstep with
-  # release-validate.yml; release-validate fails if they drift.
-  GORELEASER_CROSS_VERSION: v1.26.2-3
 
 jobs:
   release:
@@ -30,7 +33,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          # goreleaser needs full history to build the changelog from git.
           fetch-depth: 0
 
       - uses: actions/setup-go@v5
@@ -38,16 +40,25 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # Build all per-platform artifacts via goreleaser-cross. The Docker
-      # image owns the C cross-toolchains (osxcross, mingw, glibc), so a
-      # single Linux runner can produce darwin/linux/windows binaries with CGO.
-      # The image's tag matches the goreleaser version embedded in it, pinned
-      # at the top of this file.
-      #
-      # On tag push: --clean (default) — full build, archives, checksums.
-      # On workflow_dispatch: --snapshot --clean — uses a synthetic version so
-      # nothing can be confused with a real release.
-      - name: Build artifacts (goreleaser-cross)
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Same custom image release-validate uses. GHA layer cache is shared
+      # across workflows (scope=release-builder) so the slow ICU cross-build
+      # layers are typically already populated by a recent validate run.
+      - name: Build release-builder image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: build/Dockerfile.release
+          tags: lit-release-builder:local
+          load: true
+          cache-from: type=gha,scope=release-builder
+          cache-to: type=gha,scope=release-builder,mode=max
+
+      # On tag push: full clean build (no --snapshot — uses the real tag).
+      # On workflow_dispatch: --snapshot --clean (uses a synthetic version).
+      - name: Build artifacts
         run: |
           set -euo pipefail
           ARGS="release --clean"
@@ -56,31 +67,15 @@ jobs:
           fi
           docker run --rm \
             -v "$PWD":/go/src/app -w /go/src/app \
-            ghcr.io/goreleaser/goreleaser-cross:${GORELEASER_CROSS_VERSION} \
+            lit-release-builder:local \
             $ARGS
 
-      # mkmanifest runs OUTSIDE the goreleaser-cross image (it only needs Go,
-      # which the runner already has). It reads dist/checksums.txt and emits
-      # dist/release-manifest.json. .goreleaser.yml has release.disable: true,
-      # so goreleaser never tries to publish; this workflow owns publishing
-      # via `gh release create` below.
+      # mkmanifest reads dist/metadata.json for the version goreleaser used
+      # (handles both real-tag and snapshot cases identically).
       - name: Generate release manifest
-        id: manifest
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            # On dispatch, goreleaser uses a snapshot version derived from the
-            # commit. metadata.json records the exact value it used; mkmanifest
-            # must use the SAME value so its filename parser matches.
-            VERSION=$(jq -r .version dist/metadata.json)
-          else
-            # Tag pushes: github.ref_name is the tag (vX.Y.Z); goreleaser
-            # strips the leading "v" for its .Version template, so the
-            # archives are named lit_<vX.Y.Z-without-v>_<os>_<arch>.<ext>.
-            # mkmanifest must see the same stripped version.
-            VERSION=$(jq -r .version dist/metadata.json)
-          fi
-          echo "Using version: $VERSION"
+          VERSION=$(jq -r .version dist/metadata.json)
           go run ./tools/mkmanifest \
             -version "$VERSION" \
             -commit "$(git rev-parse --short HEAD)" \
@@ -88,11 +83,8 @@ jobs:
             -dist ./dist \
             -base-url https://github.com/${{ github.repository }}/releases/download \
             -out ./dist/release-manifest.json
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       # Tag push: publish the GitHub Release with archives + checksums + manifest.
-      # gh release create is atomic over the uploaded asset list — either the
-      # release exists with all assets or it doesn't exist at all.
       - name: Publish GitHub Release (tag only)
         if: startsWith(github.ref, 'refs/tags/')
         env:
@@ -104,8 +96,8 @@ jobs:
             --title "${{ github.ref_name }}" \
             --generate-notes
 
-      # workflow_dispatch: upload the whole dist/ as a 7-day workflow artifact
-      # so the dry-run is inspectable without creating a release.
+      # workflow_dispatch: upload the snapshot dist/ as a 7-day workflow
+      # artifact so the dry-run is inspectable without creating a release.
       - name: Upload snapshot artifacts (dispatch only)
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@v4

@@ -44,6 +44,8 @@ builds:
     # nothing in this repo installs compilers ad-hoc.
     env:
       - CGO_ENABLED=1
+      # CC per target — selects the right cross-compiler from the goreleaser-cross
+      # base image (osxcross for darwin, mingw for windows, gnu-gcc for linux).
       - >-
         {{- if eq .Os "darwin" -}}
           {{- if eq .Arch "amd64" }}CC=o64-clang{{- end }}
@@ -57,6 +59,32 @@ builds:
         {{- if eq .Os "linux" -}}
           {{- if eq .Arch "amd64" }}CC=x86_64-linux-gnu-gcc{{- end }}
           {{- if eq .Arch "arm64" }}CC=aarch64-linux-gnu-gcc{{- end }}
+        {{- end -}}
+      # CGO_CFLAGS / CGO_LDFLAGS per target — points cgo at the ICU prefix
+      # build/Dockerfile.release installs at /opt/icu/<goos>_<goarch>. Empty
+      # for linux/amd64 because that target uses the system libicu-dev which
+      # is already on the default include/lib search path.
+      - >-
+        {{- if and (eq .Os "linux") (eq .Arch "amd64") -}}
+          CGO_CFLAGS=
+        {{- else -}}
+          CGO_CFLAGS=-I/opt/icu/{{ .Os }}_{{ .Arch }}/include
+        {{- end -}}
+      - >-
+        {{- if and (eq .Os "linux") (eq .Arch "amd64") -}}
+          CGO_LDFLAGS=
+        {{- else -}}
+          CGO_LDFLAGS=-L/opt/icu/{{ .Os }}_{{ .Arch }}/lib
+        {{- end -}}
+      # icu_static build tag: the cross-builds produce ONLY static libs
+      # (--enable-static --disable-shared), so go-icu-regex's static-link
+      # cgo recipe is the one we want. The linux/amd64 native build uses
+      # the system dynamic libs, which is its non-static recipe — handled
+      # by leaving the tag unset for that target only.
+      - >-
+        {{- if and (eq .Os "linux") (eq .Arch "amd64") -}}
+        {{- else -}}
+          GOFLAGS=-tags=icu_static
         {{- end -}}
     goos:
       - linux
