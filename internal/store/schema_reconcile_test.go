@@ -533,10 +533,18 @@ func TestReconcileErrorMessageIsActionable(t *testing.T) {
 	if err == nil {
 		t.Fatal("Open() on a malformed shape returned nil; expected an actionable error")
 	}
-	// Must name the specific reconcile step that failed (an index creation
-	// against the missing column).
+	// Must name the reconcile phase wrapping the structural refusal.
 	if !strings.Contains(err.Error(), "reconcile pre-goose workspace") {
 		t.Fatalf("error %q does not name the reconcile phase", err)
+	}
+	// Must name the specific missing prerequisite column(s) — the
+	// upfront structural probe identifies the actual anomaly, not
+	// a generic refusal.
+	if !strings.Contains(err.Error(), "status") {
+		t.Fatalf("error %q does not name the missing reconcile prerequisite", err)
+	}
+	if !strings.Contains(err.Error(), "not a known historical shape") {
+		t.Fatalf("error %q does not classify the shape as unknown-history", err)
 	}
 	// Must NOT contain the destructive guidance the old code emitted.
 	if strings.Contains(err.Error(), "restore it from a snapshot or recreate") {

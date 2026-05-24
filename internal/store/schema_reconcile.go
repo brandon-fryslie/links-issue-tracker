@@ -133,6 +133,18 @@ func createIssuesTableStmt() string {
 // [LAW:single-enforcer] reconcileToBaseline is the one place that
 // orders reconcile stages; callers do not partial-order them.
 func (s *Store) reconcileToBaseline(ctx context.Context, guard *snapshotGuard) (bool, error) {
+	// [LAW:no-silent-fallbacks] Structurally unrecoverable shapes fail
+	// BEFORE any mutation, so the workspace is not partially altered
+	// by reconcile when the failure is inevitable. The downstream
+	// steps assume an issues table that has at minimum the columns
+	// indexes/backfills reference (status, priority, updated_at).
+	// Without this gate, an issues table with only `id` would let
+	// reconcile create meta/relations/comments/labels before failing
+	// at idx_issues_status_priority — leaving scaffolding tables
+	// behind that have no application meaning.
+	if err := s.verifyIssuesReconcileable(ctx); err != nil {
+		return false, err
+	}
 	schema := []ddlStep{
 		{target: "meta", stmt: `CREATE TABLE meta (
 			meta_key VARCHAR(191) PRIMARY KEY,
@@ -312,6 +324,47 @@ func (s *Store) reconcileToBaseline(ctx context.Context, guard *snapshotGuard) (
 	}
 	changed = changed || workspaceChanged
 	return changed, nil
+}
+
+// verifyIssuesReconcileable fast-fails when the issues table exists but
+// is missing columns the reconcile's downstream steps depend on. An
+// issues table that absent altogether is fine — reconcile will CREATE
+// it via createIssuesTableStmt. The failure mode this guards is the
+// synthetic-corruption shape (an issues table with only `id`) — no
+// real pre-goose workspace shape had issues without status / priority /
+// updated_at.
+//
+// [LAW:single-enforcer] One structural-precondition probe at the
+// reconcile boundary; downstream steps trust that their preconditions
+// hold.
+// [LAW:no-silent-fallbacks] A specific, named structural error is
+// emitted before any mutation; the operator sees the actual anomaly.
+func (s *Store) verifyIssuesReconcileable(ctx context.Context) error {
+	cols, err := s.tableColumns(ctx, "issues")
+	if err != nil {
+		return err
+	}
+	if len(cols) == 0 {
+		// issues table doesn't exist at all — reconcile's CREATE TABLE
+		// step will produce the canonical shape from scratch.
+		return nil
+	}
+	required := []string{"status", "priority", "updated_at"}
+	var missing []string
+	for _, c := range required {
+		if !cols[c] {
+			missing = append(missing, c)
+		}
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf(
+			"workspace's issues table is missing reconcile prerequisites (%s); "+
+				"the shape is structurally beyond what pre-goose reconcile can recover — "+
+				"this is not a known historical shape",
+			strings.Join(missing, ", "),
+		)
+	}
+	return nil
 }
 
 // runGatedCreate is the schema-list runner — probes existence, snapshots
