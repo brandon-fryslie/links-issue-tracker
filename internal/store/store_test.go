@@ -1453,8 +1453,9 @@ func TestOpenForReadRefusesUnreconcilableShape(t *testing.T) {
 		t.Fatalf("openStoreConnection() error = %v", err)
 	}
 	// A structurally impossible issues table: no real workspace shape ever
-	// had issues without status/title/description. Reconcile cannot create
-	// idx_issues_status_priority because it indexes the missing status column.
+	// had issues without status/priority/updated_at/issue_type/closed_at.
+	// verifyIssuesReconcilable in runMigration probes for these required
+	// columns and refuses before any reconcile DDL runs.
 	if _, err := seed.db.ExecContext(ctx, `CREATE TABLE issues (id VARCHAR(191) PRIMARY KEY)`); err != nil {
 		_ = seed.Close()
 		t.Fatalf("create unreconcilable schema error = %v", err)
@@ -1467,9 +1468,10 @@ func TestOpenForReadRefusesUnreconcilableShape(t *testing.T) {
 	if err == nil {
 		t.Fatal("OpenForRead() on an unreconcilable schema returned nil error; expected a specific structural error")
 	}
-	// The error must name what reconcile couldn't do — not a vague "partial"
-	// or "restore from snapshot" message. The specific failure is that the
-	// status column is missing and an index depending on it can't be created.
+	// The error must name the missing prerequisite column — not a vague
+	// "partial" or "restore from snapshot" message. verifyIssuesReconcilable
+	// emits "missing reconcile prerequisites (...)" naming each absent
+	// required column (status is one of them for this fixture).
 	if !strings.Contains(err.Error(), "status") {
 		t.Fatalf("error %q does not name the structural anomaly (missing status column)", err)
 	}
