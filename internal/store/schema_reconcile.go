@@ -385,7 +385,10 @@ func (s *Store) verifyIssuesReconcilable(ctx context.Context) error {
 		// step will produce the canonical shape from scratch.
 		return nil
 	}
-	required := []string{"status", "priority", "updated_at", "issue_type", "closed_at"}
+	// description appears in the ALTER TABLE issues ADD COLUMN
+	// agent_prompt ... AFTER `description` step, so reconcile fails
+	// mid-flight if it is missing.
+	required := []string{"status", "priority", "updated_at", "issue_type", "closed_at", "description"}
 	var missing []string
 	for _, c := range required {
 		if !cols[c] {
@@ -656,6 +659,23 @@ func (s *Store) ensureIssueRanks(ctx context.Context, guard *snapshotGuard) (boo
 	if err != nil {
 		return false, fmt.Errorf("ensureIssueRanks: begin tx: %w", err)
 	}
+	// [LAW:no-silent-fallbacks] Seed `current` from the max existing
+	// non-empty rank (or rank.Initial() if there are no ranked rows
+	// yet), so the assigned sequence cannot collide with any rank
+	// already in the workspace. The mixed-state case — some rows
+	// ranked, others empty — could otherwise produce duplicate ranks
+	// that break the strict-ordering invariant rank mutations rely on.
+	var maxExistingRank sql.NullString
+	if err := tx.QueryRowContext(ctx,
+		`SELECT MAX(item_rank) FROM issues WHERE item_rank != ''`,
+	).Scan(&maxExistingRank); err != nil {
+		_ = tx.Rollback()
+		return false, fmt.Errorf("ensureIssueRanks: read max existing rank: %w", err)
+	}
+	current := rank.Initial()
+	if maxExistingRank.Valid && maxExistingRank.String != "" {
+		current = rank.After(maxExistingRank.String)
+	}
 	// [LAW:single-enforcer] Each unranked row needs a distinct,
 	// sequential rank string, so a single-statement UPDATE cannot
 	// replace the loop. A prepared statement amortizes the parse cost
@@ -669,7 +689,6 @@ func (s *Store) ensureIssueRanks(ctx context.Context, guard *snapshotGuard) (boo
 		return false, fmt.Errorf("ensureIssueRanks: prepare: %w", err)
 	}
 	defer stmt.Close()
-	current := rank.Initial()
 	for _, id := range ids {
 		if _, err := stmt.ExecContext(ctx, current, id); err != nil {
 			_ = tx.Rollback()

@@ -544,6 +544,73 @@ func TestReconcileTopicHasNoDefault(t *testing.T) {
 	}
 }
 
+// TestReconcileRankBackfillCoexistsWithExistingRanks pins the mixed-
+// state contract: if some issues are already ranked and others have
+// item_rank = '', the rank backfill seeds from MAX(existing rank) so
+// new ranks never collide. Without this seeding, ensureIssueRanks
+// would assign rank.Initial() to the first unranked row, which would
+// duplicate any existing rank.Initial() row and break the strict-
+// ordering invariant rank mutations depend on.
+//
+// [LAW:no-silent-fallbacks] Generated ranks cannot duplicate any
+// existing rank value in the workspace, even in mixed states.
+func TestReconcileRankBackfillCoexistsWithExistingRanks(t *testing.T) {
+	ctx := context.Background()
+	doltRoot := filepath.Join(t.TempDir(), "dolt")
+
+	first, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open(first) error = %v", err)
+	}
+	// Create one issue (gets the default initial rank), then insert a
+	// second issue directly with item_rank = '' — simulating the
+	// mixed state where ensureIssueRanks must coexist with existing
+	// rank values. Capture the first issue's actual rank so we can
+	// assert no duplication.
+	ranked, err := first.CreateIssue(ctx, CreateIssueInput{Prefix: "test", Title: "Already ranked", Topic: "rank", IssueType: "task", Priority: 0})
+	if err != nil {
+		_ = first.Close()
+		t.Fatalf("seed ranked CreateIssue error = %v", err)
+	}
+	var existingRank string
+	if err := first.db.QueryRowContext(ctx, `SELECT item_rank FROM issues WHERE id = ?`, ranked.ID).Scan(&existingRank); err != nil {
+		_ = first.Close()
+		t.Fatalf("read existing rank error = %v", err)
+	}
+	if existingRank == "" {
+		_ = first.Close()
+		t.Fatalf("seeded ranked issue has empty item_rank — fixture invalid")
+	}
+	if err := first.ExecRawForTest(ctx,
+		`INSERT INTO issues (id, title, description, status, priority, issue_type, topic, assignee, created_at, updated_at, item_rank) VALUES ('unranked-row', 'no rank', '', 'open', 0, 'task', 'misc', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', '')`,
+	); err != nil {
+		_ = first.Close()
+		t.Fatalf("insert unranked row error = %v", err)
+	}
+	hijackToPreGoose(t, first)
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close(first) error = %v", err)
+	}
+
+	st := assertReachedBaseline(t, doltRoot)
+
+	// Read both rows' ranks. They must be (a) both non-empty and
+	// (b) distinct from each other.
+	var rankedAfter, newAfter string
+	if err := st.db.QueryRowContext(ctx, `SELECT item_rank FROM issues WHERE id = ?`, ranked.ID).Scan(&rankedAfter); err != nil {
+		t.Fatalf("read ranked row error = %v", err)
+	}
+	if err := st.db.QueryRowContext(ctx, `SELECT item_rank FROM issues WHERE id = ?`, "unranked-row").Scan(&newAfter); err != nil {
+		t.Fatalf("read unranked row error = %v", err)
+	}
+	if newAfter == "" {
+		t.Fatal("backfilled row still has empty item_rank")
+	}
+	if rankedAfter == newAfter {
+		t.Fatalf("backfilled rank %q collides with existing rank %q — seeding from MAX is broken", newAfter, rankedAfter)
+	}
+}
+
 // TestPostReconcileBaselineVerificationCatchesNonIssuesGaps pins the
 // safety net that runs AFTER reconcileToBaseline and BEFORE adoption:
 // reconcile's CREATE TABLE steps are gated on table presence (not
