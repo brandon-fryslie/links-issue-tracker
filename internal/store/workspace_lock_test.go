@@ -27,10 +27,14 @@ func TestWorkspaceLockSharedHoldersCoexist(t *testing.T) {
 	defer first.Close()
 
 	// Second Open against the same workspace must succeed without waiting on
-	// the first's shared hold to release.
+	// the first's shared hold to release. Pass a context with the same
+	// 10s deadline into Open so the goroutine cannot outlive the test —
+	// without this, a hanging Open would leak a goroutine after t.Fatal.
+	openCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		s, err := Open(ctx, doltRoot, "test-workspace-id")
+		s, err := Open(openCtx, doltRoot, "test-workspace-id")
 		if err != nil {
 			done <- err
 			return
@@ -43,7 +47,7 @@ func TestWorkspaceLockSharedHoldersCoexist(t *testing.T) {
 		if err != nil {
 			t.Fatalf("second Open() error = %v", err)
 		}
-	case <-time.After(10 * time.Second):
+	case <-openCtx.Done():
 		t.Fatal("second Open() did not complete within 10s — shared holds must coexist")
 	}
 }
