@@ -1,0 +1,60 @@
+name: Release
+
+# Triggered by tag push matching `v*.*.*`. Manual `workflow_dispatch` is
+# available for dry-run debugging only — it builds artifacts but does NOT
+# publish a release (goreleaser's release step requires a tag context).
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write    # creates the GitHub Release and uploads assets
+  packages: write    # reserved for future image publishing
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # goreleaser needs full history to build the changelog.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Install Dolt (matches CI version)
+        run: |
+          curl -L https://github.com/dolthub/dolt/releases/download/v1.81.10/install.sh -o install-dolt.sh
+          sudo bash install-dolt.sh
+          dolt version
+
+      # Snapshot mode for workflow_dispatch (no tag context); release mode for
+      # real tags. goreleaser auto-detects which to run from the trigger.
+      - name: Run goreleaser (release on tag, snapshot on dispatch)
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: >-
+            ${{ github.event_name == 'workflow_dispatch' && 'release --snapshot --clean' || 'release --clean' }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # On workflow_dispatch the artifacts are not published; upload them as
+      # workflow artifacts so the dry-run is inspectable.
+      - name: Upload snapshot artifacts (dispatch only)
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lit-snapshot-${{ github.sha }}
+          path: dist/
+          retention-days: 7
