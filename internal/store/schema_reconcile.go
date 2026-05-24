@@ -343,11 +343,26 @@ func (s *Store) reconcileToBaseline(ctx context.Context, guard *snapshotGuard) (
 
 // verifyIssuesReconcileable fast-fails when the issues table exists but
 // is missing columns the reconcile's downstream steps depend on. An
-// issues table that absent altogether is fine — reconcile will CREATE
-// it via createIssuesTableStmt. The failure mode this guards is the
+// issues table absent altogether is fine — reconcile will CREATE it
+// via createIssuesTableStmt. The failure mode this guards is the
 // synthetic-corruption shape (an issues table with only `id`) — no
-// real pre-goose workspace shape had issues without status / priority /
-// updated_at.
+// real pre-goose workspace shape had issues without these columns.
+//
+// The prerequisite list is the full set of columns reconcile reads
+// from or writes against the existing issues table — anything later
+// reconcile steps assume is present:
+//
+//   - status       — idx_issues_status_priority, ensureUnifiedStatusSchema
+//                    backfills, status CHECK clause
+//   - priority     — idx_issues_status_priority, resetPrioritiesToNormal,
+//                    priority CHECK clause
+//   - updated_at   — idx_issues_status_priority, ensureIssueRanks ordering
+//   - issue_type   — ensureUnifiedStatusSchema (epic carve-out),
+//                    topic ADD COLUMN AFTER issue_type, type CHECK clause
+//   - closed_at    — ensureUnifiedStatusSchema (closed_at consistency)
+//
+// Reconcile adds the columns it knows are not part of every historical
+// shape (item_rank, topic, agent_prompt) — they are NOT prerequisites.
 //
 // [LAW:single-enforcer] One structural-precondition probe at the
 // reconcile boundary; downstream steps trust that their preconditions
@@ -364,7 +379,7 @@ func (s *Store) verifyIssuesReconcileable(ctx context.Context) error {
 		// step will produce the canonical shape from scratch.
 		return nil
 	}
-	required := []string{"status", "priority", "updated_at"}
+	required := []string{"status", "priority", "updated_at", "issue_type", "closed_at"}
 	var missing []string
 	for _, c := range required {
 		if !cols[c] {
@@ -623,9 +638,20 @@ func (s *Store) ensureIssueRanks(ctx context.Context, guard *snapshotGuard) (boo
 	if _, err := guard.ensure(); err != nil {
 		return false, fmt.Errorf("ensureIssueRanks: %w", err)
 	}
+	// [LAW:single-enforcer] Each unranked row needs a distinct, sequential
+	// rank string, so a single-statement UPDATE cannot replace the loop.
+	// A prepared statement amortizes the parse cost so workspaces with
+	// thousands of pre-rank rows finish the one-time backfill in seconds
+	// rather than minutes. The DEFER closes the statement under every
+	// exit path, including loop-mid errors.
+	stmt, err := s.db.PrepareContext(ctx, "UPDATE issues SET item_rank = ? WHERE id = ?")
+	if err != nil {
+		return false, fmt.Errorf("ensureIssueRanks: prepare: %w", err)
+	}
+	defer stmt.Close()
 	current := rank.Initial()
 	for _, id := range ids {
-		if _, err := s.db.ExecContext(ctx, "UPDATE issues SET item_rank = ? WHERE id = ?", current, id); err != nil {
+		if _, err := stmt.ExecContext(ctx, current, id); err != nil {
 			return false, fmt.Errorf("ensureIssueRanks: update %s: %w", id, err)
 		}
 		current = rank.After(current)

@@ -234,15 +234,17 @@ func (s *Store) runMigration(ctx context.Context, guard *snapshotGuard) error {
 	// [LAW:no-silent-fallbacks] Verify reconcile prerequisites BEFORE
 	// the snapshot guard fires, so a workspace whose shape reconcile
 	// cannot recover from does not accumulate a recovery snapshot per
-	// Open. verifyIssuesReconcileable is read-only and runs the same on
-	// every Open; the result discriminates between "issues is at a
-	// known historical shape (or doesn't exist)" and "issues exists
-	// but is structurally beyond any known shape." Returns nil for
-	// phaseFresh (no issues table) and phaseManaged (issues columns
-	// are canonical) — only phaseAdopt with a malformed issues table
-	// surfaces an error here.
-	if err := s.verifyIssuesReconcileable(ctx); err != nil {
-		return fmt.Errorf("reconcile pre-goose workspace: %w", err)
+	// Open. The check is gated to phaseAdopt because that is the only
+	// phase where reconcile actually runs — phaseFresh has no issues
+	// table to verify, and phaseManaged has already passed v1
+	// adoption so its issues table shape is governed by the goose
+	// registry, not by reconcile preconditions. Running the probe in
+	// non-adopt phases would either no-op pointlessly or produce a
+	// misleadingly-wrapped error.
+	if state.phase == phaseAdopt {
+		if err := s.verifyIssuesReconcileable(ctx); err != nil {
+			return fmt.Errorf("reconcile pre-goose workspace: %w", err)
+		}
 	}
 	if _, err := guard.ensure(); err != nil {
 		return fmt.Errorf("migrate: %w", err)
