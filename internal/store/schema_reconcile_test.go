@@ -503,6 +503,47 @@ func TestReconcileCreatedTablesMatchBaselineConstraintNames(t *testing.T) {
 	}
 }
 
+// TestReconcileTopicHasNoDefault pins that after reconcile adds the
+// topic column, the column has no default — matching baseline.sql.
+// The ADD COLUMN needs a DEFAULT for the backfill to satisfy NOT NULL,
+// but baseline.sql declares topic without a default; reconcile drops
+// the default post-add so the post-reconcile shape is byte-equivalent
+// to a baseline-applied workspace.
+//
+// [LAW:one-source-of-truth] Both creators (goose-baseline and
+// reconcile) produce the same column shape, no defaults to drift on.
+func TestReconcileTopicHasNoDefault(t *testing.T) {
+	ctx := context.Background()
+	doltRoot := filepath.Join(t.TempDir(), "dolt")
+
+	first, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open(first) error = %v", err)
+	}
+	// Drop the topic column so reconcile must re-add it.
+	if err := first.ExecRawForTest(ctx, `ALTER TABLE issues DROP COLUMN topic`); err != nil {
+		_ = first.Close()
+		t.Fatalf("drop topic error = %v", err)
+	}
+	hijackToPreGoose(t, first)
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close(first) error = %v", err)
+	}
+
+	st := assertReachedBaseline(t, doltRoot)
+
+	// Post-reconcile, the topic column must exist with NO column_default.
+	var hasDefault bool
+	if err := st.db.QueryRowContext(ctx,
+		`SELECT column_default IS NOT NULL FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'issues' AND column_name = 'topic'`,
+	).Scan(&hasDefault); err != nil {
+		t.Fatalf("query topic column_default error = %v", err)
+	}
+	if hasDefault {
+		t.Fatal("reconcile left a DEFAULT on issues.topic; baseline declares it with no default — drift canary will fail")
+	}
+}
+
 // TestReconcileErrorMessageIsActionable pins the contract that the
 // reconcile, when it cannot bring a shape forward, names the specific
 // operation it failed on. The deleted code's failure message was

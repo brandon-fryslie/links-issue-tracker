@@ -260,6 +260,26 @@ func (s *Store) reconcileToBaseline(ctx context.Context, guard *snapshotGuard) (
 		return changed, err
 	}
 	changed = changed || topicColumnChanged
+	// The ADD COLUMN above needed `DEFAULT 'misc'` so existing rows
+	// could be inserted without violating NOT NULL. Baseline.sql
+	// declares topic as `VARCHAR(191) NOT NULL` with no default, so
+	// reconcile-built columns end up structurally different from
+	// baseline-built ones unless the default is dropped here.
+	//
+	// [LAW:one-source-of-truth] Post-reconcile schema must equal the
+	// baseline schema byte-for-byte; otherwise the drift canary breaks
+	// and future migrations against the canonical shape get surprised.
+	topicDefaultDropped, err := s.execGatedMutation(
+		ctx,
+		guard,
+		`SELECT 1 FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = 'issues' AND column_name = 'topic' AND column_default IS NOT NULL LIMIT 1`,
+		`ALTER TABLE issues MODIFY topic VARCHAR(191) NOT NULL`,
+		"drop topic default to match baseline shape",
+	)
+	if err != nil {
+		return changed, err
+	}
+	changed = changed || topicDefaultDropped
 	// Workspaces predating the rename still have the old `prompt`
 	// column. Probe-gated rename keeps migration idempotent across
 	// fresh / migrated / pre-rename workspace states. `prompt` is
