@@ -83,25 +83,50 @@ RUN cp -r src native-build \
     && make -j"$(nproc)"
 
 # Helper: cross-build for one target. Args:
-#   $1 = goos    (darwin | linux | windows)
-#   $2 = goarch  (amd64 | arm64)
+#   $1 = goos
+#   $2 = goarch
 #   $3 = configure --host=<triplet>
-#   $4 = CC       (cross compiler)
+#   $4 = CC
 #   $5 = CXX
-#   $6 = extra PATH dir (e.g. /osxcross/bin) or empty
+#   $6 = AR_GLOB — shell glob that resolves to the cross-ar binary. ICU's
+#        build was failing for darwin because it was using the host's GNU ar
+#        to create archives that macOS ld then rejected ("unknown file
+#        format" with byte pattern 0x21 0x3C 0x61 0x72 0x63 0x68 0x3E =
+#        "!<arch>" — GNU ar). osxcross/mingw/binutils each provide their
+#        own cross-ar that produces the right archive format; we discover
+#        the actual filename via glob because osxcross's tool names include
+#        an SDK-version suffix we don't want to hardcode.
+#   $7 = extra PATH dir (e.g. /osxcross/bin) or empty
 #
 # Writes to /opt/icu/<goos>_<goarch>.
 RUN <<'EOF' bash
 set -euo pipefail
 cross_build() {
-    local goos="$1" goarch="$2" triplet="$3" cc="$4" cxx="$5" path_extra="$6"
+    local goos="$1" goarch="$2" triplet="$3" cc="$4" cxx="$5" ar_glob="$6" path_extra="$7"
     local prefix="/opt/icu/${goos}_${goarch}"
     local builddir="/tmp/icu-build/cross-${goos}-${goarch}"
-    echo "=== ICU cross-build for ${goos}/${goarch} (host=${triplet}, cc=${cc}) ==="
+
+    # Resolve AR/RANLIB from the glob. shopt -s nullglob so an empty match
+    # is an empty array (caught loudly), not a literal glob pattern.
+    shopt -s nullglob
+    local ar_matches=( ${ar_glob}-ar )
+    local ranlib_matches=( ${ar_glob}-ranlib )
+    shopt -u nullglob
+    if [ ${#ar_matches[@]} -eq 0 ] || [ ${#ranlib_matches[@]} -eq 0 ]; then
+        echo "FATAL: no ar/ranlib for glob '${ar_glob}'" >&2
+        echo "available tools matching the prefix:" >&2
+        ls -1 ${ar_glob}* 2>/dev/null | head -20 >&2 || echo "(none)" >&2
+        exit 1
+    fi
+    local AR_BIN="${ar_matches[0]}"
+    local RANLIB_BIN="${ranlib_matches[0]}"
+
+    echo "=== ICU cross-build for ${goos}/${goarch}"
+    echo "    host=${triplet} cc=${cc} ar=${AR_BIN} ranlib=${RANLIB_BIN}"
     cp -r /tmp/icu-build/src "$builddir"
     pushd "$builddir/source" >/dev/null
     PATH="${path_extra:+${path_extra}:}${PATH}" \
-        CC="$cc" CXX="$cxx" \
+        CC="$cc" CXX="$cxx" AR="$AR_BIN" RANLIB="$RANLIB_BIN" \
         ./configure --host="$triplet" --prefix="$prefix" \
             --with-cross-build=/tmp/icu-build/native-build/source \
             --enable-static --disable-shared \
@@ -113,10 +138,16 @@ cross_build() {
     echo "=== ${goos}/${goarch} installed at ${prefix} ==="
 }
 
-cross_build linux  arm64  aarch64-linux-gnu          aarch64-linux-gnu-gcc    aarch64-linux-gnu-g++    ""
-cross_build darwin amd64  x86_64-apple-darwin        o64-clang                 o64-clang++              /osxcross/bin
-cross_build darwin arm64  aarch64-apple-darwin       oa64-clang                oa64-clang++             /osxcross/bin
-cross_build windows amd64 x86_64-w64-mingw32         x86_64-w64-mingw32-gcc    x86_64-w64-mingw32-g++   ""
+# AR_GLOB resolves to the actual binary at build time. Stable names:
+#   - linux/arm64: /usr/bin/aarch64-linux-gnu-ar (from gcc-aarch64-linux-gnu)
+#   - windows/amd64: /usr/bin/x86_64-w64-mingw32-ar (from mingw)
+# Globbed (osxcross uses SDK-version-suffixed names):
+#   - darwin/amd64: /osxcross/bin/x86_64-apple-darwin*-ar
+#   - darwin/arm64: /osxcross/bin/aarch64-apple-darwin*-ar
+cross_build linux   arm64 aarch64-linux-gnu     aarch64-linux-gnu-gcc  aarch64-linux-gnu-g++  /usr/bin/aarch64-linux-gnu  ""
+cross_build darwin  amd64 x86_64-apple-darwin   o64-clang              o64-clang++            "/osxcross/bin/x86_64-apple-darwin*" /osxcross/bin
+cross_build darwin  arm64 aarch64-apple-darwin  oa64-clang             oa64-clang++           "/osxcross/bin/aarch64-apple-darwin*" /osxcross/bin
+cross_build windows amd64 x86_64-w64-mingw32    x86_64-w64-mingw32-gcc x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32 ""
 EOF
 
 # Clean up the source + native bootstrap; consumers don't need them after this.
