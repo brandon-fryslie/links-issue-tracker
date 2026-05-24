@@ -87,13 +87,19 @@ const canonicalStatusCheckClause = `(issue_type IN ('epic') AND status IS NULL) 
 // Mirrors the issues table in 00001_baseline.sql exactly, including
 // every column (item_rank in particular) and the deterministic
 // constraint names. A reconcile-built issues table must be
-// byte-equivalent to a baseline-applied one or the schema-drift canary
-// (sxsk.4) breaks and downstream migrations that reference the
-// constraint names fail.
+// byte-equivalent to a baseline-applied one or downstream migrations
+// that reference the constraint names fail and the post-reconcile
+// verifyBaselineShape gate rejects the stamp.
 //
 // [LAW:one-source-of-truth] The two definitions (here and
-// 00001_baseline.sql) are kept in sync; the drift canary catches
-// divergence in CI.
+// 00001_baseline.sql) are kept in sync by convention; the project's
+// existing drift canary (sxsk.4) compares a fresh goose-applied
+// workspace to schema_snapshot.sql but does NOT directly compare
+// reconcile-built tables, so the synchronization is enforced by
+// (a) human review of any change to either definition and (b) the
+// TestReconcileCreatedTablesMatchBaselineConstraintNames test which
+// asserts the named constraints reconcile installs match the
+// baseline names.
 func createIssuesTableStmt() string {
 	return fmt.Sprintf(`CREATE TABLE issues (
 			id VARCHAR(191) PRIMARY KEY,

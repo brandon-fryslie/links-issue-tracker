@@ -1428,19 +1428,19 @@ func TestOpenForReadDoesNotCreateDatabaseWhenMissing(t *testing.T) {
 // workspace whose shape is structurally beyond any prior canonical state
 // (here, an issues table with ONLY an id column — no title, no status, no
 // description; far worse than any real historical shape ever had) cannot be
-// forward-migrated and produces a SPECIFIC error naming the actual reconcile
-// failure.
+// forward-migrated and produces a SPECIFIC error naming the actual missing
+// prerequisite.
 //
 // Compare to the historical canonical shapes the reconcile handles
 // (TestOpenForwardMigratesPreConvergedColumnShape etc.) which forward-migrate
-// to v1. The discriminator is: a workspace that the reconcile's
-// probe-then-DDL sequence cannot fix produces a specific structural error,
-// not the now-removed "restore from snapshot or recreate" data-destroying
-// guidance.
+// to v1. The discriminator is: an issues table whose required columns are
+// missing (status, priority, updated_at, issue_type, closed_at) trips the
+// verifyIssuesReconcilable preflight in runMigration — the structural refusal
+// fires BEFORE any reconcile DDL runs, naming the specific missing column(s).
 //
 // [LAW:no-silent-fallbacks] An unrecoverable shape produces a specific
-// error naming the exact missing piece (here, the status column that
-// idx_issues_status_priority depends on), not a vague refusal.
+// error naming the missing prerequisite column, not a vague refusal —
+// and refuses before any mutation lands on the workspace.
 func TestOpenForReadRefusesUnreconcilableShape(t *testing.T) {
 	ctx := context.Background()
 	doltRoot := filepath.Join(t.TempDir(), "dolt")
