@@ -644,23 +644,41 @@ func (s *Store) ensureIssueRanks(ctx context.Context, guard *snapshotGuard) (boo
 	if _, err := guard.ensure(); err != nil {
 		return false, fmt.Errorf("ensureIssueRanks: %w", err)
 	}
-	// [LAW:single-enforcer] Each unranked row needs a distinct, sequential
-	// rank string, so a single-statement UPDATE cannot replace the loop.
-	// A prepared statement amortizes the parse cost so workspaces with
-	// thousands of pre-rank rows finish the one-time backfill in seconds
-	// rather than minutes. The DEFER closes the statement under every
-	// exit path, including loop-mid errors.
-	stmt, err := s.db.PrepareContext(ctx, "UPDATE issues SET item_rank = ? WHERE id = ?")
+	// [LAW:no-silent-fallbacks] The rank backfill is all-or-nothing: a
+	// mid-loop failure (context cancel, transient DB error, partial
+	// commit) would otherwise leave the first N rows with ranks
+	// r1..rN, and the next Open would re-query the unranked set and
+	// start over from rank.Initial() — colliding with the existing
+	// r1..rN and breaking the fractional-indexing invariant. BeginTx
+	// + Commit-or-Rollback ensures the next Open sees either all
+	// rows ranked or none of them; the loop can safely restart.
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
+		return false, fmt.Errorf("ensureIssueRanks: begin tx: %w", err)
+	}
+	// [LAW:single-enforcer] Each unranked row needs a distinct,
+	// sequential rank string, so a single-statement UPDATE cannot
+	// replace the loop. A prepared statement amortizes the parse cost
+	// so workspaces with thousands of pre-rank rows finish the
+	// one-time backfill in seconds rather than minutes. PrepareContext
+	// on the *tx* binds the statement to this transaction, so the
+	// rollback path reverts every prepared exec.
+	stmt, err := tx.PrepareContext(ctx, "UPDATE issues SET item_rank = ? WHERE id = ?")
+	if err != nil {
+		_ = tx.Rollback()
 		return false, fmt.Errorf("ensureIssueRanks: prepare: %w", err)
 	}
 	defer stmt.Close()
 	current := rank.Initial()
 	for _, id := range ids {
 		if _, err := stmt.ExecContext(ctx, current, id); err != nil {
+			_ = tx.Rollback()
 			return false, fmt.Errorf("ensureIssueRanks: update %s: %w", id, err)
 		}
 		current = rank.After(current)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("ensureIssueRanks: commit tx: %w", err)
 	}
 	return true, nil
 }
