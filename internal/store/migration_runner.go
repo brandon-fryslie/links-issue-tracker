@@ -242,7 +242,7 @@ func (s *Store) runMigration(ctx context.Context, guard *snapshotGuard) error {
 	// non-adopt phases would either no-op pointlessly or produce a
 	// misleadingly-wrapped error.
 	if state.phase == phaseAdopt {
-		if err := s.verifyIssuesReconcileable(ctx); err != nil {
+		if err := s.verifyIssuesReconcilable(ctx); err != nil {
 			return fmt.Errorf("reconcile pre-goose workspace: %w", err)
 		}
 	}
@@ -261,8 +261,6 @@ func (s *Store) runMigration(ctx context.Context, guard *snapshotGuard) error {
 		// a workspace already at v1 sees every probe return "present"
 		// and reconcile no-ops; a workspace at an earlier shape (e.g.
 		// missing issue_events or agent_prompt) gets its gaps filled.
-		// Either way, by the time adoptPreGooseWorkspace runs, the live
-		// schema actually matches v1 — so the stamp is honest.
 		//
 		// This is the recovery from commit 254f86b, which deleted the
 		// reconcile and left pre-v1 workspaces bricked. The reconcile
@@ -270,6 +268,31 @@ func (s *Store) runMigration(ctx context.Context, guard *snapshotGuard) error {
 		// Goose owns v1 → vN going forward.
 		if _, err := s.reconcileToBaseline(ctx, guard); err != nil {
 			return fmt.Errorf("reconcile pre-goose workspace: %w", err)
+		}
+		// [LAW:no-silent-fallbacks] After reconcile, verify the
+		// workspace shape actually matches the baseline before
+		// stamping. The reconcile's CREATE TABLE steps are gated on
+		// table presence, NOT column presence — so a workspace that
+		// has a malformed non-issues table (e.g. relations exists but
+		// is missing the type column) would have reconcile skip the
+		// CREATE and the malformed table would persist. Stamping v1
+		// on that workspace would be a lie, recreating the PR #119
+		// failure shape that adoption was supposed to prevent.
+		// verifyBaselineShape compares against the baseline file and
+		// names every remaining gap; if any gaps survive, refuse with
+		// a structural error before the stamp lands.
+		_, missing, err := s.verifyBaselineShape(ctx)
+		if err != nil {
+			return fmt.Errorf("verify post-reconcile baseline shape: %w", err)
+		}
+		if len(missing) > 0 {
+			return fmt.Errorf(
+				"post-reconcile workspace shape still differs from baseline "+
+					"(remaining gaps: %s); reconcile cannot bring this workspace "+
+					"to v1 — the shape is structurally beyond what pre-goose "+
+					"reconcile can recover",
+				strings.Join(missing, ", "),
+			)
 		}
 		if err := s.adoptPreGooseWorkspace(ctx); err != nil {
 			return err

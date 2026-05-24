@@ -544,6 +544,65 @@ func TestReconcileTopicHasNoDefault(t *testing.T) {
 	}
 }
 
+// TestPostReconcileBaselineVerificationCatchesNonIssuesGaps pins the
+// safety net that runs AFTER reconcileToBaseline and BEFORE adoption:
+// reconcile's CREATE TABLE steps are gated on table presence (not
+// column presence), so if a non-issues canonical table exists but is
+// missing required columns, reconcile no-ops the CREATE and the
+// malformed table persists. Without the post-reconcile baseline check,
+// adoption would stamp v1 on a non-baseline schema — recreating the
+// PR #119 failure shape adoption was supposed to prevent.
+//
+// [LAW:no-silent-fallbacks] After reconcile finishes, runMigration
+// verifies the actual shape matches baseline; any remaining gap aborts
+// with a structural error before the stamp lands.
+func TestPostReconcileBaselineVerificationCatchesNonIssuesGaps(t *testing.T) {
+	ctx := context.Background()
+	doltRoot := filepath.Join(t.TempDir(), "dolt")
+
+	first, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open(first) error = %v", err)
+	}
+	// Drop relations.created_by. The reconcile's {target: "relations"}
+	// ddlStep probes table presence — sees relations exists — and skips
+	// the CREATE TABLE. Adoption would then stamp v1 on a workspace
+	// where relations is missing created_by. The post-reconcile
+	// baseline check must catch this.
+	// (Cannot drop relations.type — it's part of the PRIMARY KEY.)
+	if err := first.ExecRawForTest(ctx, `ALTER TABLE relations DROP COLUMN created_by`); err != nil {
+		_ = first.Close()
+		t.Fatalf("drop relations.created_by error = %v", err)
+	}
+	hijackToPreGoose(t, first)
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close(first) error = %v", err)
+	}
+
+	_, err = Open(ctx, doltRoot, "test-workspace-id")
+	if err == nil {
+		t.Fatal("Open() stamped v1 on a workspace with a malformed relations table; the post-reconcile baseline check failed to catch the gap")
+	}
+	// The error must name the specific remaining gap so the operator
+	// can act on it — not a vague "partial schema" message.
+	if !strings.Contains(err.Error(), "relations.created_by") {
+		t.Fatalf("error %q does not name the remaining relations.created_by gap after reconcile", err)
+	}
+	// And the workspace must NOT have been stamped at v1.
+	st, err := openStoreConnection(doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("openStoreConnection() error = %v", err)
+	}
+	defer st.Close()
+	exists, err := st.tableExists(ctx, gooseVersionTable)
+	if err != nil {
+		t.Fatalf("tableExists(goose_db_version) error = %v", err)
+	}
+	if exists {
+		t.Fatal("goose_db_version was created despite the malformed relations table — the stamp must NOT land before the shape is canonical")
+	}
+}
+
 // TestReconcileErrorMessageIsActionable pins the contract that the
 // reconcile, when it cannot bring a shape forward, names the specific
 // operation it failed on. The deleted code's failure message was

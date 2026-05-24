@@ -133,7 +133,7 @@ func createIssuesTableStmt() string {
 // [LAW:single-enforcer] reconcileToBaseline is the one place that
 // orders reconcile stages; callers do not partial-order them.
 func (s *Store) reconcileToBaseline(ctx context.Context, guard *snapshotGuard) (bool, error) {
-	// Precondition: verifyIssuesReconcileable was called by runMigration
+	// Precondition: verifyIssuesReconcilable was called by runMigration
 	// before the snapshot guard fired, so this function assumes the
 	// issues table (if present) carries the columns downstream steps
 	// reference. Routing the check through the caller — not inside
@@ -341,7 +341,7 @@ func (s *Store) reconcileToBaseline(ctx context.Context, guard *snapshotGuard) (
 	return changed, nil
 }
 
-// verifyIssuesReconcileable fast-fails when the issues table exists but
+// verifyIssuesReconcilable fast-fails when the issues table exists but
 // is missing columns the reconcile's downstream steps depend on. An
 // issues table absent altogether is fine — reconcile will CREATE it
 // via createIssuesTableStmt. The failure mode this guards is the
@@ -369,7 +369,7 @@ func (s *Store) reconcileToBaseline(ctx context.Context, guard *snapshotGuard) (
 // hold.
 // [LAW:no-silent-fallbacks] A specific, named structural error is
 // emitted before any mutation; the operator sees the actual anomaly.
-func (s *Store) verifyIssuesReconcileable(ctx context.Context) error {
+func (s *Store) verifyIssuesReconcilable(ctx context.Context) error {
 	cols, err := s.tableColumns(ctx, "issues")
 	if err != nil {
 		return err
