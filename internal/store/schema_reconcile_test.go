@@ -287,11 +287,9 @@ func TestReconcileBackfillsTopicDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open(first) error = %v", err)
 	}
-	// Drop topic NOT NULL constraint so we can set empty strings.
-	if err := first.ExecRawForTest(ctx, "ALTER TABLE issues MODIFY topic VARCHAR(191) NULL"); err != nil {
-		_ = first.Close()
-		t.Fatalf("modify topic to nullable error = %v", err)
-	}
+	// `topic VARCHAR(191) NOT NULL` admits empty strings — NOT NULL
+	// only forbids NULL. Inserting topic='' directly produces the
+	// "empty topic" state pre-goose workspaces actually carried.
 	if err := first.ExecRawForTest(ctx,
 		`INSERT INTO issues (id, title, description, status, priority, issue_type, topic, assignee, created_at, updated_at, item_rank) VALUES ('topic-empty', 'no topic', '', 'open', 0, 'task', '', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z', 'r1')`,
 	); err != nil {

@@ -478,8 +478,13 @@ func (s *Store) ensureUnifiedStatusSchema(ctx context.Context, guard *snapshotGu
 			context: "normalize closed_at status",
 		},
 		{
+			// [LAW:single-enforcer] The UPDATE predicate matches the
+			// probe exactly so the UPDATE touches only inconsistent
+			// rows. The old shape (UPDATE filtered only on
+			// `status <> 'closed'`) was a full-table write on every
+			// run.
 			probe:   `SELECT 1 FROM issues WHERE status <> 'closed' AND closed_at IS NOT NULL LIMIT 1`,
-			stmt:    `UPDATE issues SET closed_at = NULL WHERE status <> 'closed'`,
+			stmt:    `UPDATE issues SET closed_at = NULL WHERE status <> 'closed' AND closed_at IS NOT NULL`,
 			context: "normalize non-closed closed_at",
 		},
 		{
