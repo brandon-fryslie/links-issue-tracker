@@ -28,11 +28,12 @@ const (
 )
 
 type Store struct {
-	db             *sql.DB
-	workspaceID    string
-	doltRootDir    string
-	commitLockPath string
-	telemetryDir   string
+	db                   *sql.DB
+	workspaceID          string
+	doltRootDir          string
+	commitLockPath       string
+	telemetryDir         string
+	releaseWorkspaceLock func() error
 }
 
 type NotFoundError struct {
@@ -163,13 +164,20 @@ func Open(ctx context.Context, doltRootDir string, workspaceID string) (*Store, 
 	if _, err := EnsureDatabase(ctx, doltRootDir, workspaceID); err != nil {
 		return nil, err
 	}
-	s, err := openStoreConnection(doltRootDir, workspaceID)
+	release, err := acquireWorkspaceShared(ctx, doltRootDir)
 	if err != nil {
 		return nil, err
 	}
+	s, err := openStoreConnection(doltRootDir, workspaceID)
+	if err != nil {
+		_ = release()
+		return nil, err
+	}
+	s.releaseWorkspaceLock = release
 	// [LAW:single-enforcer] Store-level commit lock is the single writer gate for all startup and runtime mutations.
 	if err := s.withCommitLock(ctx, s.migrate); err != nil {
 		_ = s.db.Close()
+		_ = release()
 		return nil, err
 	}
 	return s, nil
@@ -182,14 +190,21 @@ func OpenForRead(ctx context.Context, doltRootDir string, workspaceID string) (*
 	if _, err := os.Stat(doltRootDir); errors.Is(err, os.ErrNotExist) {
 		return nil, fmt.Errorf("repository not initialized with lit — run 'lit init' first")
 	}
-	s, err := openStoreConnection(doltRootDir, workspaceID)
+	release, err := acquireWorkspaceShared(ctx, doltRootDir)
 	if err != nil {
 		return nil, err
 	}
+	s, err := openStoreConnection(doltRootDir, workspaceID)
+	if err != nil {
+		_ = release()
+		return nil, err
+	}
+	s.releaseWorkspaceLock = release
 	// Auto-migrate stale schemas so read paths don't fail on missing columns/tables.
 	// Unlike Open, this does NOT call EnsureDatabase — the DB must already exist.
 	if err := s.withCommitLock(ctx, s.migrate); err != nil {
 		_ = s.db.Close()
+		_ = release()
 		return nil, err
 	}
 	return s, nil
@@ -224,7 +239,18 @@ func (s *Store) Close() error {
 	err := s.db.Close()
 	// [LAW:single-enforcer] Benign driver shutdown cancellation is normalized at the Store boundary so callers see one close contract.
 	if errors.Is(err, context.Canceled) {
-		return nil
+		err = nil
+	}
+	// [LAW:dataflow-not-control-flow] Workspace lock release runs on every
+	// Close, regardless of whether the DB closed cleanly — the shared hold
+	// must end with the Store's lifetime so a subsequent restore is not
+	// pinned by a dead Store.
+	if s.releaseWorkspaceLock != nil {
+		release := s.releaseWorkspaceLock
+		s.releaseWorkspaceLock = nil
+		if relErr := release(); relErr != nil && err == nil {
+			err = relErr
+		}
 	}
 	return err
 }

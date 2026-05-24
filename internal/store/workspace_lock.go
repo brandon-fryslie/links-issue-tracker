@@ -1,0 +1,116 @@
+package store
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"syscall"
+	"time"
+)
+
+// [LAW:single-enforcer] Workspace-exclusivity lock acquisition lives here so
+// the contract — "no Store may be open while the Dolt directory is rotated by
+// lit snapshots restore" — is enforced at exactly one boundary. Store.Open /
+// Store.OpenForRead acquire shared holds; LockWorkspaceExclusive is the only
+// way to take an exclusive hold and is reserved for callers that swap the
+// Dolt directory wholesale.
+//
+// [LAW:dataflow-not-control-flow] Variability between shared and exclusive
+// modes lives in the (lockType, maxAttempts, delay) arguments threaded into
+// acquireWorkspaceLock; the acquisition sequence (OpenFile, Flock|LOCK_NB,
+// retry-or-error) is the same every call.
+//
+// Lock primitive: POSIX flock(2) via syscall.Flock. Multiple shared holders
+// coexist (LOCK_SH on independent file descriptors), an exclusive holder
+// blocks every other holder, and LOCK_NB makes contention observable instead
+// of latent. Cross-process semantics are enforced by the kernel; per-Store
+// FDs make the same semantics hold inside one process for free.
+
+var errWorkspaceBusy = errors.New("workspace lock contention")
+
+const (
+	workspaceSharedRetryAttempts = 100 // 100 * 50ms = 5s wall-clock cap
+	workspaceSharedRetryDelay    = 50 * time.Millisecond
+)
+
+// WorkspaceLockPath returns the workspace-exclusivity lock path for a Dolt
+// root directory. Sits at <dirname(databasePath)>/.links-workspace.lock — the
+// same sibling-of-dolt-dir position as the commit lock — so lit snapshots
+// restore (which renames the Dolt directory) does not move the lock file out
+// from under concurrent acquirers.
+//
+// [LAW:one-source-of-truth] One naming convention for the workspace-busy lock;
+// any callsite that needs the path reads it from this function.
+func WorkspaceLockPath(databasePath string) string {
+	cleaned := filepath.Clean(databasePath)
+	return filepath.Join(filepath.Dir(cleaned), ".links-workspace.lock")
+}
+
+// acquireWorkspaceShared takes a shared (LOCK_SH) hold on the workspace lock
+// for the lifetime of a Store. Released when the returned func is called.
+// Retries briefly (~5s) when an exclusive holder is active so a casual
+// concurrent lit snapshots restore does not paper-cut every reader; surfaces
+// a clear "workspace busy" error after the budget elapses.
+func acquireWorkspaceShared(ctx context.Context, doltRootDir string) (func() error, error) {
+	release, err := acquireWorkspaceLock(ctx, doltRootDir, syscall.LOCK_SH, workspaceSharedRetryAttempts, workspaceSharedRetryDelay)
+	if errors.Is(err, errWorkspaceBusy) {
+		return nil, fmt.Errorf("workspace busy: lit snapshots restore is rotating the Dolt directory; retry after it completes")
+	}
+	return release, err
+}
+
+// LockWorkspaceExclusive takes an exclusive (LOCK_EX) hold for the duration of
+// an operation that swaps the Dolt directory wholesale (i.e. lit snapshots
+// restore). Refuses immediately on contention with any shared holder — the
+// operator chose to run restore knowing the workspace is shared, so waiting
+// would hide the conflict instead of surfacing it.
+//
+// [LAW:single-enforcer] Exported so the snapshots-restore command can take the
+// hold without reconstructing the lock path; no other code should call this.
+func LockWorkspaceExclusive(ctx context.Context, doltRootDir string) (func() error, error) {
+	release, err := acquireWorkspaceLock(ctx, doltRootDir, syscall.LOCK_EX, 1, 0)
+	if errors.Is(err, errWorkspaceBusy) {
+		return nil, fmt.Errorf("workspace busy: another lit process is using this workspace; close other lit commands and retry")
+	}
+	return release, err
+}
+
+func acquireWorkspaceLock(ctx context.Context, doltRootDir string, lockType, maxAttempts int, delay time.Duration) (func() error, error) {
+	lockPath := WorkspaceLockPath(doltRootDir)
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		return nil, fmt.Errorf("ensure workspace lock dir: %w", err)
+	}
+	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open workspace lock: %w", err)
+	}
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		err = syscall.Flock(int(file.Fd()), lockType|syscall.LOCK_NB)
+		if err == nil {
+			fd := file
+			return func() error {
+				flockErr := syscall.Flock(int(fd.Fd()), syscall.LOCK_UN)
+				closeErr := fd.Close()
+				if flockErr != nil {
+					return fmt.Errorf("release workspace lock: %w", flockErr)
+				}
+				return closeErr
+			}, nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) {
+			_ = file.Close()
+			return nil, fmt.Errorf("flock workspace lock: %w", err)
+		}
+		if attempt+1 == maxAttempts {
+			break
+		}
+		if waitErr := waitWithContext(ctx, delay); waitErr != nil {
+			_ = file.Close()
+			return nil, waitErr
+		}
+	}
+	_ = file.Close()
+	return nil, errWorkspaceBusy
+}
