@@ -29,10 +29,10 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Pinned in lockstep with release.yml. Bumping the cross image happens in
-  # one place — actually no, two; if these drift, this workflow proves the
-  # wrong thing. Keep them equal.
-  GORELEASER_CROSS_VERSION: v2.16.0
+  # Latest published goreleaser-cross image. MUST equal release.yml's value;
+  # this workflow validates exactly what that workflow publishes, so any
+  # drift between them means validate proves the wrong pipeline.
+  GORELEASER_CROSS_VERSION: v1.26.2-3
 
 jobs:
   validate:

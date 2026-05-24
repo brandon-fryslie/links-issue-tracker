@@ -60,12 +60,12 @@ workflow.
 ### Dry-run a release locally (optional)
 
 Local dry-runs require a container runtime — the project uses
-`ghcr.io/goreleaser/goreleaser-cross:v2.16.0` to provide the CGO
+`ghcr.io/goreleaser/goreleaser-cross:v1.26.2-3` to provide the CGO
 cross-compilers (osxcross for darwin, mingw for windows, glibc for linux).
 
 ```bash
 podman run --rm -v "$PWD":/go/src/app -w /go/src/app \
-  ghcr.io/goreleaser/goreleaser-cross:v2.16.0 \
+  ghcr.io/goreleaser/goreleaser-cross:v1.26.2-3 \
   release --snapshot --clean
 # Inspect ./dist/ — archives, checksums.txt; mkmanifest then writes release-manifest.json.
 ```

@@ -17,10 +17,12 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # Pinned to the goreleaser version used to develop this config. Bump in
-  # lockstep with the goreleaser/goreleaser-cross release cadence; the cross
-  # image's tag tracks the goreleaser binary it bundles.
-  GORELEASER_CROSS_VERSION: v2.16.0
+  # Latest published goreleaser-cross image; bundles goreleaser v1.26.2 +
+  # osxcross / mingw / glibc cross-toolchains. goreleaser-cross master tracks
+  # v2 but has not been released yet — when it is, bump this tag AND migrate
+  # .goreleaser.yml to v2 syntax in the same commit (release-validate.yml will
+  # fail if they drift). Keep this value in lockstep with release-validate.yml.
+  GORELEASER_CROSS_VERSION: v1.26.2-3
 
 jobs:
   release:
