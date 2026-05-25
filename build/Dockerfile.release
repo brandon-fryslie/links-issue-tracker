@@ -10,42 +10,30 @@
 #   - darwin/arm64  (cross via osxcross, aarch64-apple-darwin*-* tools)
 #   - windows/amd64 (cross via mingw, x86_64-w64-mingw32-* tools)
 #
-# DELIBERATELY UNSUPPORTED: darwin/amd64 (Intel Mac).
-# goreleaser-cross v1.26.2-3 ships osxcross with cctools only for
-# aarch64/arm64/arm64e apple-darwin25.1. There are no x86_64-apple-darwin
-# cctools binaries (we verified via a discovery iteration). Apple is in the
-# late-stage Intel-Mac sunset (macOS Sequoia is the last Intel-supporting
-# major), so the upstream dropped Intel support intentionally. Intel Mac
-# users build via `go install`.
+# DELIBERATELY UNSUPPORTED: darwin/amd64. goreleaser-cross v1.26.2-3 ships
+# osxcross WITHOUT x86_64-apple-darwin cctools (Apple's Intel-Mac sunset).
+# Intel Mac users `go install` from source.
 #
-# Layers:
+# STRUCTURE: multi-stage build. The three cross-* stages each depend only on
+# `native-icu` (which provides the bootstrap install ICU needs for cross-builds)
+# and run IN PARALLEL during `docker buildx build`. The `final` stage then
+# COPYs each /opt/icu/<target>/ prefix from its source stage into one image.
 #
-#   1. Inherit goreleaser-cross: provides goreleaser (v2), osxcross at
-#      /usr/local/osxcross/, mingw, and the runner's native gcc.
+# Why parallel: ICU is ~3 min per cross-build on a 4-vcpu runner. Sequential =
+# ~9 min for three targets; parallel via stages ≈ ~4 min. Per-stage caching
+# also means editing one target does not invalidate the other two.
 #
-#   2. apt-get install ICU build deps + native libicu-dev (for linux/amd64,
-#      which uses system ICU directly) + aarch64 cross-binutils.
-#
-#   3. Download icu4c source once. Build a native amd64 install — required
-#      as the --with-cross-build bootstrap for cross-builds (ICU's build
-#      system runs its own tools partway through configure).
-#
-#   4. Cross-build ICU for: linux/arm64, darwin/arm64, windows/amd64.
-#      Each into /opt/icu/<goos>_<goarch>/{include,lib}.
-#
-# Consumers (.goreleaser.yml) set CGO_CFLAGS/CGO_LDFLAGS per target to point
-# at the right /opt/icu/<goos>_<goarch> prefix. The native linux/amd64 target
-# uses the apt-installed system ICU directly (no -I/-L needed).
-#
-# [LAW:one-source-of-truth] ICU version is pinned in this file via build args;
-# .goreleaser.yml does not specify it, so there is no second source to drift.
-# Bumping the version is one ARG change here followed by an image rebuild.
-#
-# [LAW:single-enforcer] release-validate.yml builds this image (with GHA layer
-# cache) and uses it for the snapshot build; release.yml builds it the same
-# way for the tagged release. One Dockerfile, one consumer pattern.
+# [LAW:single-enforcer] release-validate.yml builds this image once per
+# Dockerfile change (GHA layer cache reuses unchanged stages); release.yml
+# uses the same Dockerfile. One source.
+# [LAW:one-source-of-truth] ICU version is pinned via build args; the
+# .goreleaser.yml does not duplicate it.
 
-FROM ghcr.io/goreleaser/goreleaser-cross:v1.26.2-3
+# -----------------------------------------------------------------------------
+# Stage: base
+# Common apt deps + ICU source download. Every downstream stage starts here.
+# -----------------------------------------------------------------------------
+FROM ghcr.io/goreleaser/goreleaser-cross:v1.26.2-3 AS base
 
 ARG ICU_MAJOR=75
 ARG ICU_MINOR=1
@@ -62,9 +50,6 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /tmp/icu-build
-
-# Download once. Naming follows ICU's release convention: dash in tag, underscore
-# in tarball filename. https://github.com/unicode-org/icu/releases
 RUN curl -fsSL \
       "https://github.com/unicode-org/icu/releases/download/release-${ICU_MAJOR}-${ICU_MINOR}/icu4c-${ICU_MAJOR}_${ICU_MINOR}-src.tgz" \
       -o icu.tgz \
@@ -72,81 +57,62 @@ RUN curl -fsSL \
     && tar -xzf icu.tgz -C src --strip-components=1 \
     && rm icu.tgz
 
-# Native build (linux/amd64) — required as --with-cross-build for every later
-# cross-build. Stays at /tmp/icu-build/native-build (NOT in /opt/icu) because
-# the linux/amd64 Go build uses apt's system libicu-dev via standard paths.
-RUN cp -r src native-build \
-    && cd native-build/source \
+COPY build/icu-cross-build.sh /usr/local/bin/icu-cross-build
+RUN chmod +x /usr/local/bin/icu-cross-build
+
+# -----------------------------------------------------------------------------
+# Stage: native-icu
+# Native amd64 ICU build — every cross-build needs this as --with-cross-build
+# bootstrap because ICU's build system runs its own tools mid-configure.
+# -----------------------------------------------------------------------------
+FROM base AS native-icu
+RUN cp -r /tmp/icu-build/src /tmp/icu-build/native-build \
+    && cd /tmp/icu-build/native-build/source \
     && ./runConfigureICU Linux \
         --enable-static --disable-shared \
         --disable-tests --disable-samples \
     && make -j"$(nproc)"
 
-# Helper: cross-build for one target. Args:
-#   $1 = goos
-#   $2 = goarch
-#   $3 = configure --host=<triplet>
-#   $4 = CC
-#   $5 = CXX
-#   $6 = AR_GLOB — shell glob that resolves to the cross-ar binary. ICU
-#        needs the cross-toolchain's ar (osxcross / mingw / gnu-binutils) so
-#        its static archives are in the format the cross-linker accepts; the
-#        host's GNU ar produces archives macOS ld rejects.
-#   $7 = extra PATH dir (e.g. /usr/local/osxcross/bin) or empty
-#
-# Writes to /opt/icu/<goos>_<goarch>.
-RUN <<'EOF' bash
-set -euo pipefail
-cross_build() {
-    local goos="$1" goarch="$2" triplet="$3" cc="$4" cxx="$5" ar_glob="$6" path_extra="$7"
-    local prefix="/opt/icu/${goos}_${goarch}"
-    local builddir="/tmp/icu-build/cross-${goos}-${goarch}"
+# -----------------------------------------------------------------------------
+# Stage: cross-linux-arm64
+# Runs in parallel with the other cross-* stages.
+# -----------------------------------------------------------------------------
+FROM native-icu AS cross-linux-arm64
+RUN icu-cross-build linux arm64 \
+    aarch64-linux-gnu \
+    aarch64-linux-gnu-gcc aarch64-linux-gnu-g++ \
+    /usr/bin/aarch64-linux-gnu \
+    ""
 
-    # Resolve AR/RANLIB from the glob.
-    shopt -s nullglob
-    local ar_matches=( ${ar_glob}-ar )
-    local ranlib_matches=( ${ar_glob}-ranlib )
-    shopt -u nullglob
-    if [ ${#ar_matches[@]} -eq 0 ] || [ ${#ranlib_matches[@]} -eq 0 ]; then
-        echo "FATAL: no ar/ranlib for glob '${ar_glob}'" >&2
-        echo "available tools matching the prefix:" >&2
-        ls -1 ${ar_glob}* 2>/dev/null | head -20 >&2 || echo "(none)" >&2
-        exit 1
-    fi
-    local AR_BIN="${ar_matches[0]}"
-    local RANLIB_BIN="${ranlib_matches[0]}"
+# -----------------------------------------------------------------------------
+# Stage: cross-windows-amd64
+# -----------------------------------------------------------------------------
+FROM native-icu AS cross-windows-amd64
+RUN icu-cross-build windows amd64 \
+    x86_64-w64-mingw32 \
+    x86_64-w64-mingw32-gcc x86_64-w64-mingw32-g++ \
+    /usr/bin/x86_64-w64-mingw32 \
+    ""
 
-    echo "=== ICU cross-build for ${goos}/${goarch}"
-    echo "    host=${triplet} cc=${cc} ar=${AR_BIN} ranlib=${RANLIB_BIN}"
-    cp -r /tmp/icu-build/src "$builddir"
-    pushd "$builddir/source" >/dev/null
-    PATH="${path_extra:+${path_extra}:}${PATH}" \
-        CC="$cc" CXX="$cxx" AR="$AR_BIN" RANLIB="$RANLIB_BIN" \
-        ./configure --host="$triplet" --prefix="$prefix" \
-            --with-cross-build=/tmp/icu-build/native-build/source \
-            --enable-static --disable-shared \
-            --disable-tests --disable-samples
-    make -j"$(nproc)"
-    make install
-    popd >/dev/null
-    rm -rf "$builddir"
-    echo "=== ${goos}/${goarch} installed at ${prefix} ==="
-}
+# -----------------------------------------------------------------------------
+# Stage: cross-darwin-arm64
+# -----------------------------------------------------------------------------
+FROM native-icu AS cross-darwin-arm64
+RUN icu-cross-build darwin arm64 \
+    aarch64-apple-darwin \
+    oa64-clang oa64-clang++ \
+    "/usr/local/osxcross/bin/aarch64-apple-darwin*" \
+    /usr/local/osxcross/bin
 
-# Stable paths verified by the discovery iteration:
-#   /usr/bin/aarch64-linux-gnu-{ar,ranlib}     (from gcc-aarch64-linux-gnu)
-#   /usr/bin/x86_64-w64-mingw32-{ar,ranlib}    (from mingw)
-#   /usr/local/osxcross/bin/aarch64-apple-darwin25.1-{ar,ranlib}  (osxcross)
-# Use a glob for the osxcross prefix because the "25.1" SDK suffix tracks
-# upstream goreleaser-cross releases; the glob keeps this Dockerfile stable
-# across image bumps.
-cross_build linux   arm64 aarch64-linux-gnu     aarch64-linux-gnu-gcc  aarch64-linux-gnu-g++  /usr/bin/aarch64-linux-gnu  ""
-cross_build darwin  arm64 aarch64-apple-darwin  oa64-clang             oa64-clang++           "/usr/local/osxcross/bin/aarch64-apple-darwin*" /usr/local/osxcross/bin
-cross_build windows amd64 x86_64-w64-mingw32    x86_64-w64-mingw32-gcc x86_64-w64-mingw32-g++ /usr/bin/x86_64-w64-mingw32 ""
-EOF
-
-# Clean up the source + native bootstrap; consumers don't need them after this.
-RUN rm -rf /tmp/icu-build
+# -----------------------------------------------------------------------------
+# Stage: final
+# Assembles the per-target ICU prefixes from the parallel cross-* stages into
+# the single image that release-validate / release will run goreleaser against.
+# -----------------------------------------------------------------------------
+FROM base AS final
+COPY --from=cross-linux-arm64    /opt/icu/linux_arm64    /opt/icu/linux_arm64
+COPY --from=cross-windows-amd64  /opt/icu/windows_amd64  /opt/icu/windows_amd64
+COPY --from=cross-darwin-arm64   /opt/icu/darwin_arm64   /opt/icu/darwin_arm64
 
 # Sanity check at image-build time — fail loudly if any prefix is missing
 # headers/libs the consumer expects. [LAW:verifiable-goals]
