@@ -138,8 +138,11 @@ the archive name, and the manifest agree byte-for-byte. Same convention as
 kubectl / helm / terraform.
 
 For source builds, `scripts/install.sh` derives `version` from
-`git describe --tags --always --dirty` and `commit` from `git rev-parse
---short HEAD`, so even ad-hoc checkouts report meaningful identity.
+`git describe --tags --always --dirty` (with any leading `v` stripped so
+the value matches goreleaser's v-stripped convention) and `commit` from
+`git rev-parse --short HEAD`, so source builds and release builds report
+`Version` in one canonical format and ad-hoc checkouts still carry
+meaningful identity.
 
 For builds without ldflag stamping (plain `go build ./cmd/lit`),
 `lit version` reports `lit dev (commit unknown, built unknown)`.

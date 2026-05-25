@@ -177,6 +177,18 @@ case "$mode" in
         # placeholder like "dev" would make version.IsDev report FALSE and
         # mislead downstream tooling.
         ver="$(git describe --tags --always --dirty 2>/dev/null || true)"
+        # Strip a leading `v` so the source-build Version matches goreleaser's
+        # convention. goreleaser's `.Version` template emits `0.1.0` for tag
+        # `v0.1.0`; downstream consumers (the manifest, archive filenames,
+        # `lit version`) all speak that v-stripped dialect. `git describe`
+        # emits `v0.1.0` (or `v0.1.0-5-gabcdefg-dirty`), so without this
+        # normalization a source build of the same commit would report
+        # `lit v0.1.0` while a release build reports `lit 0.1.0`.
+        # [LAW:one-source-of-truth] one canonical format for Version across
+        # both producers; the source-build adapter aligns to the release form.
+        # Empty input passes through unchanged (no leading `v` to strip); bare
+        # SHAs from `git describe --always` are hex and never start with `v`.
+        ver="${ver#v}"
         commit="$(git rev-parse --short HEAD 2>/dev/null || true)"
         date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         pkg="github.com/bmf/links-issue-tracker/internal/version"
