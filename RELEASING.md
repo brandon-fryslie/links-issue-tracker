@@ -108,18 +108,24 @@ and build timestamp — injected by goreleaser via `-ldflags -X`:
 
 ```
 $ lit version
-lit v0.1.0 (commit abcdef0, built 2026-05-24T15:21:00Z)
+lit 0.1.0 (commit abcdef0, built 2026-05-24T15:21:00Z)
 schema versions supported: 1–1
 
 $ lit version --json
 {
-  "version": "v0.1.0",
+  "version": "0.1.0",
   "commit": "abcdef0",
   "date": "2026-05-24T15:21:00Z",
   "is_dev": false,
   "schema_support": { "min": 1, "max": 1 }
 }
 ```
+
+The reported `version` is goreleaser's `.Version` template — the tag with the
+leading `v` STRIPPED (vX.Y.Z → X.Y.Z). The same stripped string is used in
+the archive filenames and the manifest `version` field, so `lit version`,
+the archive name, and the manifest agree byte-for-byte. Same convention as
+kubectl / helm / terraform.
 
 For source builds, `scripts/install.sh` derives `version` from
 `git describe --tags --always --dirty` and `commit` from `git rev-parse

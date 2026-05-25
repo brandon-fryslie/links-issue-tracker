@@ -15,10 +15,13 @@
 // discipline that prevents the manifest format from drifting between producer
 // and consumer.
 //
-// Invocation:
+// Invocation (note: -version is goreleaser's `.Version` — the tag with the
+// leading "v" STRIPPED. platformFromFilename matches this exact segment
+// against goreleaser's archive name, so a v-prefixed value here would
+// produce zero artifacts and fail with "no per-platform artifacts found"):
 //
 //	mkmanifest \
-//	  -version v0.1.0 \
+//	  -version 0.1.0 \
 //	  -commit abcdef0 \
 //	  -date 2026-05-24T15:21:00Z \
 //	  -dist ./dist \
@@ -48,7 +51,7 @@ import (
 
 func main() {
 	var (
-		ver     = flag.String("version", "", "release version (e.g. v0.1.0); required")
+		ver     = flag.String("version", "", "release version, goreleaser .Version form — v-stripped (e.g. 0.1.0); required")
 		commit  = flag.String("commit", "", "git short SHA of the release commit; required")
 		date    = flag.String("date", "", "RFC3339 build timestamp; required")
 		distDir = flag.String("dist", "dist", "goreleaser dist directory")
@@ -110,7 +113,8 @@ func main() {
 // looser superset).
 //
 // The Artifact.Platform is derived from the filename: goreleaser writes
-// archives named like "lit_v0.1.0_darwin_arm64.tar.gz"; we strip the version
+// archives named like "lit_0.1.0_darwin_arm64.tar.gz" (the version segment
+// has NO leading v — see platformFromFilename for why); we strip the version
 // and extract the GOOS_GOARCH segment.
 func collectArtifacts(distDir, baseURL, ver string) ([]release.Artifact, error) {
 	checksumsPath := filepath.Join(distDir, "checksums.txt")
