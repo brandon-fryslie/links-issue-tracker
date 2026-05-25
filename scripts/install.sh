@@ -204,6 +204,22 @@ case "$mode" in
         # the same canonical value as the v-prefixed input shape.
         release_tag="v${release_tag#v}"
 
+        # Validate the normalized tag against the actual producer shape.
+        # release.yml's job-guard rejects tags containing `-`, so the only
+        # tags goreleaser ever publishes are exactly `vX.Y.Z` (numeric
+        # semver). Reject anything else BEFORE the value flows into
+        # filepath / curl / mv — a `--from-release ../x` or an API response
+        # tainted with path separators would otherwise interpolate into
+        # `"$tmp/$archive"` and write outside the temp directory.
+        # [LAW:types-are-the-program] reject illegal tag shapes at the
+        # boundary so downstream code can trust that release_tag is a
+        # safe, expected canonical value.
+        if [[ ! "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "error: release tag '$release_tag' is not a canonical semver release tag (expected vX.Y.Z)" >&2
+            echo "       --from-release accepts only tags published by the release pipeline" >&2
+            exit 1
+        fi
+
         # Resolve current platform → goreleaser archive name. Must mirror
         # .goreleaser.yml's name_template: lit_<version>_<goos>_<goarch>.<ext>
         # where <version> is goreleaser's .Version — the tag with the leading
