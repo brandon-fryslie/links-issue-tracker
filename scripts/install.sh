@@ -270,6 +270,61 @@ case "$mode" in
         fi
         echo "Checksum OK."
 
+        # Validate the archive's structure BEFORE extracting. The checksum
+        # verifies content integrity but NOT structural safety — a compromised
+        # release artifact could carry path-traversal entries (`../`, absolute
+        # paths) or non-regular entries (symlinks pointing outside $tmp,
+        # hardlinks, devices) that escape extraction. goreleaser produces a
+        # FLAT archive of regular files only (`lit` + LICENSE* + README*); we
+        # enforce that accept shape at the boundary so the extraction body can
+        # assume a safe input. [LAW:types-are-the-program] reject illegal
+        # archive shapes by construction rather than guarding inside extraction.
+        #
+        # Pipe-into-while would run the loop in a subshell; `exit 1` would not
+        # terminate the installer. Capture the listing first, then iterate via
+        # a here-string so the loop runs in the main shell.
+        case "$ext" in
+            tar.gz)
+                # Names must be flat: no `/`, no `..`, no leading `/`.
+                entries="$(tar -tzf "$tmp/$archive")"
+                while IFS= read -r name; do
+                    [ -z "$name" ] && continue
+                    case "$name" in
+                        .|..|*/*|/*)
+                            echo "error: archive entry has unsafe path: $name" >&2
+                            exit 1 ;;
+                    esac
+                done <<< "$entries"
+                # Types must be regular files only. Both GNU and BSD `tar
+                # -tvzf` emit the file-type char in column 1: `-` regular,
+                # `l` symlink, `h` hardlink, `d` directory.
+                verbose="$(tar -tvzf "$tmp/$archive")"
+                while IFS= read -r line; do
+                    [ -z "$line" ] && continue
+                    case "${line:0:1}" in
+                        -) ;;
+                        *)
+                            echo "error: archive contains non-regular entry: $line" >&2
+                            exit 1 ;;
+                    esac
+                done <<< "$verbose"
+                ;;
+            zip)
+                # Flat-name check rejects the realistic path-traversal vector
+                # (Zip Slip). `*\\*` rejects backslash separators that some
+                # producers emit even though POSIX zip uses `/`.
+                entries="$(unzip -Z1 "$tmp/$archive")"
+                while IFS= read -r name; do
+                    [ -z "$name" ] && continue
+                    case "$name" in
+                        .|..|*/*|/*|*\\*)
+                            echo "error: archive entry has unsafe path: $name" >&2
+                            exit 1 ;;
+                    esac
+                done <<< "$entries"
+                ;;
+        esac
+
         # Extract into the temp dir; goreleaser archives contain a top-level `lit` binary.
         if [ "$ext" = "tar.gz" ]; then
             tar -xzf "$tmp/$archive" -C "$tmp"
