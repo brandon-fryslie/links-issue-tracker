@@ -122,6 +122,42 @@ func TestCollectArtifactsURLUsesTagNotVersion(t *testing.T) {
 	}
 }
 
+// TestValidateVerTag pins the v-prefix invariants at the CLI boundary:
+// `-tag` MUST be v-prefixed (URL path segment), `-version` MUST NOT be
+// (goreleaser .Version is v-stripped). Swapping them silently produces
+// 404 URLs or never-match filenames; this table makes the swap impossible
+// to express. [LAW:types-are-the-program] the type the boundary accepts
+// is the exactly-correct shape, not "any non-empty string."
+func TestValidateVerTag(t *testing.T) {
+	cases := []struct {
+		name      string
+		ver, tag  string
+		wantErr   bool
+		wantField string // substring expected in the error message
+	}{
+		{"canonical pair", "0.1.0", "v0.1.0", false, ""},
+		{"snapshot canonical", "0.0.1-snapshot+abc1234", "v0.0.1", false, ""},
+		{"tag missing v prefix", "0.1.0", "0.1.0", true, "-tag"},
+		{"version with v prefix", "v0.1.0", "v0.1.0", true, "-version"},
+		{"swapped (both)", "v0.1.0", "0.1.0", true, "-tag"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateVerTag(tc.ver, tc.tag)
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("validateVerTag(%q, %q) = nil; want error", tc.ver, tc.tag)
+				}
+				if !strings.Contains(err.Error(), tc.wantField) {
+					t.Errorf("error %q should mention %q", err, tc.wantField)
+				}
+			} else if err != nil {
+				t.Fatalf("validateVerTag(%q, %q) = %v; want nil", tc.ver, tc.tag, err)
+			}
+		})
+	}
+}
+
 // TestCollectArtifactsRejectsUnsafeFilenames pins the boundary that
 // rejects path-traversal and absolute paths inside checksums.txt before
 // they reach filepath.Join (Stat) or URL construction. checksums.txt is

@@ -94,6 +94,10 @@ func main() {
 		}
 	}
 
+	if err := validateVerTag(*ver, *tag); err != nil {
+		die("%v", err)
+	}
+
 	max, err := migrations.MaxVersion()
 	if err != nil {
 		die("read migration registry: %v", err)
@@ -136,6 +140,24 @@ func main() {
 	if err := out.Close(); err != nil {
 		die("close %s: %v", *outPath, err)
 	}
+}
+
+// validateVerTag enforces the v-prefix invariants at the CLI boundary.
+// `-tag` is the git tag (URL path segment under base-url; `gh release
+// create "<tag>"` publishes assets there) and is canonically v-prefixed;
+// `-version` is goreleaser's `.Version` (archive filename segment) and is
+// canonically v-stripped. Swapping them silently produces 404 URLs or
+// never-match filenames. [LAW:types-are-the-program] reject the swap at
+// the boundary so downstream URL/filename construction can trust each
+// value's shape.
+func validateVerTag(ver, tag string) error {
+	if !strings.HasPrefix(tag, "v") {
+		return fmt.Errorf("-tag must be v-prefixed (got %q); the v-prefix is the URL path segment under base-url", tag)
+	}
+	if strings.HasPrefix(ver, "v") {
+		return fmt.Errorf("-version must NOT be v-prefixed (got %q); goreleaser .Version is v-stripped", ver)
+	}
+	return nil
 }
 
 // collectArtifacts reads goreleaser's checksums.txt and emits one
