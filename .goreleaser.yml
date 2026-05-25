@@ -75,15 +75,20 @@ builds:
           {{- if eq .Arch "amd64" }}CXX=x86_64-linux-gnu-g++{{- end }}
           {{- if eq .Arch "arm64" }}CXX=aarch64-linux-gnu-g++{{- end }}
         {{- end -}}
-      # CGO_CFLAGS / CGO_LDFLAGS per target — points cgo at the ICU prefix
+      # CGO include + link paths per target — points cgo at the ICU prefix
       # build/Dockerfile.release installs at /opt/icu/<goos>_<goarch>. Empty
       # for linux/amd64 because that target uses the system libicu-dev which
       # is already on the default include/lib search path.
+      #
+      # We set CGO_CPPFLAGS (preprocessor: -I) so the include path applies to
+      # BOTH C and C++ source. go-icu-regex has file.cpp; CGO_CFLAGS alone
+      # is C-only and would leave the C++ include search path empty (-> the
+      # observed "unicode/regex.h not found" failure mode).
       - >-
         {{- if and (eq .Os "linux") (eq .Arch "amd64") -}}
-          CGO_CFLAGS=
+          CGO_CPPFLAGS=
         {{- else -}}
-          CGO_CFLAGS=-I/opt/icu/{{ .Os }}_{{ .Arch }}/include
+          CGO_CPPFLAGS=-I/opt/icu/{{ .Os }}_{{ .Arch }}/include
         {{- end -}}
       - >-
         {{- if and (eq .Os "linux") (eq .Arch "amd64") -}}
