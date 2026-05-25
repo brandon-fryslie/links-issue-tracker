@@ -37,25 +37,30 @@
 
 FROM ghcr.io/goreleaser/goreleaser-cross:v1.26.2-3
 
-# DISCOVERY: print what cross-toolchain binaries this image actually ships,
-# so the cross_build calls below reference real paths instead of guesses.
-# Output appears in the buildx log; consult it when updating the AR/RANLIB
-# globs below.
+# DISCOVERY (iteration 2): the previous discovery found osxcross at
+# /usr/local/osxcross/bin/ but only revealed arm64-apple-darwin25.1-{ar,ranlib}.
+# The o64-clang wrapper works (CC=o64-clang succeeded last time before the
+# ar-format error), so x86_64 darwin compilation IS supported — its ar must
+# live somewhere we haven't looked. Time for a full directory dump, not greps.
 RUN set -euo pipefail; \
-    echo "=== osxcross-related paths and files ==="; \
-    ls -la /osxcross 2>/dev/null || echo "  /osxcross: absent"; \
-    ls -la /osxcross/bin 2>/dev/null | head -10 || echo "  /osxcross/bin: absent"; \
-    echo "=== which clang/ar wrappers are on PATH ==="; \
-    for tool in o64-clang oa64-clang o64-ar oa64-ar; do \
-        which "$tool" 2>/dev/null && "$tool" --version 2>/dev/null | head -1 || echo "  $tool: not on PATH"; \
-    done; \
-    echo "=== any darwin-named binaries anywhere ==="; \
-    find / -maxdepth 5 -name '*-apple-darwin*-ar' -type f 2>/dev/null | head -20 || true; \
-    find / -maxdepth 5 -name '*-apple-darwin*-ranlib' -type f 2>/dev/null | head -20 || true; \
-    echo "=== mingw + linux-gnu ar/ranlib (sanity) ==="; \
-    ls -la /usr/bin/x86_64-w64-mingw32-ar /usr/bin/x86_64-w64-mingw32-ranlib 2>/dev/null || echo "  mingw: not at /usr/bin"; \
-    ls -la /usr/bin/aarch64-linux-gnu-ar /usr/bin/aarch64-linux-gnu-ranlib 2>/dev/null || echo "  aarch64-linux: not at /usr/bin"; \
-    echo "=== DISCOVERY-ONLY ITERATION; intentionally failing so the slow ICU build does not run before we know the right tool paths ==="; \
+    echo "=== /usr/local/osxcross/bin/ — full listing ==="; \
+    ls -1 /usr/local/osxcross/bin/ | sort; \
+    echo; \
+    echo "=== what does o64-clang resolve / wrap ==="; \
+    o64-clang -v 2>&1 | head -20 || true; \
+    echo; \
+    echo "=== where does o64-clang look for ar ==="; \
+    o64-clang -print-prog-name=ar 2>&1 || true; \
+    o64-clang -print-prog-name=ranlib 2>&1 || true; \
+    echo; \
+    echo "=== llvm-ar / llvm-ranlib available? ==="; \
+    which llvm-ar llvm-ranlib ar ranlib 2>&1 || true; \
+    echo; \
+    echo "=== any cctools binaries ==="; \
+    find / -maxdepth 6 -name 'cctools*' 2>/dev/null | head; \
+    find / -maxdepth 6 \( -name 'x86_64-apple-darwin*' -o -name '*-darwin*-ar' \) 2>/dev/null | head -30; \
+    echo; \
+    echo "=== DISCOVERY-ONLY ITERATION ==="; \
     exit 1
 
 # Pin ICU version. Bumped manually when the go-icu-regex package upgrades its
