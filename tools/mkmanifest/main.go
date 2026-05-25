@@ -157,6 +157,19 @@ func validateVerTag(ver, tag string) error {
 	if strings.HasPrefix(ver, "v") {
 		return fmt.Errorf("-version must NOT be v-prefixed (got %q); goreleaser .Version is v-stripped", ver)
 	}
+	// The tag is interpolated directly into an artifact URL path segment
+	// (<base-url>/<tag>/<filename>). Reject anything that wouldn't be a
+	// clean single segment: path separators, traversal tokens, or
+	// whitespace. The v-prefix check above guarantees the canonical shape;
+	// this narrows further to "no URL-path foot-guns." Stricter than
+	// "any v-prefixed string" but not as strict as `^v\d+\.\d+\.\d+$`
+	// because goreleaser snapshot mode produces tags that aren't strict
+	// semver (the snapshot template + base tag form), and mkmanifest runs
+	// in both real-release and snapshot CI flows. [LAW:types-are-the-program]
+	// the accept shape matches the legitimate producer output exactly.
+	if strings.ContainsAny(tag, `/\`) || strings.Contains(tag, "..") || strings.ContainsAny(tag, " \t\r\n") {
+		return fmt.Errorf("-tag must be a single URL path segment (got %q); no path separators, '..', or whitespace", tag)
+	}
 	return nil
 }
 

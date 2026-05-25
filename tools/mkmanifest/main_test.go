@@ -140,6 +140,15 @@ func TestValidateVerTag(t *testing.T) {
 		{"tag missing v prefix", "0.1.0", "0.1.0", true, "-tag"},
 		{"version with v prefix", "v0.1.0", "v0.1.0", true, "-version"},
 		{"swapped (both)", "v0.1.0", "0.1.0", true, "-tag"},
+		// URL-path safety: tag is interpolated as a single URL segment;
+		// path separators, traversal tokens, or whitespace would produce
+		// invalid or surprising URLs.
+		{"tag with slash", "0.1.0", "v0.1.0/x", true, "URL path segment"},
+		{"tag with backslash", "0.1.0", "v0.1.0\\x", true, "URL path segment"},
+		{"tag with traversal", "0.1.0", "v0..1.0", true, "URL path segment"},
+		{"tag with space", "0.1.0", "v0.1.0 x", true, "URL path segment"},
+		{"tag with tab", "0.1.0", "v0.1.0\tx", true, "URL path segment"},
+		{"tag with newline", "0.1.0", "v0.1.0\nx", true, "URL path segment"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
