@@ -167,6 +167,14 @@ case "$mode" in
             -o "$TARGET_DIR/lit" ./cmd/lit
         ;;
     release|latest)
+        # curl is the single transport for release-download mode. Probe it
+        # explicitly so a missing-curl environment gets a targeted error
+        # instead of `set -e` surfacing a generic "command not found" on the
+        # first curl invocation. Mirrors the sha256sum/shasum probe shape.
+        if ! command -v curl >/dev/null 2>&1; then
+            echo "error: release-download mode requires curl (install curl, or use the source build: bash scripts/install.sh)" >&2
+            exit 1
+        fi
         if [ "$mode" = "latest" ]; then
             # jq is needed ONLY to parse the GitHub API response for the
             # latest-release tag lookup. --from-release <tag> does not need
