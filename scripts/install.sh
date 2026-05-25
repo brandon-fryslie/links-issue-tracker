@@ -24,6 +24,50 @@ cd "$ROOT_DIR"
 REPO_DOWNLOAD_BASE="https://github.com/brandon-fryslie/links-issue-tracker/releases/download"
 REPO_LATEST_API="https://api.github.com/repos/brandon-fryslie/links-issue-tracker/releases/latest"
 
+# realpath_compat — resolve a symlink chain to its canonical absolute path.
+#
+# [LAW:single-enforcer] One resolver used by both the target-dir lookup and
+# the stale-binary detector — they previously each carried their own
+# readlink-or-python3 chain with subtly different error handling.
+#
+# Tool cascade, in order of preference:
+#   1. `realpath`     — modern coreutils (Linux) and BSD utils (macOS 10.11+)
+#   2. `readlink -f`  — GNU coreutils; BSD readlink (older macOS) lacks -f
+#   3. pure-shell     — walks the link chain manually, works anywhere POSIX
+#
+# Release-download mode is explicitly Go-free, and this script must not require
+# python3 either; the pure-shell branch is the genuine last-resort that needs
+# no external tools at all. (Previous versions invoked `python3` as a fallback
+# and would error out on minimal environments that lacked it.)
+realpath_compat() {
+    local path="$1"
+    if command -v realpath >/dev/null 2>&1; then
+        realpath "$path"
+        return
+    fi
+    if readlink -f / >/dev/null 2>&1; then
+        readlink -f "$path"
+        return
+    fi
+    # Pure-shell: walk symlinks (cap depth at 40, matching POSIX SYMLOOP_MAX),
+    # then canonicalize the directory portion via `cd ... && pwd -P`.
+    local target="$path" i link dir
+    for i in $(seq 1 40); do
+        [ -L "$target" ] || break
+        link="$(readlink "$target")"
+        case "$link" in
+            /*) target="$link" ;;
+            *)  target="$(dirname "$target")/$link" ;;
+        esac
+    done
+    dir="$(cd "$(dirname "$target")" 2>/dev/null && pwd -P || true)"
+    if [ -n "$dir" ]; then
+        echo "$dir/$(basename "$target")"
+    else
+        echo "$path"
+    fi
+}
+
 mode="source"
 release_tag=""
 while [ $# -gt 0 ]; do
@@ -63,7 +107,7 @@ TARGET_DIR=""
 if command -v lit >/dev/null 2>&1; then
     EXISTING="$(command -v lit)"
     # Resolve symlinks so we update the real file, not a dangling link.
-    REAL_EXISTING="$(readlink -f "$EXISTING" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$EXISTING" 2>/dev/null || echo "$EXISTING")"
+    REAL_EXISTING="$(realpath_compat "$EXISTING")"
     TARGET_DIR="$(dirname "$REAL_EXISTING")"
 fi
 
@@ -216,7 +260,7 @@ for dir in "${PATH_ENTRIES[@]}"; do
     [ -z "$dir" ] && continue
     candidate="$dir/lit"
     [ -x "$candidate" ] || continue
-    real="$(readlink -f "$candidate" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$candidate")"
+    real="$(realpath_compat "$candidate")"
     if [ "$real" != "$TARGET_DIR/lit" ]; then
         STALE+=("$candidate")
     fi
