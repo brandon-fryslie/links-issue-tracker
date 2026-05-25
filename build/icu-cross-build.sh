@@ -4,7 +4,9 @@
 # Args:
 #   $1 = goos
 #   $2 = goarch
-#   $3 = configure --host=<triplet>
+#   $3 = host triplet passed to ./configure --host=<triplet>
+#        (e.g. `aarch64-linux-gnu`, `aarch64-apple-darwin`) — bare triplet,
+#        no `--host=` prefix; the script adds the flag itself.
 #   $4 = CC
 #   $5 = CXX
 #   $6 = AR_GLOB — shell glob that resolves to the cross-ar binary. ICU
