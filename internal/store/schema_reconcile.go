@@ -527,11 +527,51 @@ func (s *Store) translateIssueHistoryToEvents(ctx context.Context, guard *snapsh
 			return false, nil
 		}
 	}
-	// SELECT raw column values; canonicalization (TrimSpace + empty→NULL
-	// for action, empty→'unknown' for actor, NULL→'' for reason) happens
-	// in Go so the rules use the literal-same strings.TrimSpace call
+	// Cheap pre-check (no snapshot fired) so workspaces whose canonical-
+	// shape issue_history has no translatable rows (e.g. all orphans, all
+	// already-in-events) skip the snapshot guard and the tx entirely.
+	// The authoritative read happens inside the tx below; this probe
+	// only exists to avoid an unnecessary snapshot.
+	var pendingCount int
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT COUNT(*)
+		FROM issue_history h
+		WHERE EXISTS (SELECT 1 FROM issues i WHERE i.id = h.issue_id)
+		  AND NOT EXISTS (SELECT 1 FROM issue_events e WHERE e.id = h.id)
+	`).Scan(&pendingCount); err != nil {
+		return false, fmt.Errorf("translate issue_history: probe pending count: %w", err)
+	}
+	if pendingCount == 0 {
+		return false, nil
+	}
+	if _, err := guard.ensure(); err != nil {
+		return false, fmt.Errorf("translate issue_history: %w", err)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, fmt.Errorf("translate issue_history: begin tx: %w", err)
+	}
+	// Belt-and-suspenders Rollback so any error path (existing or
+	// future-added) cannot leak the transaction. Rollback after Commit
+	// returns sql.ErrTxDone and is a no-op per the database/sql contract,
+	// so the success path is unaffected. [LAW:types-are-the-program] —
+	// the transaction's finalization is encoded once at the boundary
+	// instead of N times at each return site that might drift.
+	defer func() { _ = tx.Rollback() }()
+	// SELECT raw column values inside the tx so the read and the subsequent
+	// INSERTs see one atomic snapshot. Canonicalization (TrimSpace +
+	// empty→NULL for action, empty→'unknown' for actor, NULL→'' for reason)
+	// happens in Go so the rules use the literal-same strings.TrimSpace call
 	// recordEvent uses for live event writes — [LAW:one-source-of-truth]
 	// for the canonical event-row shape across both writers.
+	//
+	// Buffer-then-loop (rather than interleaved row.Next() + tx.Exec on
+	// the same connection) matches ensureIssueRanks in this file: Go's
+	// database/sql does not portably support interleaved Query iteration
+	// and Exec on a single tx. The field-observed maximum is ~200 rows
+	// per workspace (PR #143's unreal-3d-maps recovery hit 184), so the
+	// memory cost is bounded; this is once-per-workspace recovery code,
+	// not a hot path.
 	const selectTranslatable = `
 		SELECT
 			h.id,
@@ -546,14 +586,14 @@ func (s *Store) translateIssueHistoryToEvents(ctx context.Context, guard *snapsh
 		WHERE EXISTS (SELECT 1 FROM issues i WHERE i.id = h.issue_id)
 		  AND NOT EXISTS (SELECT 1 FROM issue_events e WHERE e.id = h.id)
 	`
-	queryRows, err := s.db.QueryContext(ctx, selectTranslatable)
+	queryRows, err := tx.QueryContext(ctx, selectTranslatable)
 	if err != nil {
 		return false, fmt.Errorf("translate issue_history: query translatable rows: %w", err)
 	}
 	type translation struct {
-		id, issueID, createdAt              string
-		action, reason, createdBy           sql.NullString
-		fromStatus, toStatus                sql.NullString
+		id, issueID, createdAt    string
+		action, reason, createdBy sql.NullString
+		fromStatus, toStatus      sql.NullString
 	}
 	var pending []translation
 	for queryRows.Next() {
@@ -572,20 +612,6 @@ func (s *Store) translateIssueHistoryToEvents(ctx context.Context, guard *snapsh
 	if len(pending) == 0 {
 		return false, nil
 	}
-	if _, err := guard.ensure(); err != nil {
-		return false, fmt.Errorf("translate issue_history: %w", err)
-	}
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return false, fmt.Errorf("translate issue_history: begin tx: %w", err)
-	}
-	// Belt-and-suspenders Rollback so any error path (existing or
-	// future-added) cannot leak the transaction. Rollback after Commit
-	// returns sql.ErrTxDone and is a no-op per the database/sql contract,
-	// so the success path is unaffected. [LAW:types-are-the-program] —
-	// the transaction's finalization is encoded once at the boundary
-	// instead of N times at each return site that might drift.
-	defer func() { _ = tx.Rollback() }()
 	insertEvent, err := tx.PrepareContext(ctx, `INSERT INTO issue_events (id, issue_id, action, reason, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return false, fmt.Errorf("translate issue_history: prepare event insert: %w", err)
