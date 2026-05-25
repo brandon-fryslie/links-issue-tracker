@@ -432,33 +432,33 @@ func seedCanonicalIssueHistory(t *testing.T, st *Store) {
 }
 
 // insertLegacyHistory writes one row into the canonical-shape
-// issue_history fixture. Empty action / NULL status are both supported
-// by passing "" and (*string)(nil) — the columns are nullable.
-func insertLegacyHistory(t *testing.T, st *Store, id, issueID, action, reason string, fromStatus, toStatus *string, createdAt, createdBy string) {
+// issue_history fixture. All nullable columns (action, from_status,
+// to_status) accept *string so tests can distinguish NULL (nil)
+// from an explicit empty string (strPtr("")) — historically both
+// shapes appear in real workspaces and both must normalize to NULL
+// in issue_events.action.
+func insertLegacyHistory(t *testing.T, st *Store, id, issueID string, action *string, reason string, fromStatus, toStatus *string, createdAt, createdBy string) {
 	t.Helper()
 	ctx := context.Background()
-	var actionArg any
-	if action == "" {
-		actionArg = nil
-	} else {
-		actionArg = action
-	}
-	var fromArg, toArg any
-	if fromStatus != nil {
-		fromArg = *fromStatus
-	}
-	if toStatus != nil {
-		toArg = *toStatus
-	}
 	if err := st.ExecRawForTest(ctx,
 		`INSERT INTO issue_history (id, issue_id, action, reason, from_status, to_status, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, issueID, actionArg, reason, fromArg, toArg, createdAt, createdBy,
+		id, issueID, nullableStrPtr(action), reason, nullableStrPtr(fromStatus), nullableStrPtr(toStatus), createdAt, createdBy,
 	); err != nil {
 		t.Fatalf("insert legacy history %s error = %v", id, err)
 	}
 }
 
 func strPtr(s string) *string { return &s }
+
+// nullableStrPtr converts a *string into a driver-friendly any: nil
+// → SQL NULL, non-nil → the pointed-to string (including the empty
+// string).
+func nullableStrPtr(p *string) any {
+	if p == nil {
+		return nil
+	}
+	return *p
+}
 
 // TestReconcileTranslatesLegacyIssueHistoryToEvents pins the headline
 // contract of links-recovery-icqp.3: every row in a canonical-shape
@@ -484,12 +484,17 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 		t.Fatalf("seed CreateIssue error = %v", err)
 	}
 	seedCanonicalIssueHistory(t, first)
-	// Three legacy rows: a status transition (open→in_progress), a
-	// reason-only update (no status change), and a row whose action is
-	// the empty string (the historical encoding of "no named intent").
-	insertLegacyHistory(t, first, "hist-start", seeded.ID, "start", "began work", strPtr("open"), strPtr("in_progress"), "2026-01-01T10:00:00Z", "alice")
-	insertLegacyHistory(t, first, "hist-comment", seeded.ID, "", "added context", nil, nil, "2026-01-01T10:05:00Z", "alice")
-	insertLegacyHistory(t, first, "hist-close", seeded.ID, "close", "shipped", strPtr("in_progress"), strPtr("closed"), "2026-01-01T11:00:00Z", "bob")
+	// Four legacy rows exercise the canonical mappings:
+	//   - hist-start:        status transition, named action
+	//   - hist-comment-null: NULL action (the explicit-NULL no-action shape)
+	//   - hist-comment-empty: explicit empty-string action (the other no-action
+	//     shape historically written by insertHistoryTx; MUST normalize to NULL
+	//     post-translation to match recordEvent's convention)
+	//   - hist-close:        status transition, named action, different actor
+	insertLegacyHistory(t, first, "hist-start", seeded.ID, strPtr("start"), "began work", strPtr("open"), strPtr("in_progress"), "2026-01-01T10:00:00Z", "alice")
+	insertLegacyHistory(t, first, "hist-comment-null", seeded.ID, nil, "added context", nil, nil, "2026-01-01T10:05:00Z", "alice")
+	insertLegacyHistory(t, first, "hist-comment-empty", seeded.ID, strPtr(""), "added more context", nil, nil, "2026-01-01T10:06:00Z", "alice")
+	insertLegacyHistory(t, first, "hist-close", seeded.ID, strPtr("close"), "shipped", strPtr("in_progress"), strPtr("closed"), "2026-01-01T11:00:00Z", "bob")
 	hijackToPreGoose(t, first)
 	if err := first.Close(); err != nil {
 		t.Fatalf("Close(first) error = %v", err)
@@ -505,7 +510,7 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 	if exists {
 		t.Fatal("issue_history table still exists after reconcile")
 	}
-	// All three rows show up in issue_events with the canonical mapping.
+	// All four rows show up in issue_events with the canonical mapping.
 	type translatedEvent struct {
 		ID        string
 		IssueID   string
@@ -515,8 +520,8 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 		CreatedAt string
 	}
 	rows, err := st.db.QueryContext(ctx,
-		`SELECT id, issue_id, action, reason, actor, created_at FROM issue_events WHERE id IN (?, ?, ?) ORDER BY id ASC`,
-		"hist-close", "hist-comment", "hist-start",
+		`SELECT id, issue_id, action, reason, actor, created_at FROM issue_events WHERE id IN (?, ?, ?, ?) ORDER BY id ASC`,
+		"hist-close", "hist-comment-empty", "hist-comment-null", "hist-start",
 	)
 	if err != nil {
 		t.Fatalf("query translated events error = %v", err)
@@ -533,15 +538,16 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate translated events error = %v", err)
 	}
-	if len(got) != 3 {
-		t.Fatalf("expected 3 translated events, got %d: %+v", len(got), got)
+	if len(got) != 4 {
+		t.Fatalf("expected 4 translated events, got %d: %+v", len(got), got)
 	}
 	cases := []struct {
 		id, action, reason, actor string
 		actionIsNull              bool
 	}{
 		{id: "hist-start", action: "start", reason: "began work", actor: "alice"},
-		{id: "hist-comment", reason: "added context", actor: "alice", actionIsNull: true},
+		{id: "hist-comment-null", reason: "added context", actor: "alice", actionIsNull: true},
+		{id: "hist-comment-empty", reason: "added more context", actor: "alice", actionIsNull: true},
 		{id: "hist-close", action: "close", reason: "shipped", actor: "bob"},
 	}
 	for _, c := range cases {
@@ -551,7 +557,7 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 			continue
 		}
 		if c.actionIsNull && e.Action.Valid {
-			t.Errorf("event %q action = %q, want NULL (empty action must normalize)", c.id, e.Action.String)
+			t.Errorf("event %q action = %q, want NULL (empty/NULL action must normalize)", c.id, e.Action.String)
 		}
 		if !c.actionIsNull {
 			if !e.Action.Valid || e.Action.String != c.action {
@@ -568,11 +574,11 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 			t.Errorf("event %q issue_id = %q, want %q", c.id, e.IssueID, seeded.ID)
 		}
 	}
-	// issue_event_changes has one row per status transition; the comment-only
-	// row (no status change) has zero change rows.
+	// issue_event_changes has one row per status transition; the
+	// comment-only rows (no status change) have zero change rows.
 	changeRows, err := st.db.QueryContext(ctx,
-		`SELECT event_id, field, from_value, to_value FROM issue_event_changes WHERE event_id IN (?, ?, ?) ORDER BY event_id ASC`,
-		"hist-close", "hist-comment", "hist-start",
+		`SELECT event_id, field, from_value, to_value FROM issue_event_changes WHERE event_id IN (?, ?, ?, ?) ORDER BY event_id ASC`,
+		"hist-close", "hist-comment-empty", "hist-comment-null", "hist-start",
 	)
 	if err != nil {
 		t.Fatalf("query translated changes error = %v", err)
@@ -593,8 +599,10 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 	if err := changeRows.Err(); err != nil {
 		t.Fatalf("iterate translated changes error = %v", err)
 	}
-	if _, ok := changes["hist-comment"]; ok {
-		t.Error("comment-only row produced a change record; only status transitions should emit changes")
+	for _, id := range []string{"hist-comment-null", "hist-comment-empty"} {
+		if _, ok := changes[id]; ok {
+			t.Errorf("comment-only row %q produced a change record; only status transitions should emit changes", id)
+		}
 	}
 	wantChanges := map[string]change{
 		"hist-start": {Field: "status", From: "open", To: "in_progress"},
@@ -639,8 +647,8 @@ func TestReconcileTranslateSkipsOrphanedHistoryRows(t *testing.T) {
 		t.Fatalf("seed CreateIssue error = %v", err)
 	}
 	seedCanonicalIssueHistory(t, first)
-	insertLegacyHistory(t, first, "hist-real", seeded.ID, "start", "", strPtr("open"), strPtr("in_progress"), "2026-01-01T10:00:00Z", "alice")
-	insertLegacyHistory(t, first, "hist-orphan", "does-not-exist", "start", "", strPtr("open"), strPtr("in_progress"), "2026-01-01T10:01:00Z", "alice")
+	insertLegacyHistory(t, first, "hist-real", seeded.ID, strPtr("start"), "", strPtr("open"), strPtr("in_progress"), "2026-01-01T10:00:00Z", "alice")
+	insertLegacyHistory(t, first, "hist-orphan", "does-not-exist", strPtr("start"), "", strPtr("open"), strPtr("in_progress"), "2026-01-01T10:01:00Z", "alice")
 	hijackToPreGoose(t, first)
 	if err := first.Close(); err != nil {
 		t.Fatalf("Close(first) error = %v", err)
@@ -666,17 +674,97 @@ func TestReconcileTranslateSkipsOrphanedHistoryRows(t *testing.T) {
 	}
 }
 
+// TestReconcileTranslateRunsAfterActorRename pins the ordering
+// constraint Copilot caught on PR #147 review: workspaces whose
+// issue_events table still carries the pre-rename `assignee` column
+// must NOT cause the translation INSERT to fail with unknown-column-
+// `actor`. The reconcile must run the assignee→actor rename BEFORE
+// the translation, so the translation's INSERT INTO issue_events(...,
+// actor, ...) targets a column that exists on every legacy shape.
+//
+// [LAW:dataflow-not-control-flow] The translate step sees the
+// canonical column layout because it follows the rename in the
+// reconcile sequence; the dataflow makes the precondition implicit.
+func TestReconcileTranslateRunsAfterActorRename(t *testing.T) {
+	ctx := context.Background()
+	doltRoot := filepath.Join(t.TempDir(), "dolt")
+
+	first, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open(first) error = %v", err)
+	}
+	seeded, err := first.CreateIssue(ctx, CreateIssueInput{Prefix: "test", Title: "Has legacy events", Topic: "history", IssueType: "task", Priority: 0})
+	if err != nil {
+		_ = first.Close()
+		t.Fatalf("seed CreateIssue error = %v", err)
+	}
+	// Reshape issue_events to the pre-rename layout (assignee instead
+	// of actor). Drop event_changes first to satisfy the FK; recreate
+	// it after. Both must be present going into reconcile or the
+	// schema-list CREATE TABLE step will rebuild them with the
+	// canonical shape and the ordering bug wouldn't surface.
+	pre := []string{
+		`DROP TABLE issue_event_changes`,
+		`DROP TABLE issue_events`,
+		`CREATE TABLE issue_events (
+			id VARCHAR(191) PRIMARY KEY,
+			issue_id VARCHAR(191) NOT NULL,
+			action VARCHAR(64) NULL,
+			reason TEXT NOT NULL,
+			assignee TEXT NOT NULL,
+			created_at VARCHAR(64) NOT NULL,
+			FOREIGN KEY (issue_id) REFERENCES issues(id) ON DELETE CASCADE
+		)`,
+		`CREATE TABLE issue_event_changes (
+			event_id VARCHAR(191) NOT NULL,
+			field VARCHAR(64) NOT NULL,
+			from_value TEXT NULL,
+			to_value TEXT NULL,
+			PRIMARY KEY (event_id, field),
+			FOREIGN KEY (event_id) REFERENCES issue_events(id) ON DELETE CASCADE
+		)`,
+	}
+	for _, stmt := range pre {
+		if err := first.ExecRawForTest(ctx, stmt); err != nil {
+			_ = first.Close()
+			t.Fatalf("reshape issue_events to legacy shape (%q) error = %v", stmt, err)
+		}
+	}
+	seedCanonicalIssueHistory(t, first)
+	insertLegacyHistory(t, first, "hist-pre-rename", seeded.ID, strPtr("start"), "began work", strPtr("open"), strPtr("in_progress"), "2026-01-01T10:00:00Z", "alice")
+	hijackToPreGoose(t, first)
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close(first) error = %v", err)
+	}
+
+	st := assertReachedBaseline(t, doltRoot)
+
+	// Translation must have succeeded — actor column is in place and the
+	// event landed.
+	var actor string
+	if err := st.db.QueryRowContext(ctx, `SELECT actor FROM issue_events WHERE id = ?`, "hist-pre-rename").Scan(&actor); err != nil {
+		t.Fatalf("query translated event error = %v — translation failed because actor column did not exist when INSERT ran", err)
+	}
+	if actor != "alice" {
+		t.Errorf("translated actor = %q, want %q", actor, "alice")
+	}
+}
+
 // TestReconcileTranslateIsIdempotentWithExistingEvents pins that a
 // translation re-run against a workspace where an issue_events row
 // already carries an id matching an issue_history row leaves the
-// existing row untouched. This is the cross-binary recovery scenario:
-// one binary translated a row, the workspace went back through the
-// bridge (e.g. via a different worktree that hadn't seen the new
-// schema yet), and the second pass must not duplicate.
+// existing row untouched AND does not invent a status-change row
+// attached to it. The two-row fixture forces the translate function
+// past its early-exit (pending > 0), so the per-row INSERTs actually
+// fire — without this shape the LEFT-JOIN-only change-INSERT bug
+// Copilot caught on PR #147 would not be exercised.
 //
 // [LAW:types-are-the-program] The uniqueness of issue_events.id is
-// the type-level encoding of "have we translated this row already" —
-// no marker table required.
+// the type-level encoding of "have we translated this row already";
+// the per-row INSERT pairing in translateIssueHistoryToEvents
+// encodes "this change row belongs to the event I just inserted on
+// this iteration" so the change row cannot attach to a pre-existing
+// unrelated event.
 func TestReconcileTranslateIsIdempotentWithExistingEvents(t *testing.T) {
 	ctx := context.Background()
 	doltRoot := filepath.Join(t.TempDir(), "dolt")
@@ -703,8 +791,14 @@ func TestReconcileTranslateIsIdempotentWithExistingEvents(t *testing.T) {
 	}
 	seedCanonicalIssueHistory(t, first)
 	// The legacy row carries different action/reason values from the
-	// pre-existing event — if the translation overwrote, we'd see those.
-	insertLegacyHistory(t, first, "hist-already-translated", seeded.ID, "DIFFERENT", "different reason", strPtr("open"), strPtr("closed"), "2026-01-01T10:00:00Z", "DIFFERENT_ACTOR")
+	// pre-existing event AND a status transition that would (under the
+	// old JOIN-only change-INSERT bug) attach to the pre-existing event.
+	insertLegacyHistory(t, first, "hist-already-translated", seeded.ID, strPtr("DIFFERENT"), "different reason", strPtr("open"), strPtr("closed"), "2026-01-01T10:00:00Z", "DIFFERENT_ACTOR")
+	// A second legacy row that is genuinely new — forces the translate
+	// function past its "pending == 0" early-exit so the per-row INSERTs
+	// actually run. Without this row the change-INSERT bug Copilot
+	// caught on PR #147 would not be exercised.
+	insertLegacyHistory(t, first, "hist-fresh", seeded.ID, strPtr("start"), "fresh row", strPtr("open"), strPtr("in_progress"), "2026-01-01T10:30:00Z", "alice")
 	hijackToPreGoose(t, first)
 	if err := first.Close(); err != nil {
 		t.Fatalf("Close(first) error = %v", err)
@@ -735,14 +829,40 @@ func TestReconcileTranslateIsIdempotentWithExistingEvents(t *testing.T) {
 	if actor.String != "alice" {
 		t.Errorf("actor = %q, want %q (pre-existing event was overwritten)", actor.String, "alice")
 	}
-	// No change row was created either — the pre-existing event had no
-	// status change record, and re-translation must not invent one.
+	// No change row was created on the pre-existing event either — the
+	// per-row INSERT pairing ensures change rows only attach to events
+	// the same iteration just inserted.
 	var changeCount int
 	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_event_changes WHERE event_id = ?`, "hist-already-translated").Scan(&changeCount); err != nil {
 		t.Fatalf("count change error = %v", err)
 	}
 	if changeCount != 0 {
 		t.Fatalf("change count = %d, want 0 (translation invented a change row on a previously-translated event)", changeCount)
+	}
+	// The genuinely-new row landed with its own event and status change,
+	// proving the change-INSERT did execute this run (i.e. the
+	// pre-existing event was correctly excluded from change attachment,
+	// not skipped because the whole change-INSERT was bypassed).
+	var freshEventCount int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_events WHERE id = ?`, "hist-fresh").Scan(&freshEventCount); err != nil {
+		t.Fatalf("count fresh event error = %v", err)
+	}
+	if freshEventCount != 1 {
+		t.Fatalf("fresh event count = %d, want 1 (translation skipped a new row)", freshEventCount)
+	}
+	var freshChange struct {
+		Field, From, To string
+	}
+	var fromNull, toNull sql.NullString
+	if err := st.db.QueryRowContext(ctx,
+		`SELECT field, from_value, to_value FROM issue_event_changes WHERE event_id = ?`, "hist-fresh",
+	).Scan(&freshChange.Field, &fromNull, &toNull); err != nil {
+		t.Fatalf("read fresh change error = %v (change row missing — change-INSERT was bypassed entirely)", err)
+	}
+	freshChange.From = fromNull.String
+	freshChange.To = toNull.String
+	if freshChange != (struct{ Field, From, To string }{Field: "status", From: "open", To: "in_progress"}) {
+		t.Errorf("fresh change = %+v, want {status open in_progress}", freshChange)
 	}
 }
 

@@ -219,33 +219,6 @@ func (s *Store) reconcileToBaseline(ctx context.Context, guard *snapshotGuard) (
 		}
 		changed = changed || stmtChanged
 	}
-	// [LAW:no-silent-fallbacks] Before issue_history goes away, lift every
-	// row that maps cleanly onto the canonical event log forward — the
-	// previous drop-without-translate path silently discarded audit data
-	// on every legacy→v1 bridge.
-	translatedHistoryChanged, err := s.translateIssueHistoryToEvents(ctx, guard)
-	if err != nil {
-		return changed, err
-	}
-	changed = changed || translatedHistoryChanged
-	// [LAW:one-source-of-truth] issue_history is superseded by
-	// issue_events + issue_event_changes. Translation above preserves
-	// every row whose schema participates in the canonical mapping;
-	// the drop here removes the legacy table after the rows have
-	// reached their canonical home (or after the translate step
-	// no-oped on a partial/synthetic shape that carries no rows the
-	// canonical mapping could express).
-	dropHistoryChanged, err := s.execGatedMutation(
-		ctx,
-		guard,
-		`SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'issue_history' LIMIT 1`,
-		`DROP TABLE IF EXISTS issue_history`,
-		"drop legacy issue_history table",
-	)
-	if err != nil {
-		return changed, err
-	}
-	changed = changed || dropHistoryChanged
 	// [LAW:single-enforcer] Reconcile is the legacy→v1 bridge and owns
 	// BOTH schema translation AND bookkeeping cleanup. A workspace that
 	// reaches this function was classified phaseAdopt — by definition
@@ -274,7 +247,9 @@ func (s *Store) reconcileToBaseline(ctx context.Context, guard *snapshotGuard) (
 	changed = changed || dropFabricatedGooseLog
 	// issue_events.assignee was renamed to actor. Probe-gated rename
 	// keeps the migration idempotent across fresh / migrated / pre-rename
-	// workspace states.
+	// workspace states. MUST run BEFORE translateIssueHistoryToEvents so
+	// the translation's INSERT targets the canonical column name on every
+	// shape, including workspaces that still carry the pre-rename column.
 	actorColumnChanged, err := s.execGatedMutation(
 		ctx,
 		guard,
@@ -286,6 +261,35 @@ func (s *Store) reconcileToBaseline(ctx context.Context, guard *snapshotGuard) (
 		return changed, err
 	}
 	changed = changed || actorColumnChanged
+	// [LAW:no-silent-fallbacks] Before issue_history goes away, lift every
+	// row that maps cleanly onto the canonical event log forward — the
+	// previous drop-without-translate path silently discarded audit data
+	// on every legacy→v1 bridge. MUST run AFTER the assignee→actor rename
+	// above; the translation writes to issue_events.actor, which exists
+	// only after the rename has landed on workspaces that pre-date it.
+	translatedHistoryChanged, err := s.translateIssueHistoryToEvents(ctx, guard)
+	if err != nil {
+		return changed, err
+	}
+	changed = changed || translatedHistoryChanged
+	// [LAW:one-source-of-truth] issue_history is superseded by
+	// issue_events + issue_event_changes. Translation above preserves
+	// every row whose schema participates in the canonical mapping;
+	// the drop here removes the legacy table after the rows have
+	// reached their canonical home (or after the translate step
+	// no-oped on a partial/synthetic shape that carries no rows the
+	// canonical mapping could express).
+	dropHistoryChanged, err := s.execGatedMutation(
+		ctx,
+		guard,
+		`SELECT 1 FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = 'issue_history' LIMIT 1`,
+		`DROP TABLE IF EXISTS issue_history`,
+		"drop legacy issue_history table",
+	)
+	if err != nil {
+		return changed, err
+	}
+	changed = changed || dropHistoryChanged
 	rankColumnChanged, err := s.execGatedColumnAdd(ctx, guard, "issues", "item_rank",
 		`ALTER TABLE issues ADD COLUMN item_rank TEXT NOT NULL DEFAULT ''`)
 	if err != nil {
@@ -466,7 +470,7 @@ var legacyIssueHistoryColumns = []string{
 // the canonical issue_events (+ issue_event_changes for status
 // transitions) before the table is dropped. Each issue_history row
 // becomes one issue_events row carrying the same id, issue_id,
-// action, reason, actor (renamed from created_by), and created_at.
+// action, reason, actor (mapped from created_by), and created_at.
 // Status transitions (from_status != to_status, with NULL on either
 // side counting as transition) emit one issue_event_changes row
 // with field='status'.
@@ -480,24 +484,28 @@ var legacyIssueHistoryColumns = []string{
 //  3. At least one issue_history row must reference an existing
 //     issue AND not already be present in issue_events (FK + idempotency).
 //
-// The two INSERTs run inside one transaction so the next Open
-// observes either every translatable row in issue_events or none of
-// them — a half-translated state would make the drop step lose any
-// rows that had not yet copied.
+// The per-row INSERT pair runs inside one transaction so the next Open
+// observes either every translatable row in issue_events (+ paired
+// change rows) or none of them — a half-translated state would make
+// the drop step lose any rows that had not yet copied.
 //
 // [LAW:no-silent-fallbacks] The previous drop-only bridge silently
 // destroyed audit history. Translation makes the bridge lossless for
 // every row whose shape the canonical mapping accepts.
-// [LAW:dataflow-not-control-flow] The two INSERTs run the same on
-// every invocation; the WHERE clauses do the filtering. The only
-// branch is the shape probe at the top, routing the table through
-// translate-then-drop (canonical shape) vs drop-only (partial shape).
+// [LAW:dataflow-not-control-flow] The per-row loop runs the same
+// sequence (INSERT event, conditionally INSERT change) for every row
+// that satisfied the SELECT — variability lives in the rows the
+// SELECT returns and in each row's status-transition values, not in
+// whether the loop runs.
 // [LAW:single-enforcer] All issue_events writes flow through one of
 // recordEvent (live mutations), the JSONL importer, or this legacy
 // translation. No other writer touches the events table.
-// [LAW:types-are-the-program] Idempotency is encoded in the
-// uniqueness of issue_events.id: re-runs see the row already present
-// and the NOT EXISTS clause skips it. No marker table required.
+// [LAW:types-are-the-program] The change-row's event_id by construction
+// points at the event row inserted on the same loop iteration — pairing
+// is per-row, not via a JOIN that could match a pre-existing unrelated
+// event with a colliding id. Idempotency at the event level is encoded
+// in the SELECT's NOT EXISTS clause: re-runs do not re-select rows
+// whose id is already in issue_events.
 func (s *Store) translateIssueHistoryToEvents(ctx context.Context, guard *snapshotGuard) (bool, error) {
 	historyExists, err := s.tableExists(ctx, "issue_history")
 	if err != nil {
@@ -517,16 +525,49 @@ func (s *Store) translateIssueHistoryToEvents(ctx context.Context, guard *snapsh
 			return false, nil
 		}
 	}
-	var pending int
-	if err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*)
+	// SELECT all translatable rows with the canonical normalization
+	// applied at the SQL layer: empty/NULL action → NULL, empty/NULL
+	// created_by → 'unknown' (matches recordEvent's actor fallback),
+	// NULL reason → '' (issue_events.reason is NOT NULL). The same
+	// SELECT predicate (FK-safe + not-already-translated) gates both
+	// the count probe and the row iteration so the two never disagree.
+	const selectTranslatable = `
+		SELECT
+			h.id,
+			h.issue_id,
+			CASE WHEN h.action IS NULL OR h.action = '' THEN NULL ELSE h.action END,
+			COALESCE(h.reason, ''),
+			CASE WHEN h.created_by IS NULL OR h.created_by = '' THEN 'unknown' ELSE h.created_by END,
+			h.created_at,
+			h.from_status,
+			h.to_status
 		FROM issue_history h
 		WHERE EXISTS (SELECT 1 FROM issues i WHERE i.id = h.issue_id)
 		  AND NOT EXISTS (SELECT 1 FROM issue_events e WHERE e.id = h.id)
-	`).Scan(&pending); err != nil {
-		return false, fmt.Errorf("translate issue_history: probe pending rows: %w", err)
+	`
+	queryRows, err := s.db.QueryContext(ctx, selectTranslatable)
+	if err != nil {
+		return false, fmt.Errorf("translate issue_history: query translatable rows: %w", err)
 	}
-	if pending == 0 {
+	type translation struct {
+		id, issueID, reason, actor, createdAt string
+		action, fromStatus, toStatus          sql.NullString
+	}
+	var pending []translation
+	for queryRows.Next() {
+		var t translation
+		if err := queryRows.Scan(&t.id, &t.issueID, &t.action, &t.reason, &t.actor, &t.createdAt, &t.fromStatus, &t.toStatus); err != nil {
+			queryRows.Close()
+			return false, fmt.Errorf("translate issue_history: scan row: %w", err)
+		}
+		pending = append(pending, t)
+	}
+	if err := queryRows.Err(); err != nil {
+		queryRows.Close()
+		return false, fmt.Errorf("translate issue_history: iterate rows: %w", err)
+	}
+	queryRows.Close()
+	if len(pending) == 0 {
 		return false, nil
 	}
 	if _, err := guard.ensure(); err != nil {
@@ -536,52 +577,59 @@ func (s *Store) translateIssueHistoryToEvents(ctx context.Context, guard *snapsh
 	if err != nil {
 		return false, fmt.Errorf("translate issue_history: begin tx: %w", err)
 	}
-	// action='' is normalized to NULL because recordEvent emits NULL for
-	// "no named action" (plain field updates) — the legacy table stored
-	// empty strings for the same intent. created_by='' is normalized to
-	// 'unknown' to match recordEvent's actor fallback. reason NULL is
-	// coerced to '' because issue_events.reason is NOT NULL.
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO issue_events (id, issue_id, action, reason, actor, created_at)
-		SELECT
-			h.id,
-			h.issue_id,
-			CASE WHEN h.action IS NULL OR h.action = '' THEN NULL ELSE h.action END,
-			COALESCE(h.reason, ''),
-			CASE WHEN h.created_by IS NULL OR h.created_by = '' THEN 'unknown' ELSE h.created_by END,
-			h.created_at
-		FROM issue_history h
-		WHERE EXISTS (SELECT 1 FROM issues i WHERE i.id = h.issue_id)
-		  AND NOT EXISTS (SELECT 1 FROM issue_events e WHERE e.id = h.id)
-	`); err != nil {
+	insertEvent, err := tx.PrepareContext(ctx, `INSERT INTO issue_events (id, issue_id, action, reason, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
+	if err != nil {
 		_ = tx.Rollback()
-		return false, fmt.Errorf("translate issue_history: insert events: %w", err)
+		return false, fmt.Errorf("translate issue_history: prepare event insert: %w", err)
 	}
-	// One change row per translated event with a non-trivial status
-	// transition. NULL→value and value→NULL both count; value→same-value
-	// does not. The join to issue_events ensures we only emit change
-	// rows for events that were translated this run OR previously
-	// (the FK on event_id requires it).
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO issue_event_changes (event_id, field, from_value, to_value)
-		SELECT h.id, 'status', h.from_status, h.to_status
-		FROM issue_history h
-		INNER JOIN issue_events e ON e.id = h.id
-		LEFT JOIN issue_event_changes c ON c.event_id = h.id AND c.field = 'status'
-		WHERE c.event_id IS NULL
-		  AND (
-		    (h.from_status IS NULL AND h.to_status IS NOT NULL)
-		    OR (h.from_status IS NOT NULL AND h.to_status IS NULL)
-		    OR (h.from_status IS NOT NULL AND h.to_status IS NOT NULL AND h.from_status <> h.to_status)
-		  )
-	`); err != nil {
+	defer insertEvent.Close()
+	insertChange, err := tx.PrepareContext(ctx, `INSERT INTO issue_event_changes (event_id, field, from_value, to_value) VALUES (?, 'status', ?, ?)`)
+	if err != nil {
 		_ = tx.Rollback()
-		return false, fmt.Errorf("translate issue_history: insert event changes: %w", err)
+		return false, fmt.Errorf("translate issue_history: prepare change insert: %w", err)
+	}
+	defer insertChange.Close()
+	for _, t := range pending {
+		if _, err := insertEvent.ExecContext(ctx, t.id, t.issueID, nullableSQLString(t.action), t.reason, t.actor, t.createdAt); err != nil {
+			_ = tx.Rollback()
+			return false, fmt.Errorf("translate issue_history: insert event %s: %w", t.id, err)
+		}
+		if isLegacyStatusTransition(t.fromStatus, t.toStatus) {
+			if _, err := insertChange.ExecContext(ctx, t.id, nullableSQLString(t.fromStatus), nullableSQLString(t.toStatus)); err != nil {
+				_ = tx.Rollback()
+				return false, fmt.Errorf("translate issue_history: insert status change for %s: %w", t.id, err)
+			}
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("translate issue_history: commit tx: %w", err)
 	}
 	return true, nil
+}
+
+// isLegacyStatusTransition reports whether a (from, to) status pair
+// describes a real workflow movement worth recording as a change row.
+// NULL→value and value→NULL both count; value→same-value and
+// NULL→NULL do not. [LAW:types-are-the-program] The status-change
+// shape is "the value moved" — the predicate makes that exact shape
+// the only thing the change-row INSERT can emit.
+func isLegacyStatusTransition(from, to sql.NullString) bool {
+	if !from.Valid && !to.Valid {
+		return false
+	}
+	if from.Valid && to.Valid && from.String == to.String {
+		return false
+	}
+	return true
+}
+
+// nullableSQLString converts a sql.NullString to a driver-friendly any:
+// invalid → nil (writes SQL NULL), valid → the underlying string.
+func nullableSQLString(v sql.NullString) any {
+	if !v.Valid {
+		return nil
+	}
+	return v.String
 }
 
 // runGatedCreate is the schema-list runner — probes existence, snapshots
