@@ -577,15 +577,20 @@ func (s *Store) translateIssueHistoryToEvents(ctx context.Context, guard *snapsh
 	if err != nil {
 		return false, fmt.Errorf("translate issue_history: begin tx: %w", err)
 	}
+	// Belt-and-suspenders Rollback so any error path (existing or
+	// future-added) cannot leak the transaction. Rollback after Commit
+	// returns sql.ErrTxDone and is a no-op per the database/sql contract,
+	// so the success path is unaffected. [LAW:types-are-the-program] —
+	// the transaction's finalization is encoded once at the boundary
+	// instead of N times at each return site that might drift.
+	defer func() { _ = tx.Rollback() }()
 	insertEvent, err := tx.PrepareContext(ctx, `INSERT INTO issue_events (id, issue_id, action, reason, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)`)
 	if err != nil {
-		_ = tx.Rollback()
 		return false, fmt.Errorf("translate issue_history: prepare event insert: %w", err)
 	}
 	defer insertEvent.Close()
 	insertChange, err := tx.PrepareContext(ctx, `INSERT INTO issue_event_changes (event_id, field, from_value, to_value) VALUES (?, 'status', ?, ?)`)
 	if err != nil {
-		_ = tx.Rollback()
 		return false, fmt.Errorf("translate issue_history: prepare change insert: %w", err)
 	}
 	defer insertChange.Close()
@@ -594,12 +599,10 @@ func (s *Store) translateIssueHistoryToEvents(ctx context.Context, guard *snapsh
 		reasonArg := canonicalEventReason(t.reason)
 		actorArg := canonicalEventActor(t.createdBy)
 		if _, err := insertEvent.ExecContext(ctx, t.id, t.issueID, actionArg, reasonArg, actorArg, t.createdAt); err != nil {
-			_ = tx.Rollback()
 			return false, fmt.Errorf("translate issue_history: insert event %s: %w", t.id, err)
 		}
 		if isLegacyStatusTransition(t.fromStatus, t.toStatus) {
 			if _, err := insertChange.ExecContext(ctx, t.id, nullableSQLString(t.fromStatus), nullableSQLString(t.toStatus)); err != nil {
-				_ = tx.Rollback()
 				return false, fmt.Errorf("translate issue_history: insert status change for %s: %w", t.id, err)
 			}
 		}
