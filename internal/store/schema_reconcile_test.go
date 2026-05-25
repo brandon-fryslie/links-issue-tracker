@@ -493,6 +493,36 @@ func TestCanonicalEventCanonicalization(t *testing.T) {
 	})
 }
 
+// TestCanonicalLegacyStatus pins that the translation's status
+// normalization mirrors ensureUnifiedStatusSchema's UPDATE rules
+// exactly. Drift between these two writers would land non-canonical
+// status spellings in issue_event_changes while issues.status was
+// already normalized — a [LAW:one-source-of-truth] violation.
+func TestCanonicalLegacyStatus(t *testing.T) {
+	cases := []struct {
+		name string
+		in   sql.NullString
+		want sql.NullString
+	}{
+		{name: "null stays null", in: sql.NullString{}, want: sql.NullString{}},
+		{name: "open passes through", in: sql.NullString{Valid: true, String: "open"}, want: sql.NullString{Valid: true, String: "open"}},
+		{name: "in_progress passes through", in: sql.NullString{Valid: true, String: "in_progress"}, want: sql.NullString{Valid: true, String: "in_progress"}},
+		{name: "closed passes through", in: sql.NullString{Valid: true, String: "closed"}, want: sql.NullString{Valid: true, String: "closed"}},
+		{name: "in-progress normalized to in_progress", in: sql.NullString{Valid: true, String: "in-progress"}, want: sql.NullString{Valid: true, String: "in_progress"}},
+		{name: "todo normalized to open", in: sql.NullString{Valid: true, String: "todo"}, want: sql.NullString{Valid: true, String: "open"}},
+		{name: "done normalized to closed", in: sql.NullString{Valid: true, String: "done"}, want: sql.NullString{Valid: true, String: "closed"}},
+		{name: "unknown value falls back to open", in: sql.NullString{Valid: true, String: "weird"}, want: sql.NullString{Valid: true, String: "open"}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := canonicalLegacyStatus(c.in)
+			if got != c.want {
+				t.Errorf("canonicalLegacyStatus(%+v) = %+v, want %+v", c.in, got, c.want)
+			}
+		})
+	}
+}
+
 // seedCanonicalIssueHistory creates the canonical-shape legacy
 // issue_history table — the exact column set the deleted insertHistoryTx
 // wrote in production. Tests use this to exercise the translation
@@ -585,6 +615,21 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 	insertLegacyHistory(t, first, "hist-close", seeded.ID, strPtr("close"), "shipped", strPtr("in_progress"), strPtr("closed"), "2026-01-01T11:00:00Z", "bob")
 	insertLegacyHistory(t, first, "hist-same-status", seeded.ID, strPtr("touch"), "no movement", strPtr("closed"), strPtr("closed"), "2026-01-01T11:30:00Z", "bob")
 	insertLegacyHistory(t, first, "hist-whitespace", seeded.ID, strPtr("  start  "), "  padded reason  ", nil, nil, "2026-01-01T12:00:00Z", "  carol  ")
+	// Drop the issues.status check constraint so we can write legacy
+	// status spellings into issue_history's referenced workspace state
+	// without violating the canonical CHECK. (issue_history itself has
+	// no status check — the constraint lives on the issues table.)
+	if err := first.ExecRawForTest(ctx, "ALTER TABLE issues DROP CHECK issues_status_check"); err != nil {
+		_ = first.Close()
+		t.Fatalf("drop status check error = %v", err)
+	}
+	// Legacy-status transition: ('todo' → 'done') must normalize to
+	// ('open' → 'closed') in the canonical event log.
+	insertLegacyHistory(t, first, "hist-legacy-transition", seeded.ID, strPtr("close"), "legacy close", strPtr("todo"), strPtr("done"), "2026-01-01T12:30:00Z", "carol")
+	// Legacy-status non-transition: ('in-progress' → 'in_progress') both
+	// normalize to 'in_progress' — must produce NO change row even though
+	// the raw values differ.
+	insertLegacyHistory(t, first, "hist-legacy-nontransition", seeded.ID, strPtr("touch"), "spelling differs only", strPtr("in-progress"), strPtr("in_progress"), "2026-01-01T12:45:00Z", "carol")
 	hijackToPreGoose(t, first)
 	if err := first.Close(); err != nil {
 		t.Fatalf("Close(first) error = %v", err)
@@ -600,7 +645,7 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 	if exists {
 		t.Fatal("issue_history table still exists after reconcile")
 	}
-	// All six rows show up in issue_events with the canonical mapping.
+	// All eight rows show up in issue_events with the canonical mapping.
 	type translatedEvent struct {
 		ID        string
 		IssueID   string
@@ -610,8 +655,8 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 		CreatedAt string
 	}
 	rows, err := st.db.QueryContext(ctx,
-		`SELECT id, issue_id, action, reason, actor, created_at FROM issue_events WHERE id IN (?, ?, ?, ?, ?, ?) ORDER BY id ASC`,
-		"hist-close", "hist-comment-empty", "hist-comment-null", "hist-same-status", "hist-start", "hist-whitespace",
+		`SELECT id, issue_id, action, reason, actor, created_at FROM issue_events WHERE id IN (?, ?, ?, ?, ?, ?, ?, ?) ORDER BY id ASC`,
+		"hist-close", "hist-comment-empty", "hist-comment-null", "hist-legacy-nontransition", "hist-legacy-transition", "hist-same-status", "hist-start", "hist-whitespace",
 	)
 	if err != nil {
 		t.Fatalf("query translated events error = %v", err)
@@ -628,8 +673,8 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate translated events error = %v", err)
 	}
-	if len(got) != 6 {
-		t.Fatalf("expected 6 translated events, got %d: %+v", len(got), got)
+	if len(got) != 8 {
+		t.Fatalf("expected 8 translated events, got %d: %+v", len(got), got)
 	}
 	cases := []struct {
 		id, action, reason, actor string
@@ -644,6 +689,8 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 		// padded "  start  " action / "  padded reason  " / "  carol  "
 		// actor must come out trimmed.
 		{id: "hist-whitespace", action: "start", reason: "padded reason", actor: "carol"},
+		{id: "hist-legacy-transition", action: "close", reason: "legacy close", actor: "carol"},
+		{id: "hist-legacy-nontransition", action: "touch", reason: "spelling differs only", actor: "carol"},
 	}
 	for _, c := range cases {
 		e, ok := got[c.id]
@@ -670,11 +717,11 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 		}
 	}
 	// issue_event_changes has one row per status transition; rows without
-	// a real transition (comment-only, same-status, whitespace) must have
-	// zero change rows.
+	// a real transition (comment-only, same-status, whitespace,
+	// legacy-spelling-only-difference) must have zero change rows.
 	changeRows, err := st.db.QueryContext(ctx,
-		`SELECT event_id, field, from_value, to_value FROM issue_event_changes WHERE event_id IN (?, ?, ?, ?, ?, ?) ORDER BY event_id ASC`,
-		"hist-close", "hist-comment-empty", "hist-comment-null", "hist-same-status", "hist-start", "hist-whitespace",
+		`SELECT event_id, field, from_value, to_value FROM issue_event_changes WHERE event_id IN (?, ?, ?, ?, ?, ?, ?, ?) ORDER BY event_id ASC`,
+		"hist-close", "hist-comment-empty", "hist-comment-null", "hist-legacy-nontransition", "hist-legacy-transition", "hist-same-status", "hist-start", "hist-whitespace",
 	)
 	if err != nil {
 		t.Fatalf("query translated changes error = %v", err)
@@ -695,7 +742,7 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 	if err := changeRows.Err(); err != nil {
 		t.Fatalf("iterate translated changes error = %v", err)
 	}
-	for _, id := range []string{"hist-comment-null", "hist-comment-empty", "hist-same-status", "hist-whitespace"} {
+	for _, id := range []string{"hist-comment-null", "hist-comment-empty", "hist-same-status", "hist-whitespace", "hist-legacy-nontransition"} {
 		if _, ok := changes[id]; ok {
 			t.Errorf("non-transition row %q produced a change record; only real status transitions should emit changes", id)
 		}
@@ -703,6 +750,10 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 	wantChanges := map[string]change{
 		"hist-start": {Field: "status", From: "open", To: "in_progress"},
 		"hist-close": {Field: "status", From: "in_progress", To: "closed"},
+		// hist-legacy-transition: raw legacy 'todo'→'done' must normalize
+		// to 'open'→'closed' in the change row (matching the rules
+		// ensureUnifiedStatusSchema applies to issues.status).
+		"hist-legacy-transition": {Field: "status", From: "open", To: "closed"},
 	}
 	for id, want := range wantChanges {
 		got, ok := changes[id]

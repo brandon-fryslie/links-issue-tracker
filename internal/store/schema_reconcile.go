@@ -603,8 +603,15 @@ func (s *Store) translateIssueHistoryToEvents(ctx context.Context, guard *snapsh
 		if _, err := insertEvent.ExecContext(ctx, t.id, t.issueID, actionArg, reasonArg, actorArg, t.createdAt); err != nil {
 			return false, fmt.Errorf("translate issue_history: insert event %s: %w", t.id, err)
 		}
-		if isLegacyStatusTransition(t.fromStatus, t.toStatus) {
-			if _, err := insertChange.ExecContext(ctx, t.id, nullableSQLString(t.fromStatus), nullableSQLString(t.toStatus)); err != nil {
+		// Normalize legacy status spellings BEFORE the transition check —
+		// a 'in-progress' → 'in_progress' raw pair both normalize to
+		// 'in_progress', which is correctly NOT a transition. The change
+		// row's from_value/to_value carry the canonical normalized values
+		// so the event log matches issues.status post-ensureUnifiedStatusSchema.
+		fromCanon := canonicalLegacyStatus(t.fromStatus)
+		toCanon := canonicalLegacyStatus(t.toStatus)
+		if isLegacyStatusTransition(fromCanon, toCanon) {
+			if _, err := insertChange.ExecContext(ctx, t.id, nullableSQLString(fromCanon), nullableSQLString(toCanon)); err != nil {
 				return false, fmt.Errorf("translate issue_history: insert status change for %s: %w", t.id, err)
 			}
 		}
@@ -652,6 +659,41 @@ func canonicalEventActor(v sql.NullString) string {
 		return "unknown"
 	}
 	return trimmed
+}
+
+// canonicalLegacyStatus mirrors ensureUnifiedStatusSchema's status
+// normalization rules so the change-row from_value/to_value strings
+// match the values the issues table carries after reconcile. Without
+// this, a legacy 'todo'/'in-progress'/'done' status would be normalized
+// in issues.status but copied verbatim into issue_event_changes —
+// breaking [LAW:one-source-of-truth] for what "status" means in the
+// canonical workspace.
+//
+// Mapping (exact-match, mirrors the UPDATE predicates in
+// ensureUnifiedStatusSchema):
+//   - 'in-progress' → 'in_progress'
+//   - 'todo'        → 'open'
+//   - 'done'        → 'closed'
+//   - 'open' / 'in_progress' / 'closed' → unchanged
+//   - anything else → 'open' (matches the "normalize invalid status"
+//     fallback)
+//   - NULL → NULL
+func canonicalLegacyStatus(v sql.NullString) sql.NullString {
+	if !v.Valid {
+		return v
+	}
+	switch v.String {
+	case "open", "in_progress", "closed":
+		return v
+	case "in-progress":
+		return sql.NullString{Valid: true, String: "in_progress"}
+	case "todo":
+		return sql.NullString{Valid: true, String: "open"}
+	case "done":
+		return sql.NullString{Valid: true, String: "closed"}
+	default:
+		return sql.NullString{Valid: true, String: "open"}
+	}
 }
 
 // isLegacyStatusTransition reports whether a (from, to) status pair
