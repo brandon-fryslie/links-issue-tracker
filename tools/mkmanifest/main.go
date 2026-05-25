@@ -173,6 +173,17 @@ func collectArtifacts(distDir, baseURL, ver, tag string) ([]release.Artifact, er
 			// manifest we're about to write, source archives). Skip silently.
 			continue
 		}
+		// Verify the archive is actually present in dist/. checksums.txt
+		// is the producer's claim about what exists; this turns the claim
+		// into a checked fact before we promise a URL to it. Catches stale
+		// checksums (an aborted goreleaser run that wrote checksums.txt but
+		// failed to produce one of the archives) before they ship as 404s.
+		// [LAW:enumeration-gap] accept-shape now requires "filename matches
+		// pattern AND file exists", not just "filename matches pattern".
+		artifactPath := filepath.Join(distDir, filename)
+		if _, err := os.Stat(artifactPath); err != nil {
+			return nil, fmt.Errorf("%s:%d references archive %q but %s: %w", checksumsPath, lineNum+1, filename, artifactPath, err)
+		}
 		artifacts = append(artifacts, release.Artifact{
 			Platform: platform,
 			// URL path segment is the git tag (v-prefixed), NOT the

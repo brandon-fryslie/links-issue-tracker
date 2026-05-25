@@ -88,9 +88,14 @@ func TestPlatformFromFilenameAcceptReject(t *testing.T) {
 func TestCollectArtifactsURLUsesTagNotVersion(t *testing.T) {
 	dist := t.TempDir()
 	const validHex = "0000000000000000000000000000000000000000000000000000000000000001"
-	checksums := validHex + "  lit_0.1.0_darwin_arm64.tar.gz\n"
+	const archiveName = "lit_0.1.0_darwin_arm64.tar.gz"
+	checksums := validHex + "  " + archiveName + "\n"
 	if err := os.WriteFile(filepath.Join(dist, "checksums.txt"), []byte(checksums), 0o644); err != nil {
 		t.Fatalf("write checksums.txt: %v", err)
+	}
+	// Archive bytes are irrelevant — collectArtifacts only Stats them.
+	if err := os.WriteFile(filepath.Join(dist, archiveName), []byte("archive"), 0o644); err != nil {
+		t.Fatalf("write archive: %v", err)
 	}
 
 	const (
@@ -106,7 +111,7 @@ func TestCollectArtifactsURLUsesTagNotVersion(t *testing.T) {
 		t.Fatalf("got %d artifacts, want 1", len(artifacts))
 	}
 
-	wantURL := baseURL + "/" + tag + "/lit_0.1.0_darwin_arm64.tar.gz"
+	wantURL := baseURL + "/" + tag + "/" + archiveName
 	if artifacts[0].URL != wantURL {
 		t.Errorf("URL = %q, want %q", artifacts[0].URL, wantURL)
 	}
@@ -114,5 +119,30 @@ func TestCollectArtifactsURLUsesTagNotVersion(t *testing.T) {
 	// that would mean the version (not the tag) leaked into the URL.
 	if strings.Contains(artifacts[0].URL, "/"+ver+"/") {
 		t.Errorf("URL %q contains v-stripped version as path segment; must use tag", artifacts[0].URL)
+	}
+}
+
+// TestCollectArtifactsRejectsMissingArchive pins the contract that
+// checksums.txt entries are claims that get verified against dist/ —
+// if the referenced archive is missing (e.g., aborted goreleaser run
+// wrote checksums.txt but failed to produce one of the archives),
+// mkmanifest must fail loudly instead of emitting a 404 URL.
+func TestCollectArtifactsRejectsMissingArchive(t *testing.T) {
+	dist := t.TempDir()
+	const validHex = "0000000000000000000000000000000000000000000000000000000000000001"
+	const archiveName = "lit_0.1.0_linux_amd64.tar.gz"
+	// checksums.txt references the archive, but we deliberately do NOT
+	// create the file on disk.
+	checksums := validHex + "  " + archiveName + "\n"
+	if err := os.WriteFile(filepath.Join(dist, "checksums.txt"), []byte(checksums), 0o644); err != nil {
+		t.Fatalf("write checksums.txt: %v", err)
+	}
+
+	_, err := collectArtifacts(dist, "https://example/dl", "0.1.0", "v0.1.0")
+	if err == nil {
+		t.Fatalf("collectArtifacts succeeded with missing archive; want error")
+	}
+	if !strings.Contains(err.Error(), archiveName) {
+		t.Errorf("error %q should name the missing archive %q", err, archiveName)
 	}
 }
