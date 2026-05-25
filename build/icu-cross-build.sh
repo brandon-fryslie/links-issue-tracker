@@ -66,6 +66,10 @@ PATH="${path_extra:+${path_extra}:}${PATH}" \
         # --disable-extras / --disable-icuio / --disable-layoutex: same
         #   reasoning — we don't link them, so don't build them.
 make -j"$(nproc)"
+# Pre-create the prefix subdirs. Windows static data (sicudt.a) installs to
+# bin/ — ICU's makefile assumes `make install`'s earlier steps created it,
+# but under --disable-tools nothing else writes to bin/, so we make it ourselves.
+mkdir -p "$prefix"/{bin,lib,include}
 make install
 rm -rf "$builddir"
 echo "=== ${goos}/${goarch} installed at ${prefix} ==="
