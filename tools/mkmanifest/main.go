@@ -75,16 +75,22 @@ func main() {
 	)
 	flag.Parse()
 
-	for name, val := range map[string]string{
-		"-version":  *ver,
-		"-tag":      *tag,
-		"-commit":   *commit,
-		"-date":     *date,
-		"-base-url": *baseURL,
-		"-out":      *outPath,
-	} {
-		if strings.TrimSpace(val) == "" {
-			die("required flag %s missing", name)
+	// Fixed-order slice (not a map) — map iteration is randomized, so a
+	// map-based check would report a different "first missing flag" across
+	// runs when several are missing, making the failure non-reproducible.
+	// [LAW:dataflow-not-control-flow] the ordering of the diagnostic is data
+	// (this slice), not whichever key Go's runtime picked first.
+	required := []struct{ name, val string }{
+		{"-version", *ver},
+		{"-tag", *tag},
+		{"-commit", *commit},
+		{"-date", *date},
+		{"-base-url", *baseURL},
+		{"-out", *outPath},
+	}
+	for _, r := range required {
+		if strings.TrimSpace(r.val) == "" {
+			die("required flag %s missing", r.name)
 		}
 	}
 
