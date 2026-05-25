@@ -410,6 +410,89 @@ func TestReconcileDropsLegacyIssueHistory(t *testing.T) {
 	}
 }
 
+// TestIsLegacyStatusTransition pins all four (from, to) discriminations
+// the predicate distinguishes. Without exhaustive coverage a regression
+// could silently flip the semantics in either direction — same-value
+// transitions starting to emit change rows, or NULL transitions getting
+// dropped.
+//
+// [LAW:types-are-the-program] The predicate is a function from
+// (Nullable × Nullable) → bool. Truth-table coverage is the only
+// proof its branches do what their names say.
+func TestIsLegacyStatusTransition(t *testing.T) {
+	null := sql.NullString{}
+	open := sql.NullString{Valid: true, String: "open"}
+	openAlso := sql.NullString{Valid: true, String: "open"}
+	closed := sql.NullString{Valid: true, String: "closed"}
+	cases := []struct {
+		name     string
+		from, to sql.NullString
+		want     bool
+	}{
+		{name: "null to null is not a transition", from: null, to: null, want: false},
+		{name: "value to same value is not a transition", from: open, to: openAlso, want: false},
+		{name: "null to value is a transition", from: null, to: open, want: true},
+		{name: "value to null is a transition", from: open, to: null, want: true},
+		{name: "value to different value is a transition", from: open, to: closed, want: true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := isLegacyStatusTransition(c.from, c.to)
+			if got != c.want {
+				t.Errorf("isLegacyStatusTransition(%+v, %+v) = %v, want %v", c.from, c.to, got, c.want)
+			}
+		})
+	}
+}
+
+// TestCanonicalEventCanonicalization pins that translateIssueHistoryToEvents
+// applies the literal-same canonicalization rules recordEvent uses, so
+// translated event rows are byte-equivalent to live-written rows.
+// [LAW:one-source-of-truth] — both writers produce the same shape.
+func TestCanonicalEventCanonicalization(t *testing.T) {
+	null := sql.NullString{}
+	t.Run("action: null → SQL NULL", func(t *testing.T) {
+		if got := canonicalEventAction(null); got != nil {
+			t.Errorf("canonicalEventAction(NULL) = %v, want nil", got)
+		}
+	})
+	t.Run("action: whitespace-only → SQL NULL", func(t *testing.T) {
+		if got := canonicalEventAction(sql.NullString{Valid: true, String: "   "}); got != nil {
+			t.Errorf("canonicalEventAction(\"   \") = %v, want nil", got)
+		}
+	})
+	t.Run("action: padded value → trimmed string", func(t *testing.T) {
+		if got := canonicalEventAction(sql.NullString{Valid: true, String: "  start  "}); got != "start" {
+			t.Errorf("canonicalEventAction(\"  start  \") = %v, want %q", got, "start")
+		}
+	})
+	t.Run("reason: null → empty string", func(t *testing.T) {
+		if got := canonicalEventReason(null); got != "" {
+			t.Errorf("canonicalEventReason(NULL) = %q, want %q", got, "")
+		}
+	})
+	t.Run("reason: padded value → trimmed string", func(t *testing.T) {
+		if got := canonicalEventReason(sql.NullString{Valid: true, String: "  began work  "}); got != "began work" {
+			t.Errorf("canonicalEventReason(\"  began work  \") = %q, want %q", got, "began work")
+		}
+	})
+	t.Run("actor: null → unknown", func(t *testing.T) {
+		if got := canonicalEventActor(null); got != "unknown" {
+			t.Errorf("canonicalEventActor(NULL) = %q, want %q", got, "unknown")
+		}
+	})
+	t.Run("actor: whitespace-only → unknown", func(t *testing.T) {
+		if got := canonicalEventActor(sql.NullString{Valid: true, String: "   "}); got != "unknown" {
+			t.Errorf("canonicalEventActor(\"   \") = %q, want %q", got, "unknown")
+		}
+	})
+	t.Run("actor: padded value → trimmed string", func(t *testing.T) {
+		if got := canonicalEventActor(sql.NullString{Valid: true, String: "  alice  "}); got != "alice" {
+			t.Errorf("canonicalEventActor(\"  alice  \") = %q, want %q", got, "alice")
+		}
+	})
+}
+
 // seedCanonicalIssueHistory creates the canonical-shape legacy
 // issue_history table — the exact column set the deleted insertHistoryTx
 // wrote in production. Tests use this to exercise the translation
@@ -484,17 +567,24 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 		t.Fatalf("seed CreateIssue error = %v", err)
 	}
 	seedCanonicalIssueHistory(t, first)
-	// Four legacy rows exercise the canonical mappings:
-	//   - hist-start:        status transition, named action
-	//   - hist-comment-null: NULL action (the explicit-NULL no-action shape)
+	// Six legacy rows exercise the canonical mappings:
+	//   - hist-start:         status transition, named action
+	//   - hist-comment-null:  NULL action (the explicit-NULL no-action shape)
 	//   - hist-comment-empty: explicit empty-string action (the other no-action
 	//     shape historically written by insertHistoryTx; MUST normalize to NULL
 	//     post-translation to match recordEvent's convention)
-	//   - hist-close:        status transition, named action, different actor
+	//   - hist-close:         status transition, named action, different actor
+	//   - hist-same-status:   from_status == to_status — must NOT emit a
+	//     change row (isLegacyStatusTransition value→same-value branch)
+	//   - hist-whitespace:    padded action/reason/created_by values — MUST
+	//     normalize via TrimSpace to byte-equivalence with recordEvent's
+	//     live-write canonicalization [LAW:one-source-of-truth]
 	insertLegacyHistory(t, first, "hist-start", seeded.ID, strPtr("start"), "began work", strPtr("open"), strPtr("in_progress"), "2026-01-01T10:00:00Z", "alice")
 	insertLegacyHistory(t, first, "hist-comment-null", seeded.ID, nil, "added context", nil, nil, "2026-01-01T10:05:00Z", "alice")
 	insertLegacyHistory(t, first, "hist-comment-empty", seeded.ID, strPtr(""), "added more context", nil, nil, "2026-01-01T10:06:00Z", "alice")
 	insertLegacyHistory(t, first, "hist-close", seeded.ID, strPtr("close"), "shipped", strPtr("in_progress"), strPtr("closed"), "2026-01-01T11:00:00Z", "bob")
+	insertLegacyHistory(t, first, "hist-same-status", seeded.ID, strPtr("touch"), "no movement", strPtr("closed"), strPtr("closed"), "2026-01-01T11:30:00Z", "bob")
+	insertLegacyHistory(t, first, "hist-whitespace", seeded.ID, strPtr("  start  "), "  padded reason  ", nil, nil, "2026-01-01T12:00:00Z", "  carol  ")
 	hijackToPreGoose(t, first)
 	if err := first.Close(); err != nil {
 		t.Fatalf("Close(first) error = %v", err)
@@ -510,7 +600,7 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 	if exists {
 		t.Fatal("issue_history table still exists after reconcile")
 	}
-	// All four rows show up in issue_events with the canonical mapping.
+	// All six rows show up in issue_events with the canonical mapping.
 	type translatedEvent struct {
 		ID        string
 		IssueID   string
@@ -520,8 +610,8 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 		CreatedAt string
 	}
 	rows, err := st.db.QueryContext(ctx,
-		`SELECT id, issue_id, action, reason, actor, created_at FROM issue_events WHERE id IN (?, ?, ?, ?) ORDER BY id ASC`,
-		"hist-close", "hist-comment-empty", "hist-comment-null", "hist-start",
+		`SELECT id, issue_id, action, reason, actor, created_at FROM issue_events WHERE id IN (?, ?, ?, ?, ?, ?) ORDER BY id ASC`,
+		"hist-close", "hist-comment-empty", "hist-comment-null", "hist-same-status", "hist-start", "hist-whitespace",
 	)
 	if err != nil {
 		t.Fatalf("query translated events error = %v", err)
@@ -538,8 +628,8 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 	if err := rows.Err(); err != nil {
 		t.Fatalf("iterate translated events error = %v", err)
 	}
-	if len(got) != 4 {
-		t.Fatalf("expected 4 translated events, got %d: %+v", len(got), got)
+	if len(got) != 6 {
+		t.Fatalf("expected 6 translated events, got %d: %+v", len(got), got)
 	}
 	cases := []struct {
 		id, action, reason, actor string
@@ -549,6 +639,11 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 		{id: "hist-comment-null", reason: "added context", actor: "alice", actionIsNull: true},
 		{id: "hist-comment-empty", reason: "added more context", actor: "alice", actionIsNull: true},
 		{id: "hist-close", action: "close", reason: "shipped", actor: "bob"},
+		{id: "hist-same-status", action: "touch", reason: "no movement", actor: "bob"},
+		// hist-whitespace asserts TrimSpace parity with recordEvent: the
+		// padded "  start  " action / "  padded reason  " / "  carol  "
+		// actor must come out trimmed.
+		{id: "hist-whitespace", action: "start", reason: "padded reason", actor: "carol"},
 	}
 	for _, c := range cases {
 		e, ok := got[c.id]
@@ -574,11 +669,12 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 			t.Errorf("event %q issue_id = %q, want %q", c.id, e.IssueID, seeded.ID)
 		}
 	}
-	// issue_event_changes has one row per status transition; the
-	// comment-only rows (no status change) have zero change rows.
+	// issue_event_changes has one row per status transition; rows without
+	// a real transition (comment-only, same-status, whitespace) must have
+	// zero change rows.
 	changeRows, err := st.db.QueryContext(ctx,
-		`SELECT event_id, field, from_value, to_value FROM issue_event_changes WHERE event_id IN (?, ?, ?, ?) ORDER BY event_id ASC`,
-		"hist-close", "hist-comment-empty", "hist-comment-null", "hist-start",
+		`SELECT event_id, field, from_value, to_value FROM issue_event_changes WHERE event_id IN (?, ?, ?, ?, ?, ?) ORDER BY event_id ASC`,
+		"hist-close", "hist-comment-empty", "hist-comment-null", "hist-same-status", "hist-start", "hist-whitespace",
 	)
 	if err != nil {
 		t.Fatalf("query translated changes error = %v", err)
@@ -599,9 +695,9 @@ func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
 	if err := changeRows.Err(); err != nil {
 		t.Fatalf("iterate translated changes error = %v", err)
 	}
-	for _, id := range []string{"hist-comment-null", "hist-comment-empty"} {
+	for _, id := range []string{"hist-comment-null", "hist-comment-empty", "hist-same-status", "hist-whitespace"} {
 		if _, ok := changes[id]; ok {
-			t.Errorf("comment-only row %q produced a change record; only status transitions should emit changes", id)
+			t.Errorf("non-transition row %q produced a change record; only real status transitions should emit changes", id)
 		}
 	}
 	wantChanges := map[string]change{

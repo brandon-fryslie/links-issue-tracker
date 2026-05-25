@@ -525,19 +525,18 @@ func (s *Store) translateIssueHistoryToEvents(ctx context.Context, guard *snapsh
 			return false, nil
 		}
 	}
-	// SELECT all translatable rows with the canonical normalization
-	// applied at the SQL layer: empty/NULL action → NULL, empty/NULL
-	// created_by → 'unknown' (matches recordEvent's actor fallback),
-	// NULL reason → '' (issue_events.reason is NOT NULL). The same
-	// SELECT predicate (FK-safe + not-already-translated) gates both
-	// the count probe and the row iteration so the two never disagree.
+	// SELECT raw column values; canonicalization (TrimSpace + empty→NULL
+	// for action, empty→'unknown' for actor, NULL→'' for reason) happens
+	// in Go so the rules use the literal-same strings.TrimSpace call
+	// recordEvent uses for live event writes — [LAW:one-source-of-truth]
+	// for the canonical event-row shape across both writers.
 	const selectTranslatable = `
 		SELECT
 			h.id,
 			h.issue_id,
-			CASE WHEN h.action IS NULL OR h.action = '' THEN NULL ELSE h.action END,
-			COALESCE(h.reason, ''),
-			CASE WHEN h.created_by IS NULL OR h.created_by = '' THEN 'unknown' ELSE h.created_by END,
+			h.action,
+			h.reason,
+			h.created_by,
 			h.created_at,
 			h.from_status,
 			h.to_status
@@ -550,13 +549,14 @@ func (s *Store) translateIssueHistoryToEvents(ctx context.Context, guard *snapsh
 		return false, fmt.Errorf("translate issue_history: query translatable rows: %w", err)
 	}
 	type translation struct {
-		id, issueID, reason, actor, createdAt string
-		action, fromStatus, toStatus          sql.NullString
+		id, issueID, createdAt              string
+		action, reason, createdBy           sql.NullString
+		fromStatus, toStatus                sql.NullString
 	}
 	var pending []translation
 	for queryRows.Next() {
 		var t translation
-		if err := queryRows.Scan(&t.id, &t.issueID, &t.action, &t.reason, &t.actor, &t.createdAt, &t.fromStatus, &t.toStatus); err != nil {
+		if err := queryRows.Scan(&t.id, &t.issueID, &t.action, &t.reason, &t.createdBy, &t.createdAt, &t.fromStatus, &t.toStatus); err != nil {
 			queryRows.Close()
 			return false, fmt.Errorf("translate issue_history: scan row: %w", err)
 		}
@@ -590,7 +590,10 @@ func (s *Store) translateIssueHistoryToEvents(ctx context.Context, guard *snapsh
 	}
 	defer insertChange.Close()
 	for _, t := range pending {
-		if _, err := insertEvent.ExecContext(ctx, t.id, t.issueID, nullableSQLString(t.action), t.reason, t.actor, t.createdAt); err != nil {
+		actionArg := canonicalEventAction(t.action)
+		reasonArg := canonicalEventReason(t.reason)
+		actorArg := canonicalEventActor(t.createdBy)
+		if _, err := insertEvent.ExecContext(ctx, t.id, t.issueID, actionArg, reasonArg, actorArg, t.createdAt); err != nil {
 			_ = tx.Rollback()
 			return false, fmt.Errorf("translate issue_history: insert event %s: %w", t.id, err)
 		}
@@ -605,6 +608,45 @@ func (s *Store) translateIssueHistoryToEvents(ctx context.Context, guard *snapsh
 		return false, fmt.Errorf("translate issue_history: commit tx: %w", err)
 	}
 	return true, nil
+}
+
+// canonicalEventAction mirrors recordEvent's action canonicalization:
+// TrimSpace, then empty (or NULL input) becomes SQL NULL. Returns
+// driver-friendly any. [LAW:one-source-of-truth] — same Go function
+// shape as recordEvent so translated rows are byte-equivalent to
+// live-written rows for the action column.
+func canonicalEventAction(v sql.NullString) any {
+	if !v.Valid {
+		return nil
+	}
+	trimmed := strings.TrimSpace(v.String)
+	if trimmed == "" {
+		return nil
+	}
+	return trimmed
+}
+
+// canonicalEventReason mirrors recordEvent's reason canonicalization:
+// TrimSpace, with NULL input coerced to '' (the column is NOT NULL).
+func canonicalEventReason(v sql.NullString) string {
+	if !v.Valid {
+		return ""
+	}
+	return strings.TrimSpace(v.String)
+}
+
+// canonicalEventActor mirrors recordEvent's actor canonicalization:
+// TrimSpace, then empty (or NULL input) becomes 'unknown' (the
+// column is NOT NULL and 'unknown' is the canonical fallback).
+func canonicalEventActor(v sql.NullString) string {
+	if !v.Valid {
+		return "unknown"
+	}
+	trimmed := strings.TrimSpace(v.String)
+	if trimmed == "" {
+		return "unknown"
+	}
+	return trimmed
 }
 
 // isLegacyStatusTransition reports whether a (from, to) status pair
