@@ -80,10 +80,13 @@ func TestVersionJSONIsStrictMachineContract(t *testing.T) {
 	}
 }
 
-// TestVersionHumanSurfacesAllInfoFields pins that the human form presents every
-// field on Info (version, commit, date, schema range). A future Info field
-// that gets added but not surfaced in the text form would slip past this test
-// as a regression hint to update both surfaces.
+// TestVersionHumanSurfacesAllInfoFields pins the currently-rendered Info
+// fields in the human surface: Version, Commit, Date, and Schema.{Min,Max}.
+// Scope is the present surface — this test does not provide automatic
+// coverage for new Info fields. Adding a field to version.Info that should
+// also appear in the human form requires updating this test explicitly.
+// The pin is here so a refactor that drops one of the currently-rendered
+// fields fails the build.
 func TestVersionHumanSurfacesAllInfoFields(t *testing.T) {
 	// Stamp link-time fields so the human form has something concrete to render.
 	// Use values that can NOT appear anywhere except in their respective fields:
