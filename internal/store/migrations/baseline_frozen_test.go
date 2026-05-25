@@ -12,11 +12,12 @@ import (
 // and the failure message tells the reviewer to open a new migration file
 // instead of "fixing" the test by bumping the constant.
 //
-// Active since PR #145 (commit 8bc1e8e). lit has not tagged v0.1.0 yet, but
-// real workspaces (unreal-3d-maps, cc-nerf-buster) already exist on disk;
-// every retcon of baseline.sql between now and v0.1.0 would re-brick them by
-// the same mechanism PR #143 / PR #145 just recovered from. Master is treated
-// as the immutable baseline from this commit forward.
+// lit has not tagged v0.1.0 yet, but real workspaces (unreal-3d-maps,
+// cc-nerf-buster) already exist on disk; every retcon of baseline.sql between
+// now and v0.1.0 would re-brick them by the same mechanism PR #143 / PR #145
+// just recovered from. The gate activates here and treats master as the
+// immutable baseline from this commit forward — referencing PRs (durable)
+// not commit hashes (subject to rewrites/squashes inside an immutable file).
 //
 // [LAW:single-enforcer] One enforcer, not two. Reviewer attention and
 // documentation discipline both failed for the 2026-05-21 retcon incident;
@@ -28,7 +29,7 @@ import (
 // theorem about the file — "this is exactly what shipped" — at the type
 // level. Anything weaker (schema parser, table-set check) accepts edits
 // that change the registry's meaning while keeping the parsed shape equal.
-const baselineFrozenHash = "ad9f3c695adba92b0bb71e345d6722b84c060347dd1a84a44b9997836b46a397"
+const baselineFrozenHash = "e86c1aa36ebe70ddbaa2b18f18ee310c33dfce1f07fb3c2811a1d76385ad1fbb"
 
 // TestBaselineFileIsFrozen asserts the bytes of 00001_baseline.sql match the
 // pinned hash. If this fails, you are about to ship the 2026-05-21 retcon

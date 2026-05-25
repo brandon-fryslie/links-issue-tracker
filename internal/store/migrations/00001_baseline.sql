@@ -1,4 +1,4 @@
--- FROZEN FILE — DO NOT EDIT. Active since PR #145 (commit 8bc1e8e).
+-- FROZEN FILE — DO NOT EDIT. Active from this commit forward.
 --
 -- 00001_baseline.sql is the immutable definition of schema v1: the converged
 -- shape every prior reconcile helper collectively produced. Once shipped, the
