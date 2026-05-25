@@ -98,8 +98,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # Asset list matches what goreleaser actually produces for the
+          # active platform matrix in .goreleaser.yml: tar.gz archives only
+          # (windows/amd64 is ignored — see ignore: block in goreleaser
+          # config). Re-add ./dist/lit_*.zip alongside when Windows comes
+          # back via links-downgrade-t244.7.
           gh release create "${{ github.ref_name }}" \
-            ./dist/lit_*.tar.gz ./dist/lit_*.zip ./dist/checksums.txt ./dist/release-manifest.json \
+            ./dist/lit_*.tar.gz ./dist/checksums.txt ./dist/release-manifest.json \
             --title "${{ github.ref_name }}" \
             --generate-notes
 

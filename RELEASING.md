@@ -10,7 +10,7 @@ Each tagged release (`vX.Y.Z`) creates a GitHub Release containing:
 
 | Asset                                      | Purpose                                                                                       |
 |--------------------------------------------|-----------------------------------------------------------------------------------------------|
-| `lit_vX.Y.Z_<goos>_<goarch>.tar.gz` / `.zip` | Per-platform binary archive. The single file inside is `lit`.                                |
+| `lit_X.Y.Z_<goos>_<goarch>.tar.gz` | Per-platform binary archive (no leading `v` in version segment — goreleaser strips it). |
 | `checksums.txt`                            | SHA256 of every archive above (`<sha256>  <filename>` per line).                              |
 | `release-manifest.json`                    | Machine-readable index linking the version → its schema-support range → per-platform artifacts. |
 

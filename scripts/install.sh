@@ -105,15 +105,14 @@ case "$mode" in
             -o "$TARGET_DIR/lit" ./cmd/lit
         ;;
     release|latest)
-        # Release-download modes require jq (for parsing the GitHub API
-        # response in --latest-release and for the manifest pipeline). Fail
-        # loudly up front instead of much later with a parse error.
-        if ! command -v jq >/dev/null 2>&1; then
-            echo "error: jq is required for release-download modes (install jq and retry)" >&2
-            exit 1
-        fi
-
         if [ "$mode" = "latest" ]; then
+            # jq is needed ONLY to parse the GitHub API response for the
+            # latest-release tag lookup. --from-release <tag> does not need
+            # jq (the tag is provided directly), so check is scoped here.
+            if ! command -v jq >/dev/null 2>&1; then
+                echo "error: --latest-release requires jq (install jq, or use --from-release <tag>)" >&2
+                exit 1
+            fi
             release_tag="$(curl -fsSL "$REPO_LATEST_API" | jq -r .tag_name)"
             if [ -z "$release_tag" ] || [ "$release_tag" = "null" ]; then
                 echo "error: could not resolve latest release tag from $REPO_LATEST_API" >&2
