@@ -119,12 +119,22 @@ func main() {
 	if err != nil {
 		die("create %s: %v", *outPath, err)
 	}
-	defer out.Close()
 
 	enc := json.NewEncoder(out)
 	enc.SetIndent("", "  ")
 	if err := enc.Encode(&manifest); err != nil {
+		_ = out.Close()
 		die("encode manifest: %v", err)
+	}
+	// Explicit Close on the success path: `defer out.Close()` swallows a
+	// failing Close (delayed write error, fsync failure on a network FS),
+	// leaving a truncated manifest while the tool exits 0. The manifest is
+	// the contract downstream consumers read; a silently truncated file is
+	// a worst-case failure mode. [LAW:no-defensive-null-guards] cousin:
+	// the deferred Close was a guard that *hid* an error class — the
+	// success path must surface it explicitly.
+	if err := out.Close(); err != nil {
+		die("close %s: %v", *outPath, err)
 	}
 }
 
@@ -172,6 +182,19 @@ func collectArtifacts(distDir, baseURL, ver, tag string) ([]release.Artifact, er
 		}
 		if _, err := hex.DecodeString(sum); err != nil {
 			return nil, fmt.Errorf("%s:%d sha256 not hex: %w", checksumsPath, lineNum+1, err)
+		}
+		// `filename` is the only field flowing into filepath.Join (Stat) and
+		// URL construction below. checksums.txt is goreleaser's output but
+		// the file is a parse boundary — a corrupted or compromised line
+		// with `../` or absolute paths would cause us to Stat outside distDir
+		// and emit URLs with traversal segments. Require the bare-basename
+		// shape goreleaser actually produces; reject anything else by
+		// construction. [LAW:types-are-the-program] the filename's accept
+		// shape is exactly "no path components" — narrow the boundary so
+		// downstream code can trust it.
+		if filename == "" || filename == "." || filename == ".." ||
+			strings.ContainsAny(filename, `/\`) {
+			return nil, fmt.Errorf("%s:%d filename has unsafe path shape: %q", checksumsPath, lineNum+1, filename)
 		}
 		platform, ok := platformFromFilename(filename, ver)
 		if !ok {

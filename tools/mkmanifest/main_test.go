@@ -122,6 +122,43 @@ func TestCollectArtifactsURLUsesTagNotVersion(t *testing.T) {
 	}
 }
 
+// TestCollectArtifactsRejectsUnsafeFilenames pins the boundary that
+// rejects path-traversal and absolute paths inside checksums.txt before
+// they reach filepath.Join (Stat) or URL construction. checksums.txt is
+// goreleaser's output but is consumed across a parse boundary; the
+// accept shape is exactly the bare basenames goreleaser produces, never
+// a value containing path separators. [LAW:types-are-the-program] the
+// filename's shape is constrained at the boundary so downstream code
+// (Stat, URL building) can trust it.
+func TestCollectArtifactsRejectsUnsafeFilenames(t *testing.T) {
+	const validHex = "0000000000000000000000000000000000000000000000000000000000000001"
+	cases := []string{
+		"../lit_0.1.0_linux_amd64.tar.gz",
+		"../../etc/passwd",
+		"/etc/passwd",
+		"sub/lit_0.1.0_linux_amd64.tar.gz",
+		"lit\\0.1.0_linux_amd64.tar.gz", // backslash separator
+		".",
+		"..",
+	}
+	for _, badName := range cases {
+		t.Run(badName, func(t *testing.T) {
+			dist := t.TempDir()
+			checksums := validHex + "  " + badName + "\n"
+			if err := os.WriteFile(filepath.Join(dist, "checksums.txt"), []byte(checksums), 0o644); err != nil {
+				t.Fatalf("write checksums.txt: %v", err)
+			}
+			_, err := collectArtifacts(dist, "https://example/dl", "0.1.0", "v0.1.0")
+			if err == nil {
+				t.Fatalf("collectArtifacts accepted unsafe filename %q; want rejection", badName)
+			}
+			if !strings.Contains(err.Error(), "unsafe path shape") {
+				t.Errorf("error %q should mention 'unsafe path shape' for %q", err, badName)
+			}
+		})
+	}
+}
+
 // TestCollectArtifactsRejectsMissingArchive pins the contract that
 // checksums.txt entries are claims that get verified against dist/ —
 // if the referenced archive is missing (e.g., aborted goreleaser run
