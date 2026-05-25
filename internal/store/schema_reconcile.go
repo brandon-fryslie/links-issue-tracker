@@ -530,18 +530,22 @@ func (s *Store) translateIssueHistoryToEvents(ctx context.Context, guard *snapsh
 	// Cheap pre-check (no snapshot fired) so workspaces whose canonical-
 	// shape issue_history has no translatable rows (e.g. all orphans, all
 	// already-in-events) skip the snapshot guard and the tx entirely.
+	// Existence probe (SELECT 1 ... LIMIT 1 via probeYields) rather than
+	// COUNT(*) — only the boolean matters, and the LIMIT keeps the
+	// optimizer from scanning every issue_history row on large workspaces.
 	// The authoritative read happens inside the tx below; this probe
 	// only exists to avoid an unnecessary snapshot.
-	var pendingCount int
-	if err := s.db.QueryRowContext(ctx, `
-		SELECT COUNT(*)
+	hasPending, err := s.probeYields(ctx, `
+		SELECT 1
 		FROM issue_history h
 		WHERE EXISTS (SELECT 1 FROM issues i WHERE i.id = h.issue_id)
 		  AND NOT EXISTS (SELECT 1 FROM issue_events e WHERE e.id = h.id)
-	`).Scan(&pendingCount); err != nil {
-		return false, fmt.Errorf("translate issue_history: probe pending count: %w", err)
+		LIMIT 1
+	`, "translate issue_history: pending probe")
+	if err != nil {
+		return false, err
 	}
-	if pendingCount == 0 {
+	if !hasPending {
 		return false, nil
 	}
 	if _, err := guard.ensure(); err != nil {
