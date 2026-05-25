@@ -171,6 +171,9 @@ follow-ups:
 - **Signing.** `release.Signature` is reserved in the manifest schema; adding
   cosign/minisign verification later does not change the manifest format —
   unsigned manifests omit the `signature` field; signed ones populate it.
-- **Pre-release / nightly channel.** Not configured. The workflow only fires
-  on `v*.*.*` tags; introducing a `v*-rc*` channel requires extending the
-  `tags` filter and the changelog/release config.
+- **Pre-release / nightly channel.** Not configured. The workflow's
+  `tags: v*.*.*` filter is a glob that also matches `v0.1.0-rc1`, so the
+  release job carries a `!contains(github.ref_name, '-')` guard that
+  rejects prerelease tags at the boundary. Introducing a prerelease
+  channel requires relaxing that guard alongside any changelog/release
+  config changes.

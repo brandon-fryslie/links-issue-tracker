@@ -29,6 +29,15 @@ concurrency:
 
 jobs:
   release:
+    # The `tags: v*.*.*` filter is a glob — it matches `v0.1.0-rc1` too,
+    # because the trailing `*` accepts `0-rc1`. We don't want prerelease
+    # tags to publish a real release, so guard the entire job: on tag push,
+    # only run when the tag name is a clean semver (no `-`). On
+    # workflow_dispatch the guard no-ops (ref_name is the branch, no `-`
+    # convention applies). [LAW:types-are-the-program] the glob's accept
+    # shape is wider than the concept "formal release version"; the guard
+    # tightens the boundary so prerelease tags are rejected by construction.
+    if: github.event_name == 'workflow_dispatch' || !contains(github.ref_name, '-')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
