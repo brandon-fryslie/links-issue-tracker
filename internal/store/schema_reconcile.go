@@ -451,13 +451,15 @@ func (s *Store) verifyIssuesReconcilable(ctx context.Context) error {
 	return nil
 }
 
-// legacyIssueHistoryColumns is the canonical column set the deleted
-// issue_history table carried in real workspaces (written by the
-// removed insertHistoryTx). A workspace whose issue_history table
-// presents this exact set carries auditable rows the translation can
-// lift forward; a table with a different/partial shape (synthetic
-// test fixture, half-migrated legacy state) has nothing the canonical
-// mapping can express and is left for the drop step.
+// legacyIssueHistoryColumns is the minimum column set the deleted
+// issue_history table must include for the canonical mapping to
+// apply (every column the translation reads). The check is presence-
+// only: a workspace whose issue_history is a strict superset (extra
+// columns from an even-older shape) still translates correctly,
+// because the translation only reads the columns named here. A
+// table missing any of these columns (synthetic test fixture, half-
+// migrated legacy state) has nothing the canonical mapping can
+// express and is left for the drop step.
 //
 // [LAW:one-source-of-truth] Derived from the historical schema; if
 // the legacy shape were ever extended retroactively (it will not be —
