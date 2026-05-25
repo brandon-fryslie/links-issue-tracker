@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -20,14 +21,26 @@ const Baseline int64 = 1
 // ParseVersion extracts the leading numeric version from a goose migration
 // filename (e.g. "00002_add_foo.sql" -> 2). Returns false for any name that
 // does not begin with `<digits>_`.
+//
+// [LAW:types-are-the-program] The accept-shape is exact: a non-empty prefix
+// of ASCII digits followed by '_'. fmt.Sscanf("%d") would have accepted
+// leading whitespace, signs, or strings like "00001a" (which it would parse
+// as 1, leaving "a" unread); strconv.ParseInt on a digit-validated substring
+// rejects every shape the producer (goose, by convention) does not emit.
 func ParseVersion(name string) (int64, bool) {
 	base := filepath.Base(name)
 	idx := strings.IndexByte(base, '_')
 	if idx <= 0 {
 		return 0, false
 	}
-	var version int64
-	if _, err := fmt.Sscanf(base[:idx], "%d", &version); err != nil {
+	digits := base[:idx]
+	for i := 0; i < len(digits); i++ {
+		if digits[i] < '0' || digits[i] > '9' {
+			return 0, false
+		}
+	}
+	version, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil {
 		return 0, false
 	}
 	return version, true

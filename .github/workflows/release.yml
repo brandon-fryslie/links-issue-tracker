@@ -70,18 +70,23 @@ jobs:
             lit-release-builder:local \
             $ARGS
 
-      # mkmanifest reads dist/metadata.json for the version goreleaser used.
-      # dist/ was written by docker-run-as-root; chown back to runner user
-      # so mkmanifest (which runs natively on the runner) can write into it.
+      # mkmanifest reads version/commit/date from dist/metadata.json — the SAME
+      # values goreleaser injected into the binaries via ldflags. Computing
+      # them freshly here (git rev-parse / date -u) would drift from what
+      # `lit version` reports, breaking the [LAW:one-source-of-truth] contract
+      # the manifest schema rests on. dist/ was written by docker-run-as-root;
+      # chown back to runner user so mkmanifest can write into it.
       - name: Generate release manifest
         run: |
           set -euo pipefail
           sudo chown -R "$(id -u):$(id -g)" dist
           VERSION=$(jq -r .version dist/metadata.json)
+          COMMIT=$(jq -r .commit dist/metadata.json | cut -c1-7)
+          DATE=$(jq -r .date dist/metadata.json)
           go run ./tools/mkmanifest \
             -version "$VERSION" \
-            -commit "$(git rev-parse --short HEAD)" \
-            -date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -commit "$COMMIT" \
+            -date "$DATE" \
             -dist ./dist \
             -base-url https://github.com/${{ github.repository }}/releases/download \
             -out ./dist/release-manifest.json

@@ -107,6 +107,7 @@ _lit() {
     'hooks:install links git hooks'
     'quickstart:agent usage guide'
     'completion:emit shell completion'
+    'version:print binary version + schema range'
     'help:show help'
   )
 

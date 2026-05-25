@@ -23,6 +23,10 @@ func TestParseVersionShape(t *testing.T) {
 		{"baseline.sql", 0, false},            // no underscore at all
 		{"abc_baseline.sql", 0, false},        // non-numeric prefix
 		{"00001.sql", 0, false},               // no underscore (idx <= 0)
+		{"00001a_foo.sql", 0, false},          // digits + trailing letter pre-_: Sscanf("%d") would accept this (returns 1)
+		{"-1_foo.sql", 0, false},              // leading sign: Sscanf("%d") would accept this (returns -1)
+		{" 1_foo.sql", 0, false},              // leading whitespace: Sscanf strips it; we don't accept it
+		{"+1_foo.sql", 0, false},              // explicit + sign
 	}
 	for _, tc := range cases {
 		got, ok := ParseVersion(tc.in)
@@ -36,11 +40,11 @@ func TestParseVersionShape(t *testing.T) {
 	}
 }
 
-// TestMaxVersionReflectsEmbeddedRegistry pins that MaxVersion reads from the
-// embedded FS, so adding a migration file changes the result automatically.
-// The current registry contains 00001_baseline.sql, so MaxVersion is 1; this
-// test will start failing the moment a higher-numbered migration lands, which
-// is exactly the contract that ticket .2 enforces with its CI gate.
+// TestMaxVersionReflectsEmbeddedRegistry pins that MaxVersion's result is
+// exactly the highest version in the embedded FS — it scans the FS to compute
+// the expected value, so the test stays correct as new migrations land. The
+// contract being pinned is "MaxVersion agrees with a fresh scan of FS and is
+// at least Baseline" — NOT a hard-coded value.
 func TestMaxVersionReflectsEmbeddedRegistry(t *testing.T) {
 	max, err := MaxVersion()
 	if err != nil {

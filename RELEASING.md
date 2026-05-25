@@ -59,21 +59,40 @@ workflow.
 
 ### Dry-run a release locally (optional)
 
-Local dry-runs require a container runtime — the project uses
-`ghcr.io/goreleaser/goreleaser-cross:v1.26.2-3` to provide the CGO
-cross-compilers (osxcross for darwin, mingw for windows, glibc for linux).
+Local dry-runs require a container runtime + the custom release-builder
+image. The image extends `ghcr.io/goreleaser/goreleaser-cross:v1.26.2-3`
+with ICU built from source for every cross-target (osxcross for darwin/arm64,
+glibc for linux/arm64; linux/amd64 uses the system libicu-dev directly).
+
+Build the image once, then use it:
 
 ```bash
+# Build the release-builder image
+podman build -f build/Dockerfile.release -t lit-release-builder:local .
+
+# Run goreleaser in --snapshot mode (no publish)
 podman run --rm -v "$PWD":/go/src/app -w /go/src/app \
-  ghcr.io/goreleaser/goreleaser-cross:v1.26.2-3 \
+  lit-release-builder:local \
   release --snapshot --clean
-# Inspect ./dist/ — archives, checksums.txt; mkmanifest then writes release-manifest.json.
+
+# Then run mkmanifest against dist/ to produce release-manifest.json
+VERSION=$(jq -r .version dist/metadata.json)
+COMMIT=$(jq -r .commit dist/metadata.json | cut -c1-7)
+DATE=$(jq -r .date dist/metadata.json)
+go run ./tools/mkmanifest \
+  -version "$VERSION" \
+  -commit "$COMMIT" \
+  -date "$DATE" \
+  -dist ./dist \
+  -base-url https://github.com/brandon-fryslie/links-issue-tracker/releases/download \
+  -out ./dist/release-manifest.json
+
+# Inspect ./dist/
 ```
 
-Note: cross-compilation requires the goreleaser-cross image; a host without
-it (or without osxcross etc. installed natively) cannot build darwin
-artifacts. The CI workflow always has the right environment; local dry-run
-is convenience, not required.
+The first image build takes ~15 minutes (ICU is built from source per
+target). Subsequent builds reuse layer cache. CI uses GitHub Actions cache
+across runs for the same speedup.
 
 ### Dry-run via the release workflow
 

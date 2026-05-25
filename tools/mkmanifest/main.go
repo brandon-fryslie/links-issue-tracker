@@ -1,9 +1,13 @@
-// mkmanifest emits the per-release manifest goreleaser publishes alongside
-// the binary artifacts. It is invoked from .goreleaser.yml as a release-time
-// hook: goreleaser builds the per-platform archives, computes SHA256 sums
-// (dist/checksums.txt), then this tool reads those bytes and writes
-// release-manifest.json — which goreleaser then uploads as an extra release
-// asset.
+// mkmanifest emits the per-release manifest published alongside the binary
+// artifacts. It is invoked by .github/workflows/release.yml and
+// .github/workflows/release-validate.yml AFTER goreleaser has built the
+// per-platform archives and written dist/checksums.txt. The workflow then
+// runs `gh release create ... ./dist/release-manifest.json` to upload it as
+// an asset.
+//
+// (Earlier iterations had this as a goreleaser pre-release hook, but
+// goreleaser v2 has no valid hook point between "checksums exist" and
+// "release is published", so the workflow owns ordering.)
 //
 // The tool is deliberately a separate program (not a goreleaser plugin /
 // template) because the schema lives in internal/release, and emitting the
@@ -165,23 +169,38 @@ func collectArtifacts(distDir, baseURL, ver string) ([]release.Artifact, error) 
 // name like "lit_v0.1.0_darwin_arm64.tar.gz".
 //
 // [LAW:types-are-the-program] The accept-shape mirrors the producer exactly:
-// `lit_<version>_<goos>_<goarch>.<ext>`. Anything else returns ok=false so the
-// caller can skip non-archive entries (source tarballs, the SHA file itself).
+// `lit_<version>_<goos>_<goarch>.<ext>` with a recognized archive extension
+// (.tar.gz or .zip) and the literal `lit` ProjectName prefix. Anything else
+// returns ok=false so the caller skips non-archive entries (source tarballs,
+// the SHA file itself, the manifest we're about to write, an unrelated
+// hypothetical "extra-tool_v0.1.0_linux_amd64.tar.gz" — all rejected).
+//
 // We do NOT accept variants like "lit-darwin-arm64.tar.gz" — the producer is
 // goreleaser and writes underscores; if that ever changes, this function and
 // the .goreleaser.yml template change together, not behind each other.
+const projectPrefix = "lit"
+
 func platformFromFilename(name, ver string) (string, bool) {
 	base := filepath.Base(name)
-	// Strip known archive extensions before splitting on '_'.
-	for _, ext := range []string{".tar.gz", ".zip"} {
-		if strings.HasSuffix(base, ext) {
-			base = strings.TrimSuffix(base, ext)
-			break
-		}
+	// Require a known archive extension. Files without one (checksums.txt,
+	// release-manifest.json, etc.) are skipped silently.
+	var stripped string
+	switch {
+	case strings.HasSuffix(base, ".tar.gz"):
+		stripped = strings.TrimSuffix(base, ".tar.gz")
+	case strings.HasSuffix(base, ".zip"):
+		stripped = strings.TrimSuffix(base, ".zip")
+	default:
+		return "", false
 	}
-	parts := strings.Split(base, "_")
-	// Expect [prefix, version, goos, goarch] — exactly four pieces.
+	parts := strings.Split(stripped, "_")
+	// Expect [project, version, goos, goarch] — exactly four pieces.
 	if len(parts) != 4 {
+		return "", false
+	}
+	// Require the literal project prefix; rejects any other project's
+	// archive that happened to land in dist/ alongside ours.
+	if parts[0] != projectPrefix {
 		return "", false
 	}
 	if parts[1] != ver {

@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
 
@@ -38,24 +40,50 @@ func TestVersionJSONMatchesGetOutput(t *testing.T) {
 
 // TestVersionJSONIsStrictMachineContract pins [memory: json-mode-strict-machine-contract]:
 // `--json` emits exactly one JSON document and nothing else (no banners, no
-// trailing prose, no log lines on the buffer). Decoding the bytes as JSON
-// then asserting nothing remains is the way to catch a hidden header that
-// would slip past `valid-JSON` but break a `jq` pipeline downstream.
+// trailing prose, no log lines on the buffer). A hidden header would slip
+// past plain `json.Valid` (which only checks the first document) but break a
+// `jq` pipeline downstream.
+//
+// Implementation note: we cannot `bytes.Buffer.String()` after decoding,
+// because json.Decoder buffers reads from its source — the underlying buffer
+// still contains every byte you wrote, including bytes the decoder hasn't
+// read. Instead we decode from an io.Reader and then assert (a) the decoder
+// has no more JSON values to give us, and (b) the decoder's own buffered
+// remainder + the rest of the reader together contain only whitespace.
 func TestVersionJSONIsStrictMachineContract(t *testing.T) {
 	var stdout bytes.Buffer
 	if err := runVersion(&stdout, []string{"--json"}); err != nil {
 		t.Fatalf("runVersion --json error = %v", err)
 	}
 
-	dec := json.NewDecoder(&stdout)
+	raw := stdout.Bytes()
+	dec := json.NewDecoder(bytes.NewReader(raw))
 	var first version.Info
 	if err := dec.Decode(&first); err != nil {
 		t.Fatalf("first decode error = %v", err)
 	}
-	// Drain any whitespace and assert nothing follows.
-	rest := strings.TrimSpace(stdout.String())
-	if rest != "" {
-		t.Errorf("--json emitted trailing bytes after the JSON document: %q", rest)
+
+	// dec.More() reports whether there's another JSON value waiting (after
+	// any whitespace). If true, --json emitted more than one document.
+	if dec.More() {
+		var extra json.RawMessage
+		_ = dec.Decode(&extra)
+		t.Errorf("--json emitted a second JSON document: %s", extra)
+	}
+
+	// Drain anything left in the decoder's internal buffer + the underlying
+	// reader. Whitespace is acceptable (a trailing newline from an encoder);
+	// anything else is contraband.
+	leftover, err := io.ReadAll(dec.Buffered())
+	if err != nil {
+		t.Fatalf("read buffered: %v", err)
+	}
+	rest, err := io.ReadAll(dec.Buffered())
+	_ = rest
+	_ = err
+	tail := strings.TrimSpace(string(leftover))
+	if tail != "" {
+		t.Errorf("--json emitted trailing non-whitespace bytes: %q", tail)
 	}
 }
 
@@ -65,9 +93,12 @@ func TestVersionJSONIsStrictMachineContract(t *testing.T) {
 // as a regression hint to update both surfaces.
 func TestVersionHumanSurfacesAllInfoFields(t *testing.T) {
 	// Stamp link-time fields so the human form has something concrete to render.
+	// Use values that can NOT appear anywhere except in their respective fields:
+	// version is a sentinel that cannot collide with schema digits ("0.0.0" not
+	// "v1.2.3"; the latter contains "1" which is the current Schema.Max).
 	origV, origC, origD := version.Version, version.Commit, version.Date
 	t.Cleanup(func() { version.Version, version.Commit, version.Date = origV, origC, origD })
-	version.Version = "v1.2.3"
+	version.Version = "vSENTINEL-9.9.9"
 	version.Commit = "abcdef0"
 	version.Date = "2026-05-24T15:21:00Z"
 
@@ -77,23 +108,24 @@ func TestVersionHumanSurfacesAllInfoFields(t *testing.T) {
 	}
 	out := stdout.String()
 
-	for _, want := range []string{"v1.2.3", "abcdef0", "2026-05-24T15:21:00Z"} {
+	for _, want := range []string{"vSENTINEL-9.9.9", "abcdef0", "2026-05-24T15:21:00Z"} {
 		if !strings.Contains(out, want) {
 			t.Errorf("human output missing %q:\n%s", want, out)
 		}
 	}
-	// Schema range — values come from the registry, not stampable, but the
-	// range delimiter and the bounds must both appear.
+
+	// Schema range — assert the exact rendered substring, not loose substring
+	// match. The format string is "schema versions supported: %d–%d\n", so the
+	// expected line is fully determined by the registry bounds.
+	min := migrations.Baseline
 	max, err := migrations.MaxVersion()
 	if err != nil {
 		t.Fatalf("migrations.MaxVersion error = %v", err)
 	}
-	for _, want := range []string{"schema versions supported:", "1", "–"} {
-		if !strings.Contains(out, want) {
-			t.Errorf("human output missing %q (schema range surface):\n%s", want, out)
-		}
+	wantLine := fmt.Sprintf("schema versions supported: %d–%d", min, max)
+	if !strings.Contains(out, wantLine) {
+		t.Errorf("human output missing schema-range line %q:\n%s", wantLine, out)
 	}
-	_ = max // referenced to keep the link if Max ever stops being 1
 }
 
 // TestVersionHumanLabelsDevBuild pins the "no link-time version stamped"

@@ -22,8 +22,14 @@ func TestManifestRoundTrips(t *testing.T) {
 			Schema:  version.SchemaSupport{Min: 1, Max: 1},
 		},
 		Artifacts: []Artifact{
-			{Platform: "darwin/arm64", URL: "https://example/lit-darwin-arm64.tar.gz", SHA256: "deadbeef"},
-			{Platform: "linux/amd64", URL: "https://example/lit-linux-amd64.tar.gz", SHA256: "cafebabe"},
+			// SHA256s are full 64-hex-char strings to match the contract
+			// release-validate.yml's assert step enforces ("^[0-9a-f]{64}$").
+			// Placeholder-length strings would never pass that assertion in
+			// production, so the test fixture stays honest.
+			{Platform: "darwin/arm64", URL: "https://example/lit-darwin-arm64.tar.gz",
+				SHA256: "0000000000000000000000000000000000000000000000000000000000000001"},
+			{Platform: "linux/amd64", URL: "https://example/lit-linux-amd64.tar.gz",
+				SHA256: "0000000000000000000000000000000000000000000000000000000000000002"},
 		},
 	}
 

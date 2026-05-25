@@ -54,18 +54,35 @@ while [ $# -gt 0 ]; do
 done
 
 # --- target-dir resolution: identical across all modes -----------------------
-
-GOBIN="${GOBIN:-$(go env GOBIN 2>/dev/null || true)}"
-GOBIN="${GOBIN:-$(go env GOPATH 2>/dev/null | cut -d: -f1)/bin}"
+#
+# Priority: existing-lit-on-PATH > $GOBIN env > `go env GOBIN/GOPATH` (if Go
+# is installed) > $HOME/.local/bin (universal fallback). Release-download
+# modes do NOT require Go, so the go-env path must degrade gracefully.
 
 TARGET_DIR=""
 if command -v lit >/dev/null 2>&1; then
     EXISTING="$(command -v lit)"
     # Resolve symlinks so we update the real file, not a dangling link.
-    REAL_EXISTING="$(readlink -f "$EXISTING" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$EXISTING")"
+    REAL_EXISTING="$(readlink -f "$EXISTING" 2>/dev/null || python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$EXISTING" 2>/dev/null || echo "$EXISTING")"
     TARGET_DIR="$(dirname "$REAL_EXISTING")"
 fi
-TARGET_DIR="${TARGET_DIR:-$GOBIN}"
+
+if [ -z "$TARGET_DIR" ]; then
+    TARGET_DIR="${GOBIN:-}"
+fi
+
+if [ -z "$TARGET_DIR" ] && command -v go >/dev/null 2>&1; then
+    TARGET_DIR="$(go env GOBIN 2>/dev/null || true)"
+    if [ -z "$TARGET_DIR" ]; then
+        GOPATH_BIN="$(go env GOPATH 2>/dev/null | cut -d: -f1)"
+        if [ -n "$GOPATH_BIN" ]; then
+            TARGET_DIR="$GOPATH_BIN/bin"
+        fi
+    fi
+fi
+
+# Universal fallback. Works without Go installed.
+TARGET_DIR="${TARGET_DIR:-$HOME/.local/bin}"
 mkdir -p "$TARGET_DIR"
 
 # --- mode dispatch -----------------------------------------------------------
@@ -74,9 +91,13 @@ case "$mode" in
     source)
         # ldflag-stamp the build so `lit version` reports meaningful identity
         # for source builds (releases stamp via goreleaser; this is the
-        # equivalent for ad-hoc checkouts).
-        ver="$(git describe --tags --always --dirty 2>/dev/null || echo dev)"
-        commit="$(git rev-parse --short HEAD 2>/dev/null || echo unknown)"
+        # equivalent for ad-hoc checkouts). If we have NO git metadata
+        # (checkout from a tarball, broken repo, etc.), leave Version EMPTY
+        # so `lit version` honestly reports `lit dev (...)`. A spoofed
+        # placeholder like "dev" would make version.IsDev report FALSE and
+        # mislead downstream tooling.
+        ver="$(git describe --tags --always --dirty 2>/dev/null || true)"
+        commit="$(git rev-parse --short HEAD 2>/dev/null || true)"
         date="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
         pkg="github.com/bmf/links-issue-tracker/internal/version"
         GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go build \
@@ -84,18 +105,29 @@ case "$mode" in
             -o "$TARGET_DIR/lit" ./cmd/lit
         ;;
     release|latest)
+        # Release-download modes require jq (for parsing the GitHub API
+        # response in --latest-release and for the manifest pipeline). Fail
+        # loudly up front instead of much later with a parse error.
+        if ! command -v jq >/dev/null 2>&1; then
+            echo "error: jq is required for release-download modes (install jq and retry)" >&2
+            exit 1
+        fi
+
         if [ "$mode" = "latest" ]; then
-            # Resolve "latest" to a concrete tag via the GitHub API.
-            release_tag="$(curl -fsSL "$REPO_LATEST_API" | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')"
-            if [ -z "$release_tag" ]; then
+            release_tag="$(curl -fsSL "$REPO_LATEST_API" | jq -r .tag_name)"
+            if [ -z "$release_tag" ] || [ "$release_tag" = "null" ]; then
                 echo "error: could not resolve latest release tag from $REPO_LATEST_API" >&2
                 exit 1
             fi
             echo "Latest release: $release_tag"
         fi
 
-        # Resolve current platform → goreleaser archive name (must mirror
-        # .goreleaser.yml's name_template: lit_<version>_<goos>_<goarch>.<ext>).
+        # Resolve current platform → goreleaser archive name. Must mirror
+        # .goreleaser.yml's name_template: lit_<version>_<goos>_<goarch>.<ext>
+        # where <version> is goreleaser's .Version — the tag with the leading
+        # `v` STRIPPED. We strip it here too.
+        archive_version="${release_tag#v}"
+
         os="$(uname -s | tr '[:upper:]' '[:lower:]')"
         arch_raw="$(uname -m)"
         case "$arch_raw" in
@@ -104,23 +136,41 @@ case "$mode" in
             *) echo "error: unsupported architecture: $arch_raw" >&2; exit 1 ;;
         esac
         case "$os" in
-            linux|darwin) ext="tar.gz" ;;
-            mingw*|msys*|cygwin*) os="windows"; ext="zip" ;;
+            linux)  ext="tar.gz" ;;
+            darwin) ext="tar.gz"
+                # Reject Intel Mac immediately — the release pipeline does not
+                # produce a darwin/amd64 artifact (tracked as links-downgrade-t244.6).
+                if [ "$arch" = "amd64" ]; then
+                    echo "error: Intel Mac (darwin/amd64) is not currently in the release matrix" >&2
+                    echo "       build from source: bash scripts/install.sh   (omit --from-release)" >&2
+                    exit 1
+                fi
+                ;;
+            mingw*|msys*|cygwin*) os="windows"; ext="zip"
+                # Same: windows not in the matrix yet (links-downgrade-t244.7).
+                echo "error: Windows is not currently in the release matrix" >&2
+                echo "       build from source: bash scripts/install.sh" >&2
+                exit 1
+                ;;
             *) echo "error: unsupported OS: $os" >&2; exit 1 ;;
         esac
-        archive="lit_${release_tag}_${os}_${arch}.${ext}"
+        archive="lit_${archive_version}_${os}_${arch}.${ext}"
         url="${REPO_DOWNLOAD_BASE}/${release_tag}/${archive}"
         checksums_url="${REPO_DOWNLOAD_BASE}/${release_tag}/checksums.txt"
 
-        # Download to a temp dir, verify SHA256, extract, atomic-rename into place.
-        tmp="$(mktemp -d)"
+        # Temp dir on the SAME filesystem as TARGET_DIR so the final rename
+        # is genuinely atomic (cross-FS mv is a copy+unlink, not atomic).
+        tmp="$(mktemp -d "$TARGET_DIR/.lit-install.XXXXXX")"
         trap 'rm -rf "$tmp"' EXIT
+
         echo "Downloading $url ..."
         curl -fsSL -o "$tmp/$archive" "$url"
         echo "Downloading checksums ..."
         curl -fsSL -o "$tmp/checksums.txt" "$checksums_url"
 
-        expected="$(grep " $archive\$" "$tmp/checksums.txt" | awk '{print $1}')"
+        # awk match against the FULL second field — avoids grep's regex
+        # interpretation (the dots in .tar.gz would otherwise be "any char").
+        expected="$(awk -v want="$archive" '$2 == want { print $1 }' "$tmp/checksums.txt")"
         if [ -z "$expected" ]; then
             echo "error: $archive not found in checksums.txt" >&2
             exit 1
@@ -150,9 +200,8 @@ case "$mode" in
             exit 1
         fi
 
-        # Atomic rename into place (same filesystem as $TARGET_DIR).
-        mv "$tmp/lit" "$TARGET_DIR/lit.new"
-        mv -f "$TARGET_DIR/lit.new" "$TARGET_DIR/lit"
+        # Atomic rename within $TARGET_DIR (mktemp put us on the same FS).
+        mv -f "$tmp/lit" "$TARGET_DIR/lit"
         ;;
 esac
 

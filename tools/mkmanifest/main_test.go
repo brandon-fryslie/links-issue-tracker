@@ -39,6 +39,15 @@ func TestPlatformFromFilenameAcceptReject(t *testing.T) {
 		{"lit_v0.1.0.tar.gz", "v0.1.0", "", false},
 		// Reject: empty components.
 		{"lit_v0.1.0__arm64.tar.gz", "v0.1.0", "", false},
+		// Reject: unrecognized extension — must require .tar.gz or .zip.
+		{"lit_v0.1.0_linux_amd64.deb", "v0.1.0", "", false},
+		{"lit_v0.1.0_linux_amd64.rpm", "v0.1.0", "", false},
+		{"lit_v0.1.0_linux_amd64", "v0.1.0", "", false},     // no extension at all
+		{"lit_v0.1.0_linux_amd64.txt", "v0.1.0", "", false}, // wrong extension
+		// Reject: non-lit project prefix — guards against unrelated archives
+		// landing in dist/ and being mis-classified as our platforms.
+		{"otherproj_v0.1.0_linux_amd64.tar.gz", "v0.1.0", "", false},
+		{"_v0.1.0_linux_amd64.tar.gz", "v0.1.0", "", false}, // empty prefix
 	}
 	for _, tc := range cases {
 		got, ok := platformFromFilename(tc.name, tc.ver)

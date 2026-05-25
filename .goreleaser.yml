@@ -135,7 +135,12 @@ builds:
       - -buildvcs=false
     ldflags:
       - -s -w
-      - -X github.com/bmf/links-issue-tracker/internal/version.Version={{ .Version }}
+      # {{ .Tag }} keeps the leading `v` (so `lit version` reports "v0.1.0",
+      # not "0.1.0"). {{ .Version }} would strip the v; that value goes into
+      # archive filenames (where we don't want the v) but not into the binary
+      # identity (where convention is to keep it). On snapshot/dispatch builds
+      # without a real tag, .Tag falls back to the snapshot-derived value.
+      - -X github.com/bmf/links-issue-tracker/internal/version.Version={{ .Tag }}
       - -X github.com/bmf/links-issue-tracker/internal/version.Commit={{ .ShortCommit }}
       - -X github.com/bmf/links-issue-tracker/internal/version.Date={{ .Date }}
 

@@ -1,18 +1,22 @@
 // Package release defines the per-release artifact manifest. A manifest is
-// produced by tools/mkmanifest at goreleaser time, published as a release
-// asset alongside the binaries, and embedded in each binary so a binary can
-// describe its own release without a network call.
+// produced by tools/mkmanifest from the workflow that built a release and
+// published as a release asset alongside the per-platform archives.
 //
 // This package owns the schema only. It is consumed by:
 //   - tools/mkmanifest (writes the manifest after goreleaser builds artifacts).
-//   - `lit version` (when this binary's embedded manifest is present, exposes
-//     the per-platform Artifact list via --json).
-//   - `lit downgrade` (downgrade epic .4): fetches the target version's
-//     manifest, resolves the current platform's Artifact, verifies SHA256.
-//   - The refusal-message upgrade (downgrade epic .5): consults a manifest to
-//     name a concrete prior version.
+//   - `lit downgrade` (downgrade epic .4, not yet built): fetches the target
+//     version's manifest from the GitHub Release, resolves the current
+//     platform's Artifact, verifies SHA256.
+//   - The refusal-message upgrade (downgrade epic .5, not yet built):
+//     consults a manifest to name a concrete prior version.
 //
-// [LAW:one-source-of-truth] One schema definition. The bytes goreleaser writes
+// NOTE: an earlier draft of this comment claimed the manifest is "embedded in
+// each binary" so `lit version --json` could expose Artifact lists locally.
+// That embedding is not implemented in this PR; `lit version` only reports
+// version.Info. Embedding can be added later via go:embed if downstream
+// tickets need it.
+//
+// [LAW:one-source-of-truth] One schema definition. The bytes mkmanifest writes
 // and the bytes a downgrade client reads share this Go type — there is no
 // parallel JSON schema description that could drift from this struct.
 package release
