@@ -288,6 +288,14 @@ rm -f "$TARGET_DIR/lnks"
 
 # Detect any *other* `lit` on PATH that we did NOT just overwrite — those are
 # the stale binaries that cause "the fix landed but the bug came back" reports.
+# Compare realpath-resolved candidates against the realpath of the just-
+# installed binary; if $TARGET_DIR happens to live under a symlinked PATH
+# entry (e.g. /usr/local/bin -> /opt/homebrew/bin on macOS), the literal
+# "$TARGET_DIR/lit" string would never match the canonicalized candidate
+# and the binary we just wrote would be flagged stale.
+# [LAW:types-are-the-program] both sides of the comparison are canonical
+# absolute paths, so "is this the same file?" is well-defined.
+INSTALLED_REAL="$(realpath_compat "$TARGET_DIR/lit")"
 STALE=()
 IFS=':' read -r -a PATH_ENTRIES <<< "$PATH"
 for dir in "${PATH_ENTRIES[@]}"; do
@@ -295,7 +303,7 @@ for dir in "${PATH_ENTRIES[@]}"; do
     candidate="$dir/lit"
     [ -x "$candidate" ] || continue
     real="$(realpath_compat "$candidate")"
-    if [ "$real" != "$TARGET_DIR/lit" ]; then
+    if [ "$real" != "$INSTALLED_REAL" ]; then
         STALE+=("$candidate")
     fi
 done
