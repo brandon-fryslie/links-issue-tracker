@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+)
 
 // TestPlatformFromFilenameAcceptReject is the accept/reject table for
 // platformFromFilename. The producer (goreleaser, configured by
@@ -69,5 +74,45 @@ func TestPlatformFromFilenameAcceptReject(t *testing.T) {
 		if ok && got != tc.want {
 			t.Errorf("platformFromFilename(%q, %q) = %q, want %q", tc.name, tc.ver, got, tc.want)
 		}
+	}
+}
+
+// TestCollectArtifactsURLUsesTagNotVersion pins the producer-vs-publisher
+// distinction: archive filenames use goreleaser's `.Version` (v-stripped),
+// but `gh release create "<tag>"` publishes assets under the *git tag*
+// segment (v-prefixed). collectArtifacts must use the tag for URL
+// construction; using the version would produce 404 URLs in the manifest.
+//
+// [LAW:one-source-of-truth] each parameter encodes exactly one concept;
+// this test makes the conflation unrepresentable in the contract.
+func TestCollectArtifactsURLUsesTagNotVersion(t *testing.T) {
+	dist := t.TempDir()
+	const validHex = "0000000000000000000000000000000000000000000000000000000000000001"
+	checksums := validHex + "  lit_0.1.0_darwin_arm64.tar.gz\n"
+	if err := os.WriteFile(filepath.Join(dist, "checksums.txt"), []byte(checksums), 0o644); err != nil {
+		t.Fatalf("write checksums.txt: %v", err)
+	}
+
+	const (
+		baseURL = "https://github.com/owner/repo/releases/download"
+		ver     = "0.1.0"
+		tag     = "v0.1.0"
+	)
+	artifacts, err := collectArtifacts(dist, baseURL, ver, tag)
+	if err != nil {
+		t.Fatalf("collectArtifacts: %v", err)
+	}
+	if len(artifacts) != 1 {
+		t.Fatalf("got %d artifacts, want 1", len(artifacts))
+	}
+
+	wantURL := baseURL + "/" + tag + "/lit_0.1.0_darwin_arm64.tar.gz"
+	if artifacts[0].URL != wantURL {
+		t.Errorf("URL = %q, want %q", artifacts[0].URL, wantURL)
+	}
+	// Negative: the URL must NOT contain "/0.1.0/" as its path segment —
+	// that would mean the version (not the tag) leaked into the URL.
+	if strings.Contains(artifacts[0].URL, "/"+ver+"/") {
+		t.Errorf("URL %q contains v-stripped version as path segment; must use tag", artifacts[0].URL)
 	}
 }

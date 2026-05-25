@@ -15,7 +15,11 @@ import (
 func TestManifestRoundTrips(t *testing.T) {
 	want := Manifest{
 		Info: version.Info{
-			Version: "v0.1.0",
+			// Version is the v-stripped goreleaser .Version (e.g. "0.1.0",
+			// not "v0.1.0") — the same value mkmanifest receives, the binary
+			// stamps via ldflags, and `lit version` reports. The fixture
+			// matches the produced shape so it can't drift from production.
+			Version: "0.1.0",
 			Commit:  "abcdef0",
 			Date:    "2026-05-24T15:21:00Z",
 			IsDev:   false,
@@ -63,7 +67,8 @@ func TestManifestRoundTrips(t *testing.T) {
 // shape clients already parse.
 func TestSignatureIsOptional(t *testing.T) {
 	m := Manifest{
-		Info:      version.Info{Version: "v0.1.0", Schema: version.SchemaSupport{Min: 1, Max: 1}},
+		// Version: v-stripped goreleaser .Version — matches the produced shape.
+		Info:      version.Info{Version: "0.1.0", Schema: version.SchemaSupport{Min: 1, Max: 1}},
 		Artifacts: []Artifact{{Platform: "linux/amd64", URL: "u", SHA256: "s"}},
 	}
 	encoded, err := json.Marshal(&m)

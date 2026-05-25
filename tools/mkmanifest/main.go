@@ -15,18 +15,32 @@
 // discipline that prevents the manifest format from drifting between producer
 // and consumer.
 //
-// Invocation (note: -version is goreleaser's `.Version` — the tag with the
-// leading "v" STRIPPED. platformFromFilename matches this exact segment
-// against goreleaser's archive name, so a v-prefixed value here would
-// produce zero artifacts and fail with "no per-platform artifacts found"):
+// Invocation:
 //
 //	mkmanifest \
 //	  -version 0.1.0 \
+//	  -tag v0.1.0 \
 //	  -commit abcdef0 \
 //	  -date 2026-05-24T15:21:00Z \
 //	  -dist ./dist \
 //	  -base-url https://github.com/owner/repo/releases/download \
 //	  -out ./dist/release-manifest.json
+//
+// `-version` and `-tag` are deliberately separate flags — they encode TWO
+// distinct concepts that happen to be derivable from the same git tag:
+//
+//   - `-version` is goreleaser's `.Version` template: the tag with the
+//     leading "v" STRIPPED. platformFromFilename matches this exact segment
+//     against goreleaser's archive names (which use the stripped form),
+//     and it's the value stamped into the binary's `lit version`.
+//   - `-tag` is the git tag itself, v-prefixed. It becomes the URL path
+//     segment because that's how `gh release create "<tag>"` publishes
+//     assets (`releases/download/<tag>/<filename>`). Passing `-version` here
+//     instead would generate 404 URLs in the manifest.
+//
+// [LAW:one-source-of-truth] each parameter encodes exactly one concept;
+// the release workflow extracts both from dist/metadata.json so they
+// trace to a single producer.
 //
 // The `-dist` directory must contain goreleaser's `checksums.txt` and the per-
 // platform archive files referenced therein.
@@ -52,6 +66,7 @@ import (
 func main() {
 	var (
 		ver     = flag.String("version", "", "release version, goreleaser .Version form — v-stripped (e.g. 0.1.0); required")
+		tag     = flag.String("tag", "", "git release tag, v-prefixed (e.g. v0.1.0); becomes the URL path segment under base-url; required")
 		commit  = flag.String("commit", "", "git short SHA of the release commit; required")
 		date    = flag.String("date", "", "RFC3339 build timestamp; required")
 		distDir = flag.String("dist", "dist", "goreleaser dist directory")
@@ -62,6 +77,7 @@ func main() {
 
 	for name, val := range map[string]string{
 		"-version":  *ver,
+		"-tag":      *tag,
 		"-commit":   *commit,
 		"-date":     *date,
 		"-base-url": *baseURL,
@@ -77,7 +93,7 @@ func main() {
 		die("read migration registry: %v", err)
 	}
 
-	artifacts, err := collectArtifacts(*distDir, strings.TrimRight(*baseURL, "/"), *ver)
+	artifacts, err := collectArtifacts(*distDir, strings.TrimRight(*baseURL, "/"), *ver, *tag)
 	if err != nil {
 		die("collect artifacts: %v", err)
 	}
@@ -116,7 +132,11 @@ func main() {
 // archives named like "lit_0.1.0_darwin_arm64.tar.gz" (the version segment
 // has NO leading v — see platformFromFilename for why); we strip the version
 // and extract the GOOS_GOARCH segment.
-func collectArtifacts(distDir, baseURL, ver string) ([]release.Artifact, error) {
+//
+// `ver` is used ONLY for filename matching (stripped form). `tag` is used
+// ONLY for URL construction (v-prefixed, the segment `gh release create`
+// publishes under). Conflating them produces 404 URLs.
+func collectArtifacts(distDir, baseURL, ver, tag string) ([]release.Artifact, error) {
 	checksumsPath := filepath.Join(distDir, "checksums.txt")
 	f, err := os.Open(checksumsPath)
 	if err != nil {
@@ -155,8 +175,11 @@ func collectArtifacts(distDir, baseURL, ver string) ([]release.Artifact, error) 
 		}
 		artifacts = append(artifacts, release.Artifact{
 			Platform: platform,
-			URL:      fmt.Sprintf("%s/%s/%s", baseURL, ver, filename),
-			SHA256:   sum,
+			// URL path segment is the git tag (v-prefixed), NOT the
+			// stripped version — that's how `gh release create "<tag>"`
+			// publishes assets. Using `ver` here would 404.
+			URL:    fmt.Sprintf("%s/%s/%s", baseURL, tag, filename),
+			SHA256: sum,
 		})
 	}
 

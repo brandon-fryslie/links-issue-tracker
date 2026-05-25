@@ -85,20 +85,24 @@ jobs:
       # the container, so dist/ is owned by root on the host bind-mount;
       # chown back to the runner user before mkmanifest tries to write into it.
       #
-      # All three identity fields (version/commit/date) come from goreleaser's
-      # dist/metadata.json — the SAME values goreleaser injected into the
-      # binaries via ldflags. Computing them freshly from git/date here would
-      # introduce drift between what `lit version` reports and what the
-      # manifest records.
+      # All four identity fields (version/tag/commit/date) come from
+      # goreleaser's dist/metadata.json — the SAME values goreleaser injected
+      # into the binaries via ldflags. Computing them freshly from git/date
+      # here would introduce drift between what `lit version` reports and
+      # what the manifest records. `tag` (v-prefixed) is distinct from
+      # `version` (v-stripped) — see mkmanifest's docstring for why both are
+      # required (URL segment vs filename match).
       - name: Generate release manifest
         run: |
           set -euo pipefail
           sudo chown -R "$(id -u):$(id -g)" dist
           VERSION=$(jq -r .version dist/metadata.json)
+          TAG=$(jq -r .tag dist/metadata.json)
           COMMIT=$(jq -r .commit dist/metadata.json | cut -c1-7)
           DATE=$(jq -r .date dist/metadata.json)
           go run ./tools/mkmanifest \
             -version "$VERSION" \
+            -tag "$TAG" \
             -commit "$COMMIT" \
             -date "$DATE" \
             -dist ./dist \
@@ -123,10 +127,18 @@ jobs:
             (.schema_support.min | type) == "number" and (.schema_support.min) >= 1 and
             (.schema_support.max | type) == "number"
           ' "$MANIFEST" >/dev/null
-          jq -e '
+          # URL shape: `<base>/<tag>/<filename>` where tag comes from
+          # dist/metadata.json. We assert the tag segment is literally
+          # present in every URL — that's what would have caught the bug
+          # where mkmanifest had been using the v-stripped version as the
+          # URL segment (producing /releases/download/0.1.0/... 404s
+          # instead of the correct /releases/download/v0.1.0/...).
+          TAG=$(jq -r .tag dist/metadata.json)
+          jq -e --arg tag "$TAG" '
             (.artifacts | length) > 0 and
             ((.artifacts) | all(.platform | test("^[a-z0-9]+/[a-z0-9]+$"))) and
             ((.artifacts) | all(.url | startswith("https://github.com/"))) and
+            ((.artifacts) | all(.url | contains("/" + $tag + "/"))) and
             ((.artifacts) | all(.sha256 | test("^[0-9a-f]{64}$")))
           ' "$MANIFEST" >/dev/null
 
