@@ -166,6 +166,14 @@ archives:
     format_overrides:
       - goos: windows
         formats: [zip]
+    # Pin the flat-archive shape explicitly. scripts/install.sh's pre-extraction
+    # validator rejects any entry containing `/` (path-traversal defense), which
+    # means a wrapped-in-directory archive would be rejected as malformed.
+    # Goreleaser's current default is `false`, but a default change or an
+    # accidental edit here would silently desync the producer/consumer contract.
+    # [LAW:single-enforcer] the producer declares the invariant the consumer's
+    # validator depends on, so the consumer is verifying a *documented* shape.
+    wrap_in_directory: false
     files:
       - LICENSE*
       - README*
