@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -355,9 +356,17 @@ func TestReconcileResetsLegacyPriorities(t *testing.T) {
 	}
 }
 
-// TestReconcileDropsLegacyIssueHistory pins that an old issue_history table
-// (superseded by issue_events) is dropped, and the existing issues stay
-// untouched. The deleted reconcile knew about this; the test pins it.
+// TestReconcileDropsLegacyIssueHistory pins the partial-shape contract:
+// when issue_history is present but does NOT carry the canonical legacy
+// column set (action, reason, from_status, to_status, created_at,
+// created_by), the translation step no-ops and the drop step removes
+// the table without losing audit data (there is no canonical audit
+// data in a partial shape — the columns that would carry it are absent).
+// The seeded issue must survive.
+//
+// Real-world workspaces with a canonical-shape issue_history get their
+// rows translated by TestReconcileTranslatesLegacyIssueHistoryToEvents
+// below; this test guards the synthetic/partial fallback path.
 func TestReconcileDropsLegacyIssueHistory(t *testing.T) {
 	ctx := context.Background()
 	doltRoot := filepath.Join(t.TempDir(), "dolt")
@@ -398,6 +407,342 @@ func TestReconcileDropsLegacyIssueHistory(t *testing.T) {
 	}
 	if got.Title != "Survives history drop" {
 		t.Fatalf("issue title corrupted: %q", got.Title)
+	}
+}
+
+// seedCanonicalIssueHistory creates the canonical-shape legacy
+// issue_history table — the exact column set the deleted insertHistoryTx
+// wrote in production. Tests use this to exercise the translation
+// (translate-then-drop) path of the reconcile.
+func seedCanonicalIssueHistory(t *testing.T, st *Store) {
+	t.Helper()
+	ctx := context.Background()
+	if err := st.ExecRawForTest(ctx, `CREATE TABLE issue_history (
+		id VARCHAR(191) PRIMARY KEY,
+		issue_id VARCHAR(191) NOT NULL,
+		action VARCHAR(64) NULL,
+		reason TEXT NULL,
+		from_status VARCHAR(32) NULL,
+		to_status VARCHAR(32) NULL,
+		created_at VARCHAR(64) NOT NULL,
+		created_by TEXT NOT NULL
+	)`); err != nil {
+		t.Fatalf("create canonical issue_history error = %v", err)
+	}
+}
+
+// insertLegacyHistory writes one row into the canonical-shape
+// issue_history fixture. Empty action / NULL status are both supported
+// by passing "" and (*string)(nil) — the columns are nullable.
+func insertLegacyHistory(t *testing.T, st *Store, id, issueID, action, reason string, fromStatus, toStatus *string, createdAt, createdBy string) {
+	t.Helper()
+	ctx := context.Background()
+	var actionArg any
+	if action == "" {
+		actionArg = nil
+	} else {
+		actionArg = action
+	}
+	var fromArg, toArg any
+	if fromStatus != nil {
+		fromArg = *fromStatus
+	}
+	if toStatus != nil {
+		toArg = *toStatus
+	}
+	if err := st.ExecRawForTest(ctx,
+		`INSERT INTO issue_history (id, issue_id, action, reason, from_status, to_status, created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, issueID, actionArg, reason, fromArg, toArg, createdAt, createdBy,
+	); err != nil {
+		t.Fatalf("insert legacy history %s error = %v", id, err)
+	}
+}
+
+func strPtr(s string) *string { return &s }
+
+// TestReconcileTranslatesLegacyIssueHistoryToEvents pins the headline
+// contract of links-recovery-icqp.3: every row in a canonical-shape
+// issue_history table is preserved as an issue_events row (+ one
+// issue_event_changes row per non-trivial status transition) before
+// the legacy table is dropped. The previous bridge silently destroyed
+// these rows; PR #143's recovery on unreal-3d-maps lost 184 of them
+// and PR #145's on cc-nerf-buster lost 4.
+//
+// [LAW:no-silent-fallbacks] Drop-without-translate was the silent
+// fallback this ticket eliminates.
+func TestReconcileTranslatesLegacyIssueHistoryToEvents(t *testing.T) {
+	ctx := context.Background()
+	doltRoot := filepath.Join(t.TempDir(), "dolt")
+
+	first, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open(first) error = %v", err)
+	}
+	seeded, err := first.CreateIssue(ctx, CreateIssueInput{Prefix: "test", Title: "Has history", Topic: "history", IssueType: "task", Priority: 0})
+	if err != nil {
+		_ = first.Close()
+		t.Fatalf("seed CreateIssue error = %v", err)
+	}
+	seedCanonicalIssueHistory(t, first)
+	// Three legacy rows: a status transition (open→in_progress), a
+	// reason-only update (no status change), and a row whose action is
+	// the empty string (the historical encoding of "no named intent").
+	insertLegacyHistory(t, first, "hist-start", seeded.ID, "start", "began work", strPtr("open"), strPtr("in_progress"), "2026-01-01T10:00:00Z", "alice")
+	insertLegacyHistory(t, first, "hist-comment", seeded.ID, "", "added context", nil, nil, "2026-01-01T10:05:00Z", "alice")
+	insertLegacyHistory(t, first, "hist-close", seeded.ID, "close", "shipped", strPtr("in_progress"), strPtr("closed"), "2026-01-01T11:00:00Z", "bob")
+	hijackToPreGoose(t, first)
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close(first) error = %v", err)
+	}
+
+	st := assertReachedBaseline(t, doltRoot)
+
+	// issue_history is gone.
+	exists, err := st.tableExists(ctx, "issue_history")
+	if err != nil {
+		t.Fatalf("tableExists(issue_history) error = %v", err)
+	}
+	if exists {
+		t.Fatal("issue_history table still exists after reconcile")
+	}
+	// All three rows show up in issue_events with the canonical mapping.
+	type translatedEvent struct {
+		ID        string
+		IssueID   string
+		Action    sql.NullString
+		Reason    string
+		Actor     string
+		CreatedAt string
+	}
+	rows, err := st.db.QueryContext(ctx,
+		`SELECT id, issue_id, action, reason, actor, created_at FROM issue_events WHERE id IN (?, ?, ?) ORDER BY id ASC`,
+		"hist-close", "hist-comment", "hist-start",
+	)
+	if err != nil {
+		t.Fatalf("query translated events error = %v", err)
+	}
+	defer rows.Close()
+	got := map[string]translatedEvent{}
+	for rows.Next() {
+		var e translatedEvent
+		if err := rows.Scan(&e.ID, &e.IssueID, &e.Action, &e.Reason, &e.Actor, &e.CreatedAt); err != nil {
+			t.Fatalf("scan translated event error = %v", err)
+		}
+		got[e.ID] = e
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate translated events error = %v", err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected 3 translated events, got %d: %+v", len(got), got)
+	}
+	cases := []struct {
+		id, action, reason, actor string
+		actionIsNull              bool
+	}{
+		{id: "hist-start", action: "start", reason: "began work", actor: "alice"},
+		{id: "hist-comment", reason: "added context", actor: "alice", actionIsNull: true},
+		{id: "hist-close", action: "close", reason: "shipped", actor: "bob"},
+	}
+	for _, c := range cases {
+		e, ok := got[c.id]
+		if !ok {
+			t.Errorf("event %q missing from translation", c.id)
+			continue
+		}
+		if c.actionIsNull && e.Action.Valid {
+			t.Errorf("event %q action = %q, want NULL (empty action must normalize)", c.id, e.Action.String)
+		}
+		if !c.actionIsNull {
+			if !e.Action.Valid || e.Action.String != c.action {
+				t.Errorf("event %q action = %v, want %q", c.id, e.Action, c.action)
+			}
+		}
+		if e.Reason != c.reason {
+			t.Errorf("event %q reason = %q, want %q", c.id, e.Reason, c.reason)
+		}
+		if e.Actor != c.actor {
+			t.Errorf("event %q actor = %q, want %q (created_by must map to actor)", c.id, e.Actor, c.actor)
+		}
+		if e.IssueID != seeded.ID {
+			t.Errorf("event %q issue_id = %q, want %q", c.id, e.IssueID, seeded.ID)
+		}
+	}
+	// issue_event_changes has one row per status transition; the comment-only
+	// row (no status change) has zero change rows.
+	changeRows, err := st.db.QueryContext(ctx,
+		`SELECT event_id, field, from_value, to_value FROM issue_event_changes WHERE event_id IN (?, ?, ?) ORDER BY event_id ASC`,
+		"hist-close", "hist-comment", "hist-start",
+	)
+	if err != nil {
+		t.Fatalf("query translated changes error = %v", err)
+	}
+	defer changeRows.Close()
+	type change struct {
+		Field, From, To string
+	}
+	changes := map[string]change{}
+	for changeRows.Next() {
+		var eventID, field string
+		var from, to sql.NullString
+		if err := changeRows.Scan(&eventID, &field, &from, &to); err != nil {
+			t.Fatalf("scan translated change error = %v", err)
+		}
+		changes[eventID] = change{Field: field, From: from.String, To: to.String}
+	}
+	if err := changeRows.Err(); err != nil {
+		t.Fatalf("iterate translated changes error = %v", err)
+	}
+	if _, ok := changes["hist-comment"]; ok {
+		t.Error("comment-only row produced a change record; only status transitions should emit changes")
+	}
+	wantChanges := map[string]change{
+		"hist-start": {Field: "status", From: "open", To: "in_progress"},
+		"hist-close": {Field: "status", From: "in_progress", To: "closed"},
+	}
+	for id, want := range wantChanges {
+		got, ok := changes[id]
+		if !ok {
+			t.Errorf("status change for %q missing from translation", id)
+			continue
+		}
+		if got != want {
+			t.Errorf("change for %q = %+v, want %+v", id, got, want)
+		}
+	}
+}
+
+// TestReconcileTranslateSkipsOrphanedHistoryRows pins that issue_history
+// rows referencing a non-existent issue_id are silently skipped (the
+// issue was deleted at some point between the history row being written
+// and the bridge running). Without this filter the INSERT would fail
+// the FK constraint on issue_events.issue_id and the whole reconcile
+// would abort — turning a recoverable workspace into a refused one.
+//
+// [LAW:no-silent-fallbacks] Orphan-skipping is the only safe behavior:
+// the alternative is "refuse the bridge" which strands the workspace.
+// The orphan rows are unrecoverable regardless — there is no issue to
+// attach the audit row to. Logging the skipped IDs would be an
+// improvement; the count of dropped rows is implicit in (legacy count -
+// translated count) and surfaces via the existing reconcile logs.
+func TestReconcileTranslateSkipsOrphanedHistoryRows(t *testing.T) {
+	ctx := context.Background()
+	doltRoot := filepath.Join(t.TempDir(), "dolt")
+
+	first, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open(first) error = %v", err)
+	}
+	seeded, err := first.CreateIssue(ctx, CreateIssueInput{Prefix: "test", Title: "Existing", Topic: "history", IssueType: "task", Priority: 0})
+	if err != nil {
+		_ = first.Close()
+		t.Fatalf("seed CreateIssue error = %v", err)
+	}
+	seedCanonicalIssueHistory(t, first)
+	insertLegacyHistory(t, first, "hist-real", seeded.ID, "start", "", strPtr("open"), strPtr("in_progress"), "2026-01-01T10:00:00Z", "alice")
+	insertLegacyHistory(t, first, "hist-orphan", "does-not-exist", "start", "", strPtr("open"), strPtr("in_progress"), "2026-01-01T10:01:00Z", "alice")
+	hijackToPreGoose(t, first)
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close(first) error = %v", err)
+	}
+
+	st := assertReachedBaseline(t, doltRoot)
+
+	// Real row translated.
+	var realCount int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_events WHERE id = ?`, "hist-real").Scan(&realCount); err != nil {
+		t.Fatalf("count translated real row error = %v", err)
+	}
+	if realCount != 1 {
+		t.Fatalf("hist-real event count = %d, want 1 (translation dropped a real row)", realCount)
+	}
+	// Orphan row skipped.
+	var orphanCount int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_events WHERE id = ?`, "hist-orphan").Scan(&orphanCount); err != nil {
+		t.Fatalf("count orphan event error = %v", err)
+	}
+	if orphanCount != 0 {
+		t.Fatalf("hist-orphan event count = %d, want 0 (orphan must not violate FK)", orphanCount)
+	}
+}
+
+// TestReconcileTranslateIsIdempotentWithExistingEvents pins that a
+// translation re-run against a workspace where an issue_events row
+// already carries an id matching an issue_history row leaves the
+// existing row untouched. This is the cross-binary recovery scenario:
+// one binary translated a row, the workspace went back through the
+// bridge (e.g. via a different worktree that hadn't seen the new
+// schema yet), and the second pass must not duplicate.
+//
+// [LAW:types-are-the-program] The uniqueness of issue_events.id is
+// the type-level encoding of "have we translated this row already" —
+// no marker table required.
+func TestReconcileTranslateIsIdempotentWithExistingEvents(t *testing.T) {
+	ctx := context.Background()
+	doltRoot := filepath.Join(t.TempDir(), "dolt")
+
+	first, err := Open(ctx, doltRoot, "test-workspace-id")
+	if err != nil {
+		t.Fatalf("Open(first) error = %v", err)
+	}
+	seeded, err := first.CreateIssue(ctx, CreateIssueInput{Prefix: "test", Title: "Idem", Topic: "history", IssueType: "task", Priority: 0})
+	if err != nil {
+		_ = first.Close()
+		t.Fatalf("seed CreateIssue error = %v", err)
+	}
+	// Pre-populate issue_events with a row matching the id of a legacy
+	// row we're about to insert — the canonical state after a previous
+	// translation that already ran. Re-translation must see "row already
+	// exists" and skip.
+	if err := first.ExecRawForTest(ctx,
+		`INSERT INTO issue_events (id, issue_id, action, reason, actor, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+		"hist-already-translated", seeded.ID, "start", "already migrated", "alice", "2026-01-01T10:00:00Z",
+	); err != nil {
+		_ = first.Close()
+		t.Fatalf("seed pre-existing event error = %v", err)
+	}
+	seedCanonicalIssueHistory(t, first)
+	// The legacy row carries different action/reason values from the
+	// pre-existing event — if the translation overwrote, we'd see those.
+	insertLegacyHistory(t, first, "hist-already-translated", seeded.ID, "DIFFERENT", "different reason", strPtr("open"), strPtr("closed"), "2026-01-01T10:00:00Z", "DIFFERENT_ACTOR")
+	hijackToPreGoose(t, first)
+	if err := first.Close(); err != nil {
+		t.Fatalf("Close(first) error = %v", err)
+	}
+
+	st := assertReachedBaseline(t, doltRoot)
+
+	var count int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_events WHERE id = ?`, "hist-already-translated").Scan(&count); err != nil {
+		t.Fatalf("count event error = %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("event count = %d, want 1 (translation duplicated a pre-existing row)", count)
+	}
+	// Pre-existing row's values must have survived intact.
+	var action, reason, actor sql.NullString
+	if err := st.db.QueryRowContext(ctx,
+		`SELECT action, reason, actor FROM issue_events WHERE id = ?`, "hist-already-translated",
+	).Scan(&action, &reason, &actor); err != nil {
+		t.Fatalf("read event values error = %v", err)
+	}
+	if action.String != "start" {
+		t.Errorf("action = %q, want %q (pre-existing event was overwritten)", action.String, "start")
+	}
+	if reason.String != "already migrated" {
+		t.Errorf("reason = %q, want %q (pre-existing event was overwritten)", reason.String, "already migrated")
+	}
+	if actor.String != "alice" {
+		t.Errorf("actor = %q, want %q (pre-existing event was overwritten)", actor.String, "alice")
+	}
+	// No change row was created either — the pre-existing event had no
+	// status change record, and re-translation must not invent one.
+	var changeCount int
+	if err := st.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM issue_event_changes WHERE event_id = ?`, "hist-already-translated").Scan(&changeCount); err != nil {
+		t.Fatalf("count change error = %v", err)
+	}
+	if changeCount != 0 {
+		t.Fatalf("change count = %d, want 0 (translation invented a change row on a previously-translated event)", changeCount)
 	}
 }
 
