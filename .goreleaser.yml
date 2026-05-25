@@ -24,9 +24,12 @@ version: 2
 
 project_name: lit
 
-before:
-  hooks:
-    - go mod tidy
+# No `before.hooks` — earlier iterations ran `go mod tidy` here, but that
+# can mutate go.mod/go.sum during a tagged release build, so artifacts
+# would be built from a working tree that no longer matches the tagged
+# commit. [LAW:single-enforcer] tidiness is enforced ONCE, in CI on every
+# PR/master push (.github/workflows/ci.yml "go mod tidy check"), BEFORE a
+# tag is cut — not at release time when mutation is destructive.
 
 builds:
   - id: lit
