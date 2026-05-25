@@ -109,6 +109,13 @@ RUN icu-cross-build darwin arm64 \
 # the single image that release-validate / release will run goreleaser against.
 # -----------------------------------------------------------------------------
 FROM base AS final
+# Docker RUN defaults to /bin/sh -c, which on Debian-based images is dash.
+# The sanity-check RUN below relies on `set -o pipefail` (bash) and on
+# pipelines whose exit status must propagate. Pin the shell for this stage
+# so the build's correctness does not depend on whichever /bin/sh the base
+# image happens to ship. [LAW:types-are-the-program] the stage's shell is
+# part of its type; subsequent RUNs do not re-declare it.
+SHELL ["/bin/bash", "-c"]
 COPY --from=cross-linux-arm64    /opt/icu/linux_arm64    /opt/icu/linux_arm64
 COPY --from=cross-darwin-arm64   /opt/icu/darwin_arm64   /opt/icu/darwin_arm64
 
