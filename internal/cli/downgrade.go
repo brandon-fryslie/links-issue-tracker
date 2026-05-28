@@ -101,11 +101,11 @@ func runDowngradeWith(
 		)
 	}
 
-	payload := map[string]string{
-		"status":      "downgraded",
-		"target":      tag,
-		"schema":      fmt.Sprintf("%d", target.Manifest.Schema.Max),
-		"binary_path": binPath,
+	payload := downgradeResult{
+		Status:     "downgraded",
+		Target:     tag,
+		Schema:     target.Manifest.Schema.Max,
+		BinaryPath: binPath,
 	}
 	// [LAW:dataflow-not-control-flow] The post-install step is a single print.
 	// An earlier draft re-exec'd into the prior binary on Unix and printed a
@@ -114,13 +114,26 @@ func runDowngradeWith(
 	// mode for no measurable benefit — the rename has already happened, the
 	// user's next shell prompt runs the prior binary.
 	return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
-		p := v.(map[string]string)
+		p := v.(downgradeResult)
 		_, err := fmt.Fprintf(w,
-			"downgraded to %s (schema v%s) installed at %s\nre-run `lit version` to confirm.\n",
-			p["target"], p["schema"], p["binary_path"],
+			"downgraded to %s (schema v%d) installed at %s\nre-run `lit version` to confirm.\n",
+			p.Target, p.Schema, p.BinaryPath,
 		)
 		return err
 	})
+}
+
+// downgradeResult is the typed JSON payload `lit downgrade` emits with --json.
+// Schema is an int64 to match version.Info.SchemaSupport's numeric encoding;
+// machine consumers don't have to parse a string to recover the number.
+//
+// [LAW:types-are-the-program] One struct projects to both text and JSON;
+// the text renderer reads typed fields, never re-deriving them from strings.
+type downgradeResult struct {
+	Status     string `json:"status"`
+	Target     string `json:"target"`
+	Schema     int64  `json:"schema"`
+	BinaryPath string `json:"binary_path"`
 }
 
 // normalizeDowngradeTag accepts either "v0.4.1" or "0.4.1" and returns the

@@ -107,13 +107,20 @@ func TestRunDowngradeWithJSONEmitsSingleDocument(t *testing.T) {
 	if err := runDowngradeWith(context.Background(), &out, dg, []string{"--to", "v0.4.1", "--json"}, res, inst, fixedBinPath("/p/lit", nil)); err != nil {
 		t.Fatalf("runDowngradeWith: %v", err)
 	}
-	// Body must decode as exactly one JSON document with no trailing content.
+	// Body must decode as exactly one JSON document with no trailing content,
+	// and the schema field must be a number (not a string-encoded number) so
+	// machine consumers don't have to re-parse.
 	dec := json.NewDecoder(&out)
-	var payload map[string]string
+	var payload struct {
+		Status     string `json:"status"`
+		Target     string `json:"target"`
+		Schema     int64  `json:"schema"`
+		BinaryPath string `json:"binary_path"`
+	}
 	if err := dec.Decode(&payload); err != nil {
 		t.Fatalf("decode JSON: %v", err)
 	}
-	if payload["status"] != "downgraded" || payload["target"] != "v0.4.1" || payload["schema"] != "3" || payload["binary_path"] != "/p/lit" {
+	if payload.Status != "downgraded" || payload.Target != "v0.4.1" || payload.Schema != 3 || payload.BinaryPath != "/p/lit" {
 		t.Errorf("payload mismatch: %+v", payload)
 	}
 	// No trailing JSON or junk after the document — exactly one JSON doc.
