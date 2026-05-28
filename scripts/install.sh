@@ -24,6 +24,17 @@ cd "$ROOT_DIR"
 REPO_DOWNLOAD_BASE="https://github.com/brandon-fryslie/links-issue-tracker/releases/download"
 REPO_LATEST_API="https://api.github.com/repos/brandon-fryslie/links-issue-tracker/releases/latest"
 
+# [LAW:one-source-of-truth] One variable names the on-disk binary across every
+# mode: from-release extraction validation, atomic rename, the stale-binary
+# scan that walks PATH, and the post-install version check. On windows the
+# executable is `lit.exe` (goreleaser appends .exe for windows archives; Go
+# does the same when compiling for GOOS=windows). Detect once at script start
+# so downstream code does not branch on OS.
+case "$(uname -s | tr '[:upper:]' '[:lower:]')" in
+    mingw*|msys*|cygwin*) BIN_NAME="lit.exe" ;;
+    *) BIN_NAME="lit" ;;
+esac
+
 # realpath_compat — resolve a symlink chain to its canonical absolute path.
 #
 # [LAW:single-enforcer] One resolver used by both the target-dir lookup and
@@ -205,7 +216,7 @@ case "$mode" in
         pkg="github.com/bmf/links-issue-tracker/internal/version"
         GOFLAGS="${GOFLAGS:+$GOFLAGS }-buildvcs=false" go build \
             -ldflags "-X ${pkg}.Version=${ver} -X ${pkg}.Commit=${commit} -X ${pkg}.Date=${date}" \
-            -o "$TARGET_DIR/lit" ./cmd/lit
+            -o "$TARGET_DIR/$BIN_NAME" ./cmd/lit
         ;;
     release|latest)
         # curl is the single transport for release-download mode. Probe it
@@ -385,19 +396,20 @@ case "$mode" in
                 ;;
         esac
 
-        # Extract into the temp dir; goreleaser archives contain a top-level `lit` binary.
+        # Extract into the temp dir; goreleaser archives contain a top-level
+        # `lit` (or `lit.exe` on windows) binary.
         if [ "$ext" = "tar.gz" ]; then
             tar -xzf "$tmp/$archive" -C "$tmp"
         else
             unzip -q "$tmp/$archive" -d "$tmp"
         fi
-        if [ ! -x "$tmp/lit" ]; then
-            echo "error: extracted archive did not contain a 'lit' binary" >&2
+        if [ ! -f "$tmp/$BIN_NAME" ]; then
+            echo "error: extracted archive did not contain a '$BIN_NAME' binary" >&2
             exit 1
         fi
 
         # Atomic rename within $TARGET_DIR (mktemp put us on the same FS).
-        mv -f "$tmp/lit" "$TARGET_DIR/lit"
+        mv -f "$tmp/$BIN_NAME" "$TARGET_DIR/$BIN_NAME"
         ;;
 esac
 
@@ -414,12 +426,12 @@ rm -f "$TARGET_DIR/lnks"
 # and the binary we just wrote would be flagged stale.
 # [LAW:types-are-the-program] both sides of the comparison are canonical
 # absolute paths, so "is this the same file?" is well-defined.
-INSTALLED_REAL="$(realpath_compat "$TARGET_DIR/lit")"
+INSTALLED_REAL="$(realpath_compat "$TARGET_DIR/$BIN_NAME")"
 STALE=()
 IFS=':' read -r -a PATH_ENTRIES <<< "$PATH"
 for dir in "${PATH_ENTRIES[@]}"; do
     [ -z "$dir" ] && continue
-    candidate="$dir/lit"
+    candidate="$dir/$BIN_NAME"
     [ -x "$candidate" ] || continue
     real="$(realpath_compat "$candidate")"
     if [ "$real" != "$INSTALLED_REAL" ]; then
@@ -427,8 +439,8 @@ for dir in "${PATH_ENTRIES[@]}"; do
     fi
 done
 
-echo "Installed lit -> $TARGET_DIR/lit"
-"$TARGET_DIR/lit" version 2>/dev/null || true
+echo "Installed lit -> $TARGET_DIR/$BIN_NAME"
+"$TARGET_DIR/$BIN_NAME" version 2>/dev/null || true
 if [ "${#STALE[@]}" -gt 0 ]; then
     echo
     echo "WARNING: other 'lit' binaries found on PATH that were NOT updated:"
