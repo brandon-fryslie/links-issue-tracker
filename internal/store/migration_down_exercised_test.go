@@ -11,9 +11,10 @@ import (
 )
 
 // TestEveryMigrationDownIsExercised proves that every migration in the embedded
-// registry has a Down section that not only exists (HasDownSection's job) but
-// actually runs against a real workspace. An unexercised Down is worse than no
-// Down — the registry claims invertibility the runtime cannot deliver.
+// registry has a Down section that not only exists (TestEveryMigrationHasDownSection's
+// job, in the migrations package) but actually runs against a real workspace. An
+// unexercised Down is worse than no Down — the registry claims invertibility the
+// runtime cannot deliver.
 //
 // For each migration vN in the registry:
 //  1. Open a fresh workspace (this applies every Up through registry max).
@@ -53,8 +54,8 @@ func TestEveryMigrationDownIsExercised(t *testing.T) {
 			results, err := provider.DownTo(ctx, v-1)
 			if err != nil {
 				t.Fatalf("DownTo(%d) for migration v%d failed — its `+goose Down` "+
-					"section is present (HasDownSection passed) but does not actually "+
-					"run against a real workspace: %v", v-1, v, err)
+					"section is present (TestEveryMigrationHasDownSection passed) but does not "+
+					"actually run against a real workspace: %v", v-1, v, err)
 			}
 			// At least one migration must have been rolled back — DownTo is a
 			// no-op when there is nothing to revert, and a no-op proves nothing

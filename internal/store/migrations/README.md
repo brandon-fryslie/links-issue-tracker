@@ -57,13 +57,21 @@ varies is **how it represents the loss**:
 ### Option A — refuse with a typed error
 
 If the loss is irrecoverable (the dropped column had no derivable replacement
-on disk), the Down section may refuse with a clear error. The
-preferred mechanism is to put the refusal in `Downgrade()` in
-`internal/store/downgrade.go` (or the equivalent boundary the
-`links-downgrade-t244.3` ticket lands), so the refusal is symmetric with
-other downgrade refusals (e.g. "downgrade past baseline would destroy the
-workspace"). The Down section itself in that case may be a documented no-op
-*with a clear comment explaining where the refusal lives*.
+on disk), the refusal lives in `Downgrade()` in `internal/store/downgrade.go`
+(or the equivalent boundary the `links-downgrade-t244.3` ticket lands), so it
+is symmetric with other downgrade refusals (e.g. "downgrade past baseline
+would destroy the workspace"). The `Downgrade()` boundary refuses *before*
+invoking goose, so the file's Down section is unreachable from the user-facing
+`lit downgrade` command.
+
+The Down section in the file is still required (both CI gates demand a
+non-empty, cleanly-executing Down). Write the "would-be" SQL that goose would
+run if it were ever reached — for a column drop, the `ALTER TABLE ... ADD
+COLUMN ...` that restores it (defaulted however makes sense for an
+unreachable branch) — and add a comment above the section pointing readers at
+the `Downgrade()` refusal so they understand the file's Down is never the
+operator-facing answer. The baseline file itself is the canonical example:
+its Down drops every table, and `Downgrade()` refuses to invoke it.
 
 ### Option B — restore with documented loss
 
