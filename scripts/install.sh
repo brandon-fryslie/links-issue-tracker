@@ -403,6 +403,18 @@ case "$mode" in
         else
             unzip -q "$tmp/$archive" -d "$tmp"
         fi
+        # Reject a symlink at the binary path — `-f` (and the subsequent
+        # `chmod +x`) follow symlinks, so a malicious archive containing
+        # `lit` as a symlink could redirect the chmod onto an arbitrary
+        # path the extractor's user can write to. The tar-path entry
+        # validator already rejects non-regular entries by file-type char;
+        # this is the parallel guard for the zip path (and a belt-and-braces
+        # check for tar). [LAW:no-silent-fallbacks] reject the unsafe shape
+        # explicitly instead of acting on it.
+        if [ -L "$tmp/$BIN_NAME" ]; then
+            echo "error: extracted '$BIN_NAME' is a symlink; archive rejected" >&2
+            exit 1
+        fi
         if [ ! -f "$tmp/$BIN_NAME" ]; then
             echo "error: extracted archive did not contain a '$BIN_NAME' binary" >&2
             exit 1
@@ -426,7 +438,7 @@ esac
 
 # Stale `lnks` symlink/binary from previous installs is removed; `lit` is the
 # only entrypoint going forward.
-rm -f "$TARGET_DIR/lnks"
+rm -f "$TARGET_DIR/lnks" "$TARGET_DIR/lnks.exe"
 
 # Detect any *other* `lit` on PATH that we did NOT just overwrite — those are
 # the stale binaries that cause "the fix landed but the bug came back" reports.
