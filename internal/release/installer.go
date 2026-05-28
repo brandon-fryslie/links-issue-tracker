@@ -153,16 +153,29 @@ func downloadAndVerify(ctx context.Context, client *http.Client, a Artifact) ([]
 	return body, nil
 }
 
+// maxUncompressedBytes bounds the post-gunzip bytes any single entry may
+// expand to. The `lit` binary is ~15 MiB today; 256 MiB is generous headroom
+// while refusing gzip bombs that fit under the compressed download cap but
+// expand to gigabytes.
+//
+// [LAW:enumeration-gap] The compressed-bytes cap (maxArchiveBytes) doesn't
+// bound expansion; the trust-boundary accept shape must include the
+// uncompressed bound too, or a 1 MiB tar.gz of zeros could fill the disk.
+const maxUncompressedBytes = 256 << 20
+
 // extractLitBinary scans the tar.gz for a flat `lit` entry of regular-file
-// type and writes its contents to dest. Mirrors scripts/install.sh's
-// structural validation: reject path-traversal, reject non-regular entries
-// (symlinks, devices, hardlinks), and require exactly one entry named
-// BinaryName. Other flat-regular entries (LICENSE, README) are tolerated and
-// skipped.
+// type and writes its contents to dest. The accept shape is intentionally
+// tighter than scripts/install.sh's: this implementation rejects any
+// filename containing "..", rejects backslashes as well as forward slashes,
+// requires exactly one BinaryName entry, and caps the uncompressed size of
+// the extracted entry. install.sh applies the same first two checks via
+// shell case-patterns but does not enforce the uncompressed cap; the Go
+// path is stricter by design at the resolver→installer boundary.
 //
 // [LAW:types-are-the-program] The accept shape is "flat archive of regular
-// files containing one entry named lit"; reject the rest by construction so
-// the rest of Install can assume safe inputs.
+// files containing one entry named lit, of size ≤ maxUncompressedBytes";
+// reject the rest by construction so the rest of Install can assume safe
+// inputs.
 func extractLitBinary(archive []byte, dest io.Writer) error {
 	gzr, err := gzip.NewReader(bytes.NewReader(archive))
 	if err != nil {
@@ -190,6 +203,13 @@ func extractLitBinary(archive []byte, dest io.Writer) error {
 			return fmt.Errorf("release: archive contains non-regular entry %q (type %c)", name, h.Typeflag)
 		}
 		if name != BinaryName {
+			// Even for non-target entries, refuse a claimed size beyond the
+			// cap — a malicious archive that declares a huge LICENSE could
+			// be a gzip bomb in disguise even though we wouldn't copy it.
+			// Header inspection alone is cheap; the cost lives in Copy.
+			if h.Size > maxUncompressedBytes {
+				return fmt.Errorf("release: archive entry %q declares %d uncompressed bytes (cap %d)", name, h.Size, maxUncompressedBytes)
+			}
 			continue
 		}
 		if found {
@@ -199,8 +219,20 @@ func extractLitBinary(archive []byte, dest io.Writer) error {
 			// appending.
 			return fmt.Errorf("release: archive contains multiple %q entries", BinaryName)
 		}
-		if _, err := io.Copy(dest, tr); err != nil {
+		// Reject the declared size before streaming; a header-only check
+		// avoids reading the body when it would have failed the cap anyway.
+		if h.Size < 0 || h.Size > maxUncompressedBytes {
+			return fmt.Errorf("release: %q declares %d uncompressed bytes (cap %d)", BinaryName, h.Size, maxUncompressedBytes)
+		}
+		// [LAW:enumeration-gap] CopyN bounds the actual bytes streamed even
+		// if the tar header lies. The +1 lets us distinguish "exactly at the
+		// cap" from "overflow," matching the compressed-byte handling above.
+		n, err := io.CopyN(dest, tr, maxUncompressedBytes+1)
+		if err != nil && err != io.EOF {
 			return fmt.Errorf("release: extract %s: %w", BinaryName, err)
+		}
+		if n > maxUncompressedBytes {
+			return fmt.Errorf("release: %q exceeded uncompressed cap %d", BinaryName, maxUncompressedBytes)
 		}
 		found = true
 	}

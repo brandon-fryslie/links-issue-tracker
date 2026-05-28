@@ -233,6 +233,45 @@ func TestHTTPInstallerAcceptsTypeRegA(t *testing.T) {
 	}
 }
 
+func TestHTTPInstallerRejectsOversizedEntryHeader(t *testing.T) {
+	// Tar header claims an uncompressed size far above the cap. Real content
+	// could be tiny (a gzip bomb), but the header check rejects it before
+	// streaming a single body byte.
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	// tar Size is informational; setting it large and writing zero bytes is
+	// a valid producer-side shape we want to refuse.
+	_ = tw.WriteHeader(&tar.Header{Name: "lit", Mode: 0o755, Size: 0, Typeflag: tar.TypeReg})
+	// Cheat the header field directly via a second entry whose declared size
+	// exceeds the cap. Use a real archive shape so gzip stays valid.
+	_ = tw.Close()
+	_ = gw.Close()
+
+	// Build a second archive whose tar header lies about Size > cap.
+	var bomb bytes.Buffer
+	gw2 := gzip.NewWriter(&bomb)
+	tw2 := tar.NewWriter(gw2)
+	hdr := &tar.Header{Name: "lit", Mode: 0o755, Size: int64(maxUncompressedBytes) + 1, Typeflag: tar.TypeReg}
+	_ = tw2.WriteHeader(hdr)
+	// Write a few real bytes; the cap check fires on Size, not body.
+	_, _ = tw2.Write([]byte("tiny"))
+	_ = tw2.Close()
+	_ = gw2.Close()
+	archive := bomb.Bytes()
+
+	srv := newArchiveServer(t, archive)
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "lit")
+	_ = os.WriteFile(targetPath, []byte("OLD"), 0o755)
+
+	tgt := &Target{Artifact: Artifact{URL: srv.URL + "/x.tar.gz", SHA256: sha256Hex(archive)}}
+	err := (&HTTPInstaller{}).Install(context.Background(), tgt, targetPath)
+	if err == nil || !strings.Contains(err.Error(), "uncompressed") {
+		t.Fatalf("expected uncompressed-cap rejection, got %v", err)
+	}
+}
+
 func TestHTTPInstallerEnforcesSizeCap(t *testing.T) {
 	// Server streams strictly more than maxArchiveBytes (in 1 MiB chunks); the
 	// installer must refuse with the size-cap error before SHA256 verification.
