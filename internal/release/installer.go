@@ -192,26 +192,39 @@ const defaultInstallerTimeout = 5 * time.Minute
 const maxTotalUncompressedBytes = 2 * maxUncompressedBytes
 
 // boundedReader wraps a Reader and returns errStreamCap once total bytes
-// read exceed cap. Used to refuse archive streams whose total uncompressed
-// size would balloon past maxTotalUncompressedBytes regardless of per-entry
-// sizes.
+// read STRICTLY EXCEED cap. A stream of exactly cap bytes followed by a
+// clean EOF passes through unchanged — that's the legitimate boundary.
+// Used to refuse archive streams whose total uncompressed size would
+// balloon past maxTotalUncompressedBytes regardless of per-entry sizes.
+//
+// [LAW:enumeration-gap] The implementation mirrors the compressed-bytes
+// pattern in downloadAndVerify: allow reading up to cap+1 internally, so
+// "exactly at the limit" and "over the limit" are mechanically
+// distinguishable. A `>= cap` short-circuit would surface a spurious cap
+// violation when the stream's true length is exactly cap.
 type boundedReader struct {
-	r     io.Reader
-	cap   int64
-	read  int64
+	r    io.Reader
+	cap  int64
+	read int64
 }
 
 var errStreamCap = errors.New("release: uncompressed archive stream exceeds total cap")
 
 func (b *boundedReader) Read(p []byte) (int, error) {
-	if b.read >= b.cap {
+	if b.read > b.cap {
 		return 0, errStreamCap
 	}
-	if int64(len(p)) > b.cap-b.read {
-		p = p[:b.cap-b.read]
+	// Allow reading one byte past cap so the next call's check can
+	// distinguish "stream ended exactly at cap" from "stream had more."
+	remaining := b.cap + 1 - b.read
+	if int64(len(p)) > remaining {
+		p = p[:remaining]
 	}
 	n, err := b.r.Read(p)
 	b.read += int64(n)
+	if b.read > b.cap {
+		return n, errStreamCap
+	}
 	return n, err
 }
 

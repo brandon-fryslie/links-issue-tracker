@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -261,6 +262,48 @@ func TestHTTPInstallerRejectsOversizedEntryHeader(t *testing.T) {
 	err := (&HTTPInstaller{}).Install(context.Background(), tgt, targetPath)
 	if err == nil || !strings.Contains(err.Error(), "uncompressed") {
 		t.Fatalf("expected uncompressed-cap rejection, got %v", err)
+	}
+}
+
+func TestBoundedReaderEdgeCases(t *testing.T) {
+	// Exactly cap bytes followed by EOF must pass through cleanly.
+	exact := bytes.NewReader(make([]byte, 100))
+	br := &boundedReader{r: exact, cap: 100}
+	buf := make([]byte, 200)
+	n, err := br.Read(buf)
+	if n != 100 {
+		t.Fatalf("first read n=%d, want 100", n)
+	}
+	// err can be nil or io.EOF here depending on bytes.Reader's behavior;
+	// what matters is that the second read returns clean EOF, not errStreamCap.
+	if err != nil && err != io.EOF {
+		t.Fatalf("first read unexpected err: %v", err)
+	}
+	n, err = br.Read(buf)
+	if n != 0 || err != io.EOF {
+		t.Errorf("at-cap second read = (%d, %v); want (0, io.EOF)", n, err)
+	}
+
+	// One byte past cap must surface errStreamCap.
+	over := bytes.NewReader(make([]byte, 101))
+	br2 := &boundedReader{r: over, cap: 100}
+	// Drain via small reads to exercise the overflow check.
+	total := 0
+	for {
+		n, err := br2.Read(buf[:50])
+		total += n
+		if err == errStreamCap {
+			break
+		}
+		if err == io.EOF {
+			t.Fatalf("expected errStreamCap, got io.EOF after %d bytes", total)
+		}
+		if err != nil {
+			t.Fatalf("unexpected err: %v", err)
+		}
+	}
+	if total < 100 {
+		t.Errorf("expected to read at least cap bytes before overflow; got %d", total)
 	}
 }
 
