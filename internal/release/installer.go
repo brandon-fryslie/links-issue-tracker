@@ -125,6 +125,16 @@ func downloadAndVerify(ctx context.Context, client *http.Client, a Artifact) ([]
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("release: fetch %s: HTTP %d", a.URL, resp.StatusCode)
 	}
+	// [LAW:types-are-the-program] Decode the expected SHA256 BEFORE downloading
+	// so a malformed manifest digest fails fast (and never lets us trust a
+	// post-download comparison that would silently never match). The expected
+	// digest is a 32-byte value; the hex string is one representation. Decoding
+	// to bytes also makes the comparison case-insensitive by construction —
+	// hex.DecodeString accepts both cases.
+	expected, err := hex.DecodeString(a.SHA256)
+	if err != nil || len(expected) != sha256.Size {
+		return nil, fmt.Errorf("release: artifact SHA256 %q is not a 64-char hex digest", a.SHA256)
+	}
 	h := sha256.New()
 	// [LAW:enumeration-gap] LimitReader caps the body at maxArchiveBytes+1 so
 	// we can distinguish "exactly at the limit" from "exceeded": if ReadAll
@@ -137,9 +147,8 @@ func downloadAndVerify(ctx context.Context, client *http.Client, a Artifact) ([]
 	if int64(len(body)) > maxArchiveBytes {
 		return nil, fmt.Errorf("release: archive %s exceeds %d byte cap", a.URL, maxArchiveBytes)
 	}
-	actual := hex.EncodeToString(h.Sum(nil))
-	if actual != a.SHA256 {
-		return nil, fmt.Errorf("release: SHA256 mismatch for %s: expected %s, got %s", a.URL, a.SHA256, actual)
+	if actual := h.Sum(nil); !bytes.Equal(actual, expected) {
+		return nil, fmt.Errorf("release: SHA256 mismatch for %s: expected %s, got %s", a.URL, a.SHA256, hex.EncodeToString(actual))
 	}
 	return body, nil
 }

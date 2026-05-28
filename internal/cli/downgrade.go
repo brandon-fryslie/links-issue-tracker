@@ -35,19 +35,32 @@ import (
 // [LAW:no-mode-explosion] One flag (--to). No --dry-run, --force, or
 // --skip-snapshot; each would have to earn its way via a concrete user need.
 func runDowngrade(ctx context.Context, stdout io.Writer, ap *app.App, args []string) error {
-	return runDowngradeWith(ctx, stdout, ap, args, &release.HTTPResolver{}, &release.HTTPInstaller{})
+	return runDowngradeWith(ctx, stdout, ap.Store, args, &release.HTTPResolver{}, &release.HTTPInstaller{}, currentBinaryPath)
 }
 
-// runDowngradeWith is the body parameterised over Resolver and Installer so
+// schemaDowngrader is the schema-side dependency runDowngradeWith calls. The
+// production implementation is *store.Store; tests substitute a fake.
+//
+// [LAW:types-are-the-program] The CLI doesn't need the full *store.Store API
+// for downgrade; it needs exactly this verb. Narrowing the dependency to the
+// one method that's used makes the pipeline testable without a real Dolt
+// workspace and prevents callers from coupling to incidental Store methods.
+type schemaDowngrader interface {
+	Downgrade(ctx context.Context, targetSchemaVersion int64) error
+}
+
+// runDowngradeWith is the body parameterised over the typed dependencies so
 // tests can substitute fakes. The exported runDowngrade picks the production
-// defaults.
+// implementations: ap.Store for the schema side, HTTPResolver/HTTPInstaller
+// for the release side, and currentBinaryPath for binary-path resolution.
 func runDowngradeWith(
 	ctx context.Context,
 	stdout io.Writer,
-	ap *app.App,
+	store schemaDowngrader,
 	args []string,
 	resolver release.Resolver,
 	installer release.Installer,
+	binPathFn func() (string, error),
 ) error {
 	fs := newCobraFlagSet("downgrade")
 	to := fs.String("to", "", "Target binary version (v-prefixed git tag, e.g. v0.4.1)")
@@ -69,11 +82,11 @@ func runDowngradeWith(
 		return err
 	}
 
-	if err := ap.Store.Downgrade(ctx, target.Manifest.Schema.Max); err != nil {
+	if err := store.Downgrade(ctx, target.Manifest.Schema.Max); err != nil {
 		return err
 	}
 
-	binPath, err := currentBinaryPath()
+	binPath, err := binPathFn()
 	if err != nil {
 		return fmt.Errorf("downgrade: resolve current binary: %w", err)
 	}
