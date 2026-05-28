@@ -25,12 +25,12 @@ func TestFreshOpenStampsBaselineVersion(t *testing.T) {
 	}
 	defer st.Close()
 
-	version, err := st.recordedMigrationVersion(ctx)
+	appliedVersion, err := st.recordedMigrationVersion(ctx)
 	if err != nil {
 		t.Fatalf("recordedMigrationVersion() error = %v", err)
 	}
-	if version != baselineVersion {
-		t.Fatalf("recorded version = %d, want %d", version, baselineVersion)
+	if appliedVersion != baselineVersion {
+		t.Fatalf("recorded version = %d, want %d", appliedVersion, baselineVersion)
 	}
 
 	log, err := doltcli.Run(ctx, filepath.Join(doltRoot, "links"), "log", "--oneline")
@@ -76,12 +76,12 @@ func TestPreGooseAdoptionStampsWithoutRerunningBaseline(t *testing.T) {
 	}
 	defer second.Close()
 
-	version, err := second.recordedMigrationVersion(ctx)
+	appliedVersion, err := second.recordedMigrationVersion(ctx)
 	if err != nil {
 		t.Fatalf("recordedMigrationVersion() error = %v", err)
 	}
-	if version != baselineVersion {
-		t.Fatalf("post-adoption version = %d, want %d", version, baselineVersion)
+	if appliedVersion != baselineVersion {
+		t.Fatalf("post-adoption version = %d, want %d", appliedVersion, baselineVersion)
 	}
 	var seeded string
 	if err := second.db.QueryRowContext(ctx, `SELECT title FROM issues WHERE id = 'keep-me'`).Scan(&seeded); err != nil {
