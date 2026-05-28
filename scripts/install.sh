@@ -285,12 +285,7 @@ case "$mode" in
                     exit 1
                 fi
                 ;;
-            mingw*|msys*|cygwin*) os="windows"; ext="zip"
-                # Same: windows not in the matrix yet (links-downgrade-t244.7).
-                echo "error: Windows is not currently in the release matrix" >&2
-                echo "       build from source: bash scripts/install.sh" >&2
-                exit 1
-                ;;
+            mingw*|msys*|cygwin*) os="windows"; ext="zip" ;;
             *) echo "error: unsupported OS: $os" >&2; exit 1 ;;
         esac
         archive="lit_${archive_version}_${os}_${arch}.${ext}"
