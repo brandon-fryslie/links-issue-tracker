@@ -1,0 +1,143 @@
+package migrations
+
+import (
+	"strings"
+	"testing"
+)
+
+// hasDownSection reports whether a goose migration file contains a `+goose Down`
+// section followed by at least one non-empty, non-comment SQL statement before
+// EOF or the next `+goose Up`.
+//
+// [LAW:types-are-the-program] "Migration is invertible" is a property of the
+// file's bytes; this predicate is the type-checker. A file that fails this
+// check is not a migration the downgrade pipeline can invert, and the CI gate
+// makes that an unrepresentable shape in the registry.
+//
+// [LAW:one-source-of-truth] The predicate works on the same bytes goose reads.
+// There is no parallel "registry of invertible migrations" that could drift.
+func hasDownSection(data []byte) bool {
+	lower := strings.ToLower(string(data))
+	idx := strings.Index(lower, "-- +goose down")
+	if idx < 0 {
+		return false
+	}
+	body := lower[idx+len("-- +goose down"):]
+	// Truncate at the next `+goose Up` marker (defensive — goose files are
+	// Up-then-Down by convention, but the predicate must not get confused if
+	// some future file embeds an Up after the Down).
+	if next := strings.Index(body, "-- +goose up"); next >= 0 {
+		body = body[:next]
+	}
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "--") {
+			continue
+		}
+		return true
+	}
+	return false
+}
+
+// TestEveryMigrationHasDownSection enforces the +goose Down discipline that
+// the lit-downgrade epic requires: every migration in the embedded registry
+// must ship a Down section with at least one statement, so goose.DownTo can
+// reverse arbitrary forward progress.
+//
+// [LAW:single-enforcer] This is the single static enforcer of the discipline;
+// no other code checks for Down-section presence. The runtime sibling
+// (TestEveryMigrationDownIsExercised, in internal/store) proves the section
+// is not merely present but also actually runs.
+func TestEveryMigrationHasDownSection(t *testing.T) {
+	entries, err := FS.ReadDir(".")
+	if err != nil {
+		t.Fatalf("read embedded registry: %v", err)
+	}
+	var sqlFiles int
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".sql") {
+			continue
+		}
+		sqlFiles++
+		data, err := FS.ReadFile(entry.Name())
+		if err != nil {
+			t.Fatalf("read %q: %v", entry.Name(), err)
+		}
+		if !hasDownSection(data) {
+			t.Errorf(`migration %q is missing a `+"`+goose Down`"+` section.
+
+Every migration in internal/store/migrations/ MUST ship a Down section so
+the lit downgrade pipeline (links-downgrade-t244) can invert it. The Down
+section must contain at least one non-empty, non-comment SQL statement
+between the `+"`-- +goose Down`"+` marker and EOF (or the next
+`+"`-- +goose Up`"+` marker).
+
+If this migration loses information (e.g. drops a column), the Down
+section should either reconstruct the schema with documented loss, or
+the migration's loss contract should be documented in
+internal/store/migrations/README.md. The presence of the Down section
+itself is non-negotiable.`, entry.Name())
+		}
+	}
+	if sqlFiles == 0 {
+		t.Fatal("no *.sql files found in embedded registry")
+	}
+}
+
+// TestHasDownSectionRejectsMissingShapes pins the predicate against synthetic
+// fixtures. A static checker is only useful if its rejection set is exactly the
+// shape the producer (goose convention) does NOT emit; without the negative
+// fixtures a buggy predicate could pass every real file by accident.
+func TestHasDownSectionRejectsMissingShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{
+			name: "up only — no down marker at all",
+			body: "-- +goose Up\nCREATE TABLE x (id INT);\n",
+			want: false,
+		},
+		{
+			name: "down marker present but empty body",
+			body: "-- +goose Up\nCREATE TABLE x (id INT);\n-- +goose Down\n",
+			want: false,
+		},
+		{
+			name: "down marker followed only by comments",
+			body: "-- +goose Up\nCREATE TABLE x (id INT);\n-- +goose Down\n-- nothing here\n-- still nothing\n",
+			want: false,
+		},
+		{
+			name: "down marker followed only by goose statement-block markers",
+			body: "-- +goose Up\nCREATE TABLE x (id INT);\n-- +goose Down\n-- +goose StatementBegin\n-- +goose StatementEnd\n",
+			want: false,
+		},
+		{
+			name: "down marker with a real DROP",
+			body: "-- +goose Up\nCREATE TABLE x (id INT);\n-- +goose Down\nDROP TABLE x;\n",
+			want: true,
+		},
+		{
+			name: "down marker with statement-block-wrapped DROP",
+			body: "-- +goose Up\nCREATE TABLE x (id INT);\n-- +goose Down\n-- +goose StatementBegin\nDROP TABLE x;\n-- +goose StatementEnd\n",
+			want: true,
+		},
+		{
+			name: "case-insensitive marker",
+			body: "-- +GOOSE UP\nCREATE TABLE x (id INT);\n-- +Goose Down\nDROP TABLE x;\n",
+			want: true,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := hasDownSection([]byte(tc.body)); got != tc.want {
+				t.Errorf("hasDownSection() = %v, want %v\nbody:\n%s", got, tc.want, tc.body)
+			}
+		})
+	}
+}
