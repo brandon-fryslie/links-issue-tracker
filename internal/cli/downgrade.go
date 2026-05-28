@@ -13,7 +13,6 @@ import (
 	"github.com/bmf/links-issue-tracker/internal/release"
 )
 
-
 // runDowngrade composes the schema-side Downgrade boundary (internal/store)
 // and the binary-side release pipeline (internal/release) into a single
 // user-facing command.

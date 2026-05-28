@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -235,8 +234,10 @@ func TestHTTPInstallerAcceptsTypeRegA(t *testing.T) {
 }
 
 func TestHTTPInstallerEnforcesSizeCap(t *testing.T) {
-	// Server streams maxArchiveBytes+1 bytes of zeros; installer must refuse
-	// before SHA256 verification (the response will never match any digest).
+	// Server streams strictly more than maxArchiveBytes (in 1 MiB chunks); the
+	// installer must refuse with the size-cap error before SHA256 verification.
+	// The exact overflow amount doesn't matter — any read past the cap trips
+	// the explicit overflow check.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		zero := make([]byte, 1<<20)
 		for written := 0; written <= maxArchiveBytes; written += len(zero) {
@@ -255,5 +256,3 @@ func TestHTTPInstallerEnforcesSizeCap(t *testing.T) {
 	}
 }
 
-// guard against an io.Reader being closed twice or similar regressions.
-var _ io.Reader = (*bytes.Reader)(nil)

@@ -37,12 +37,18 @@ type HTTPResolver struct {
 
 // Resolve fetches and parses the manifest, then selects the platform artifact.
 func (r *HTTPResolver) Resolve(ctx context.Context, tag, platform string) (*Target, error) {
+	// [LAW:single-enforcer] tag is interpolated directly into a URL path
+	// segment. The CLI happens to validate before calling, but the resolver
+	// is the boundary that owns URL safety — refuse here so any future
+	// in-process caller (not just the CLI) can't smuggle path traversal,
+	// fragment injection, or whitespace through the segment.
+	// [LAW:types-are-the-program] mkmanifest's -tag flag enforces the same
+	// accept shape; this is the consumer mirror.
 	if !strings.HasPrefix(tag, "v") {
-		// [LAW:types-are-the-program] tag is the v-prefixed git tag, mirroring
-		// mkmanifest's -tag flag — the segment `gh release create` publishes
-		// under. Reject the v-stripped form at the boundary so URL construction
-		// downstream cannot 404.
 		return nil, fmt.Errorf("release: tag must be v-prefixed (got %q)", tag)
+	}
+	if strings.ContainsAny(tag, `/\`) || strings.Contains(tag, "..") || strings.ContainsAny(tag, " \t\r\n") {
+		return nil, fmt.Errorf("release: tag %q is not a single URL path segment", tag)
 	}
 	base := r.BaseURL
 	if base == "" {
