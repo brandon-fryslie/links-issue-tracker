@@ -29,17 +29,58 @@ func hasDownSection(data []byte) bool {
 	if next := strings.Index(body, "-- +goose up"); next >= 0 {
 		body = body[:next]
 	}
+	// Strip /* ... */ block comments first (they may span lines). The Down
+	// section is rejected if everything between markers is whitespace and
+	// comments — the runtime gate cannot prove "this Down does work" if the
+	// section has no executable bytes.
+	body = stripBlockComments(body)
 	for _, line := range strings.Split(body, "\n") {
-		line = strings.TrimSpace(line)
+		line = strings.TrimSpace(stripLineComment(line))
 		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "--") {
 			continue
 		}
 		return true
 	}
 	return false
+}
+
+// stripBlockComments removes /* ... */ comment spans, including ones that
+// span multiple lines. Unterminated block comments are treated as comment to
+// EOF — the same shape MySQL's parser uses — so a runaway /* with no */ does
+// not silently slip through as "executable bytes."
+func stripBlockComments(s string) string {
+	var out strings.Builder
+	for {
+		i := strings.Index(s, "/*")
+		if i < 0 {
+			out.WriteString(s)
+			return out.String()
+		}
+		out.WriteString(s[:i])
+		s = s[i+2:]
+		j := strings.Index(s, "*/")
+		if j < 0 {
+			return out.String()
+		}
+		s = s[j+2:]
+	}
+}
+
+// stripLineComment trims trailing line comments (`-- ...` or `# ...`). Both
+// forms are valid in MySQL / Dolt; goose itself only writes `--`, but the
+// gate must reject any comment-only Down regardless of which form a future
+// author reaches for. Quoted-string handling is omitted because no migration
+// has a reason to embed `--` or `#` inside a string literal in the Down
+// section; if one does, it still has non-comment bytes left for the predicate
+// to find.
+func stripLineComment(line string) string {
+	if i := strings.Index(line, "--"); i >= 0 {
+		line = line[:i]
+	}
+	if i := strings.Index(line, "#"); i >= 0 {
+		line = line[:i]
+	}
+	return line
 }
 
 // TestEveryMigrationHasDownSection enforces the +goose Down discipline that
@@ -110,6 +151,21 @@ func TestHasDownSectionRejectsMissingShapes(t *testing.T) {
 		{
 			name: "down marker followed only by comments",
 			body: "-- +goose Up\nCREATE TABLE x (id INT);\n-- +goose Down\n-- nothing here\n-- still nothing\n",
+			want: false,
+		},
+		{
+			name: "down marker followed only by hash-style comments",
+			body: "-- +goose Up\nCREATE TABLE x (id INT);\n-- +goose Down\n# nothing here\n# still nothing\n",
+			want: false,
+		},
+		{
+			name: "down marker followed only by block comments",
+			body: "-- +goose Up\nCREATE TABLE x (id INT);\n-- +goose Down\n/* placeholder\n   spanning lines */\n",
+			want: false,
+		},
+		{
+			name: "down marker followed by mix of all comment styles — still no SQL",
+			body: "-- +goose Up\nCREATE TABLE x (id INT);\n-- +goose Down\n-- line\n# hash\n/* block */\n",
 			want: false,
 		},
 		{
