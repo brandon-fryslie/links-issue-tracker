@@ -109,9 +109,9 @@ type DowngradeBelowBaselineError struct {
 
 func (e *DowngradeBelowBaselineError) Error() string {
 	return fmt.Sprintf(
-		"cannot downgrade past baseline (v%d) — this would destroy the workspace; "+
+		"cannot downgrade to v%d: baseline is v%d — going below it would destroy the workspace; "+
 			"restore a pre-upgrade snapshot via `lit snapshots restore <name>` instead",
-		baselineVersion,
+		e.Target, baselineVersion,
 	)
 }
 
@@ -277,8 +277,11 @@ func (s *Store) applyDownMigrations(ctx context.Context, target int64) error {
 			}
 			return &downgradeMigrationFailedError{Version: current, Cause: err}
 		}
-		if result == nil || result.Source == nil {
+		if result == nil {
 			return fmt.Errorf("down-migrate v%d: goose returned nil result", current)
+		}
+		if result.Source == nil {
+			return fmt.Errorf("down-migrate v%d: goose result has nil Source", current)
 		}
 		if err := s.commitWorkingSet(ctx, downgradeCommitMessage(result)); err != nil {
 			return fmt.Errorf("commit downgrade revert of v%d: %w", result.Source.Version, err)
