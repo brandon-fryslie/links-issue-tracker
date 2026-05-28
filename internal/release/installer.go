@@ -35,6 +35,15 @@ type Installer interface {
 // constant is the consumer mirror of that producer convention.
 const BinaryName = "lit"
 
+// maxArchiveBytes bounds the in-memory archive size the installer accepts.
+// Current per-platform archives are ~10MB; 256MiB is generous headroom while
+// still refusing pathological responses that could OOM a workstation.
+//
+// [LAW:enumeration-gap] The accept-shape of "this is a release archive"
+// includes a size bound; without it any HTTP body — including a hostile one
+// — would flow into ReadAll. Refuse oversized inputs at the boundary.
+const maxArchiveBytes = 256 << 20
+
 // HTTPInstaller is the default Installer.
 type HTTPInstaller struct {
 	Client *http.Client // nil defaults to http.DefaultClient
@@ -117,9 +126,16 @@ func downloadAndVerify(ctx context.Context, client *http.Client, a Artifact) ([]
 		return nil, fmt.Errorf("release: fetch %s: HTTP %d", a.URL, resp.StatusCode)
 	}
 	h := sha256.New()
-	body, err := io.ReadAll(io.TeeReader(resp.Body, h))
+	// [LAW:enumeration-gap] LimitReader caps the body at maxArchiveBytes+1 so
+	// we can distinguish "exactly at the limit" from "exceeded": if ReadAll
+	// returns maxArchiveBytes+1 bytes, the source overflowed the cap.
+	limited := io.LimitReader(resp.Body, maxArchiveBytes+1)
+	body, err := io.ReadAll(io.TeeReader(limited, h))
 	if err != nil {
 		return nil, fmt.Errorf("release: read %s: %w", a.URL, err)
+	}
+	if int64(len(body)) > maxArchiveBytes {
+		return nil, fmt.Errorf("release: archive %s exceeds %d byte cap", a.URL, maxArchiveBytes)
 	}
 	actual := hex.EncodeToString(h.Sum(nil))
 	if actual != a.SHA256 {
@@ -159,11 +175,20 @@ func extractLitBinary(archive []byte, dest io.Writer) error {
 			strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
 			return fmt.Errorf("release: archive entry has unsafe path: %q", name)
 		}
-		if h.Typeflag != tar.TypeReg {
+		// tar.TypeRegA (NUL) is the historical alias for regular file; some
+		// writers still emit it. Accept both so otherwise-valid archives pass.
+		if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeRegA {
 			return fmt.Errorf("release: archive contains non-regular entry %q (type %c)", name, h.Typeflag)
 		}
 		if name != BinaryName {
 			continue
+		}
+		if found {
+			// [LAW:types-are-the-program] "exactly one lit entry" is the
+			// type-level claim the comment above makes; enforce it here so
+			// a second entry can't silently corrupt the extracted binary by
+			// appending.
+			return fmt.Errorf("release: archive contains multiple %q entries", BinaryName)
 		}
 		if _, err := io.Copy(dest, tr); err != nil {
 			return fmt.Errorf("release: extract %s: %w", BinaryName, err)

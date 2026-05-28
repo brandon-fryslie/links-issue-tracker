@@ -13,6 +13,7 @@ import (
 	"github.com/bmf/links-issue-tracker/internal/release"
 )
 
+
 // runDowngrade composes the schema-side Downgrade boundary (internal/store)
 // and the binary-side release pipeline (internal/release) into a single
 // user-facing command.
@@ -24,8 +25,8 @@ import (
 //     whose Error() carries the operator restore instruction.
 //  3. Resolve the running binary's real path (os.Executable + EvalSymlinks)
 //     and atomically install the prior binary there.
-//  4. syscall.Exec into the prior binary on Unix; on Windows print the one-
-//     command re-run instruction.
+//  4. Print the result (human or JSON) and return. The user's next shell
+//     prompt invokes the prior binary; no re-exec is needed.
 //
 // [LAW:single-enforcer] release.Resolver owns artifact resolution,
 // release.Installer owns binary install, store.Downgrade owns schema reverse.
@@ -94,21 +95,20 @@ func runDowngradeWith(
 		"schema":      fmt.Sprintf("%d", target.Manifest.Schema.Max),
 		"binary_path": binPath,
 	}
-	if err := printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
+	// [LAW:dataflow-not-control-flow] The post-install step is a single print.
+	// An earlier draft re-exec'd into the prior binary on Unix and printed a
+	// human re-run line on Windows, but both branches violated the --json
+	// contract (extra stdout after the JSON document) and added a platform
+	// mode for no measurable benefit — the rename has already happened, the
+	// user's next shell prompt runs the prior binary.
+	return printValue(stdout, payload, *jsonOut, func(w io.Writer, v any) error {
 		p := v.(map[string]string)
 		_, err := fmt.Fprintf(w,
-			"downgraded to %s (schema v%s) installed at %s\n",
+			"downgraded to %s (schema v%s) installed at %s\nre-run `lit version` to confirm.\n",
 			p["target"], p["schema"], p["binary_path"],
 		)
 		return err
-	}); err != nil {
-		return err
-	}
-
-	// Release the workspace before exec — the next process opens it fresh.
-	_ = ap.Close()
-
-	return execIntoBinary(binPath, append([]string{binPath}, "version"), os.Environ(), stdout)
+	})
 }
 
 // normalizeDowngradeTag accepts either "v0.4.1" or "0.4.1" and returns the

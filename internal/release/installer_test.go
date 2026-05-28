@@ -183,5 +183,77 @@ func TestHTTPInstallerArchiveMissingBinary(t *testing.T) {
 	}
 }
 
+func TestHTTPInstallerRejectsMultipleLitEntries(t *testing.T) {
+	// Two `lit` entries — extractLitBinary must refuse the second, not append.
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	for _, body := range []string{"FIRST", "SECOND"} {
+		_ = tw.WriteHeader(&tar.Header{Name: "lit", Mode: 0o755, Size: int64(len(body)), Typeflag: tar.TypeReg})
+		_, _ = tw.Write([]byte(body))
+	}
+	_ = tw.Close()
+	_ = gw.Close()
+	archive := buf.Bytes()
+
+	srv := newArchiveServer(t, archive)
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "lit")
+	_ = os.WriteFile(targetPath, []byte("OLD"), 0o755)
+
+	tgt := &Target{Artifact: Artifact{URL: srv.URL + "/x.tar.gz", SHA256: sha256Hex(archive)}}
+	err := (&HTTPInstaller{}).Install(context.Background(), tgt, targetPath)
+	if err == nil || !strings.Contains(err.Error(), "multiple") {
+		t.Fatalf("expected multiple-entry rejection, got %v", err)
+	}
+}
+
+func TestHTTPInstallerAcceptsTypeRegA(t *testing.T) {
+	var buf bytes.Buffer
+	gw := gzip.NewWriter(&buf)
+	tw := tar.NewWriter(gw)
+	body := "NEW"
+	_ = tw.WriteHeader(&tar.Header{Name: "lit", Mode: 0o755, Size: int64(len(body)), Typeflag: tar.TypeRegA})
+	_, _ = tw.Write([]byte(body))
+	_ = tw.Close()
+	_ = gw.Close()
+	archive := buf.Bytes()
+
+	srv := newArchiveServer(t, archive)
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "lit")
+	_ = os.WriteFile(targetPath, []byte("OLD"), 0o755)
+
+	tgt := &Target{Artifact: Artifact{URL: srv.URL + "/x.tar.gz", SHA256: sha256Hex(archive)}}
+	if err := (&HTTPInstaller{}).Install(context.Background(), tgt, targetPath); err != nil {
+		t.Fatalf("Install with TypeRegA: %v", err)
+	}
+	got, _ := os.ReadFile(targetPath)
+	if string(got) != "NEW" {
+		t.Errorf("contents: got %q want NEW", got)
+	}
+}
+
+func TestHTTPInstallerEnforcesSizeCap(t *testing.T) {
+	// Server streams maxArchiveBytes+1 bytes of zeros; installer must refuse
+	// before SHA256 verification (the response will never match any digest).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		zero := make([]byte, 1<<20)
+		for written := 0; written <= maxArchiveBytes; written += len(zero) {
+			_, _ = w.Write(zero)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	dir := t.TempDir()
+	targetPath := filepath.Join(dir, "lit")
+	_ = os.WriteFile(targetPath, []byte("OLD"), 0o755)
+
+	tgt := &Target{Artifact: Artifact{URL: srv.URL + "/x.tar.gz", SHA256: strings.Repeat("0", 64)}}
+	err := (&HTTPInstaller{}).Install(context.Background(), tgt, targetPath)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("expected size-cap refusal, got %v", err)
+	}
+}
+
 // guard against an io.Reader being closed twice or similar regressions.
 var _ io.Reader = (*bytes.Reader)(nil)

@@ -89,6 +89,33 @@ func TestHTTPResolverRejectsUnprefixedTag(t *testing.T) {
 	}
 }
 
+func TestHTTPResolverRejectsUnknownFields(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// version.Info-shaped payload with a stray field at the top level.
+		_, _ = w.Write([]byte(`{"version":"0.4.1","commit":"x","date":"y","is_dev":false,"schema_support":{"min":1,"max":1},"artifacts":[],"surprise":"hi"}`))
+	}))
+	t.Cleanup(srv.Close)
+	r := &HTTPResolver{BaseURL: srv.URL}
+	_, err := r.Resolve(context.Background(), "v0.4.1", "darwin/arm64")
+	if err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Fatalf("expected unknown-field rejection, got %v", err)
+	}
+}
+
+func TestHTTPResolverRejectsTrailingData(t *testing.T) {
+	m := fixtureManifest()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(&m)
+		_, _ = w.Write([]byte(`{"second":"doc"}`))
+	}))
+	t.Cleanup(srv.Close)
+	r := &HTTPResolver{BaseURL: srv.URL}
+	_, err := r.Resolve(context.Background(), "v0.4.1", "darwin/arm64")
+	if err == nil || !strings.Contains(err.Error(), "trailing") {
+		t.Fatalf("expected trailing-data rejection, got %v", err)
+	}
+}
+
 func TestHTTPResolver404IsSurfaced(t *testing.T) {
 	srv := newManifestServer(t, "v0.4.2", fixtureManifest(), http.StatusNotFound)
 	r := &HTTPResolver{BaseURL: srv.URL}

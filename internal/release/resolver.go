@@ -66,9 +66,19 @@ func (r *HTTPResolver) Resolve(ctx context.Context, tag, platform string) (*Targ
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 256))
 		return nil, fmt.Errorf("release: fetch %s: HTTP %d: %s", url, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
+	// [LAW:types-are-the-program] Manifest decoding is a trust boundary — the
+	// JSON comes from the network. DisallowUnknownFields rejects schema drift
+	// (a field added in a future producer without a consumer-side migration);
+	// the trailing-data check rejects multi-document or junk-suffix payloads.
+	// Both refuse silently-different-shape inputs by construction.
+	dec := json.NewDecoder(io.LimitReader(resp.Body, 1<<20))
+	dec.DisallowUnknownFields()
 	var m Manifest
-	if err := json.NewDecoder(resp.Body).Decode(&m); err != nil {
+	if err := dec.Decode(&m); err != nil {
 		return nil, fmt.Errorf("release: decode %s: %w", url, err)
+	}
+	if dec.More() {
+		return nil, fmt.Errorf("release: decode %s: unexpected trailing data after manifest", url)
 	}
 	artifact, err := SelectArtifact(m, platform)
 	if err != nil {
