@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Installer downloads, verifies, and atomically installs the binary the Target
@@ -68,7 +69,8 @@ func (i *HTTPInstaller) Install(ctx context.Context, target *Target, targetPath 
 	}
 	client := i.Client
 	if client == nil {
-		client = http.DefaultClient
+		// Bounded default — http.DefaultClient is shared and has no Timeout.
+		client = &http.Client{Timeout: defaultInstallerTimeout}
 	}
 
 	// [LAW:dataflow-not-control-flow] Create the temp file BEFORE downloading
@@ -170,6 +172,17 @@ func downloadAndVerify(ctx context.Context, client *http.Client, a Artifact) ([]
 // bound expansion; the trust-boundary accept shape must include the
 // uncompressed bound too, or a 1 MiB tar.gz of zeros could fill the disk.
 const maxUncompressedBytes = 256 << 20
+
+// defaultInstallerTimeout bounds a single archive download end-to-end. The
+// per-platform archives are ~15 MiB today; 5 minutes is generous on a slow
+// link without allowing an indefinite hang. CLI passes context.Background()
+// at time of writing, so without this bound a stalled server would wedge
+// `lit downgrade` forever.
+//
+// [LAW:enumeration-gap] The accept shape of "an HTTP archive download"
+// includes a deadline. http.DefaultClient has none; the boundary needs
+// its own bounded default.
+const defaultInstallerTimeout = 5 * time.Minute
 
 // maxTotalUncompressedBytes bounds the SUM of bytes read from the gunzip
 // stream while scanning the archive. The per-entry cap alone can't catch a

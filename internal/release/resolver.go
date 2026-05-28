@@ -9,19 +9,34 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 )
 
-// tagAcceptPattern is the strongest theorem about a release tag that's still
-// true: leading "v" followed by goreleaser's semver-with-optional-prerelease
-// shape, using only characters that survive a URL path segment unchanged.
-// Mirrors mkmanifest's -tag accept shape but tightens it to a character
-// whitelist so URL metacharacters (?, #, %, etc.) are refused by construction
-// rather than by an ever-growing denylist.
+// tagAcceptPattern enforces a URL-safe single-path-segment shape: leading
+// "v" followed by one or more characters from a fixed whitelist
+// ([A-Za-z0-9._+-]). It does NOT enforce strict semver — `vfoo` and
+// `v1.2.bar` pass the check; the resolver's job is URL safety, and any
+// shape-not-published-by-the-pipeline 404s when fetched. mkmanifest's
+// producer-side validator is the semver authority; this is the consumer
+// mirror that guarantees what gets interpolated into the URL can't be a
+// URL metacharacter (?, #, %, etc.), whitespace, or a path-traversal
+// sequence.
 //
 // [LAW:types-are-the-program] Whitelist > denylist for boundary types:
-// "what the producer actually emits" is finite; "what the producer doesn't
-// emit" is infinite and can never be enumerated correctly.
+// "what survives URL interpolation cleanly" is finite; "what doesn't" is
+// infinite and can never be enumerated correctly.
 var tagAcceptPattern = regexp.MustCompile(`^v[A-Za-z0-9._+-]+$`)
+
+// defaultResolverTimeout bounds a single manifest fetch. Manifests are small
+// JSON files (well under 1 MiB); 60s is generous on a slow link without
+// allowing an indefinite hang. The CLI calls with context.Background() at
+// time of writing, so without this bound a stalled server would wedge the
+// command forever.
+//
+// [LAW:enumeration-gap] The accept shape of "an HTTP manifest fetch"
+// includes a deadline. http.DefaultClient has none; the boundary needs
+// its own bounded default.
+const defaultResolverTimeout = 60 * time.Second
 
 // Resolver translates a release tag + platform into the Target the installer
 // will consume.
@@ -73,7 +88,8 @@ func (r *HTTPResolver) Resolve(ctx context.Context, tag, platform string) (*Targ
 	}
 	client := r.Client
 	if client == nil {
-		client = http.DefaultClient
+		// Bounded default — http.DefaultClient is shared and has no Timeout.
+		client = &http.Client{Timeout: defaultResolverTimeout}
 	}
 	url := fmt.Sprintf("%s/%s/release-manifest.json", strings.TrimRight(base, "/"), tag)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
