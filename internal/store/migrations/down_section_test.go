@@ -108,7 +108,7 @@ func TestEveryMigrationHasDownSection(t *testing.T) {
 			t.Fatalf("read %q: %v", entry.Name(), err)
 		}
 		if !hasDownSection(data) {
-			t.Errorf(`migration %q is missing a `+"`+goose Down`"+` section.
+			t.Errorf(`migration %q has no `+"`+goose Down`"+` section, or its Down body is empty / comment-only.
 
 Every migration in internal/store/migrations/ MUST ship a Down section so
 the lit downgrade pipeline (links-downgrade-t244) can invert it. The Down
