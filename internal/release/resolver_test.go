@@ -104,6 +104,10 @@ func TestHTTPResolverRejectsUnknownFields(t *testing.T) {
 
 func TestHTTPResolverRejectsTrailingData(t *testing.T) {
 	m := fixtureManifest()
+	// Two adjacent top-level JSON documents — the prior `dec.More()` check
+	// returned false for this case (More() only sees nested elements), so a
+	// second `Decode` is what catches it. This test fails if the resolver
+	// regresses to the More()-based check.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(&m)
 		_, _ = w.Write([]byte(`{"second":"doc"}`))
@@ -113,6 +117,23 @@ func TestHTTPResolverRejectsTrailingData(t *testing.T) {
 	_, err := r.Resolve(context.Background(), "v0.4.1", "darwin/arm64")
 	if err == nil || !strings.Contains(err.Error(), "trailing") {
 		t.Fatalf("expected trailing-data rejection, got %v", err)
+	}
+}
+
+func TestHTTPResolverRejectsURLMetacharsInTag(t *testing.T) {
+	r := &HTTPResolver{BaseURL: "http://example.invalid"}
+	for _, bad := range []string{
+		"v0.4.1?inject=1",
+		"v0.4.1#frag",
+		"v0.4.1%2F..",
+		"v0.4.1 ",
+		"v",     // empty after prefix
+		"v..",   // path-traversal-shaped
+		"v/0.1", // separator
+	} {
+		if _, err := r.Resolve(context.Background(), bad, "darwin/arm64"); err == nil {
+			t.Errorf("Resolve(%q) accepted; want refusal", bad)
+		}
 	}
 }
 

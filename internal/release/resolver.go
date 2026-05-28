@@ -3,11 +3,25 @@ package release
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 )
+
+// tagAcceptPattern is the strongest theorem about a release tag that's still
+// true: leading "v" followed by goreleaser's semver-with-optional-prerelease
+// shape, using only characters that survive a URL path segment unchanged.
+// Mirrors mkmanifest's -tag accept shape but tightens it to a character
+// whitelist so URL metacharacters (?, #, %, etc.) are refused by construction
+// rather than by an ever-growing denylist.
+//
+// [LAW:types-are-the-program] Whitelist > denylist for boundary types:
+// "what the producer actually emits" is finite; "what the producer doesn't
+// emit" is infinite and can never be enumerated correctly.
+var tagAcceptPattern = regexp.MustCompile(`^v[A-Za-z0-9._+-]+$`)
 
 // Resolver translates a release tag + platform into the Target the installer
 // will consume.
@@ -47,8 +61,11 @@ func (r *HTTPResolver) Resolve(ctx context.Context, tag, platform string) (*Targ
 	if !strings.HasPrefix(tag, "v") {
 		return nil, fmt.Errorf("release: tag must be v-prefixed (got %q)", tag)
 	}
-	if strings.ContainsAny(tag, `/\`) || strings.Contains(tag, "..") || strings.ContainsAny(tag, " \t\r\n") {
-		return nil, fmt.Errorf("release: tag %q is not a single URL path segment", tag)
+	if !tagAcceptPattern.MatchString(tag) {
+		return nil, fmt.Errorf("release: tag %q must match %s (v-prefix + alphanumerics, dots, dashes, underscores, plus)", tag, tagAcceptPattern)
+	}
+	if strings.Contains(tag, "..") {
+		return nil, fmt.Errorf("release: tag %q contains path-traversal sequence", tag)
 	}
 	base := r.BaseURL
 	if base == "" {
@@ -83,8 +100,19 @@ func (r *HTTPResolver) Resolve(ctx context.Context, tag, platform string) (*Targ
 	if err := dec.Decode(&m); err != nil {
 		return nil, fmt.Errorf("release: decode %s: %w", url, err)
 	}
-	if dec.More() {
-		return nil, fmt.Errorf("release: decode %s: unexpected trailing data after manifest", url)
+	// dec.More() reports nested-element pendingness, not top-level trailing
+	// content; a second Decode is the correct way to assert "manifest is the
+	// only document on the stream." io.EOF means clean exit; anything else
+	// (a second object, junk bytes) is a refusal.
+	var trailing json.RawMessage
+	err = dec.Decode(&trailing)
+	switch {
+	case errors.Is(err, io.EOF):
+		// clean — nothing followed the manifest
+	case err == nil:
+		return nil, fmt.Errorf("release: decode %s: unexpected trailing JSON after manifest", url)
+	default:
+		return nil, fmt.Errorf("release: decode %s: unexpected trailing data after manifest: %w", url, err)
 	}
 	artifact, err := SelectArtifact(m, platform)
 	if err != nil {
