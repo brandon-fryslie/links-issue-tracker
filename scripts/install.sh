@@ -407,6 +407,17 @@ case "$mode" in
             echo "error: extracted archive did not contain a '$BIN_NAME' binary" >&2
             exit 1
         fi
+        # Zip's mode bits aren't reliably preserved (the windows path uses
+        # `unzip`, and even POSIX tar archives can lose +x under restrictive
+        # umask). Set the executable bit explicitly before validating so a
+        # successful install always yields a runnable binary. mingw/msys
+        # bash treats `chmod +x` on `.exe` as a no-op without erroring; `-x`
+        # on `.exe` returns true regardless of mode bits.
+        chmod +x "$tmp/$BIN_NAME"
+        if [ ! -x "$tmp/$BIN_NAME" ]; then
+            echo "error: extracted '$BIN_NAME' is not executable" >&2
+            exit 1
+        fi
 
         # Atomic rename within $TARGET_DIR (mktemp put us on the same FS).
         mv -f "$tmp/$BIN_NAME" "$TARGET_DIR/$BIN_NAME"
