@@ -299,6 +299,23 @@ case "$mode" in
             mingw*|msys*|cygwin*) os="windows"; ext="zip" ;;
             *) echo "error: unsupported OS: $os" >&2; exit 1 ;;
         esac
+        # Probe the extractor for the chosen ext explicitly so a missing
+        # tool gets a targeted install hint instead of `set -e` surfacing
+        # a generic "command not found" later. Mirrors the curl probe shape.
+        case "$ext" in
+            tar.gz)
+                if ! command -v tar >/dev/null 2>&1; then
+                    echo "error: release-download mode requires tar to extract '${ext}' archives" >&2
+                    exit 1
+                fi
+                ;;
+            zip)
+                if ! command -v unzip >/dev/null 2>&1; then
+                    echo "error: release-download mode requires unzip to extract '${ext}' archives (install unzip in your Git Bash/MSYS environment)" >&2
+                    exit 1
+                fi
+                ;;
+        esac
         archive="lit_${archive_version}_${os}_${arch}.${ext}"
         url="${REPO_DOWNLOAD_BASE}/${release_tag}/${archive}"
         checksums_url="${REPO_DOWNLOAD_BASE}/${release_tag}/checksums.txt"
