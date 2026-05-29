@@ -77,22 +77,18 @@ RUN printf '#!/bin/sh\nexec zig ar "$@"\n' > /usr/local/bin/zig-ar \
     && chmod +x /usr/local/bin/zig-ar /usr/local/bin/zig-ranlib
 
 # zig macOS cross-compile stubs — header and library shims that zig's bundled
-# SDK omits. [LAW:one-source-of-truth] all stubs live here; the darwin wrapper
-# scripts below inject them via -isystem / -L so every darwin compile+link
-# invocation sees them without any per-callsite coordination.
+# SDK omits. [LAW:one-source-of-truth] stubs live in build/zig-macos-stubs/;
+# the darwin wrapper scripts below inject them via -isystem / -L so every
+# darwin compile+link invocation sees them without per-callsite coordination.
 #
 # tzfile.h: ICU 75.1 putil.cpp includes it unconditionally under __APPLE__;
 #   zig's SDK dropped it in modern macOS. Provides TZDIR + TZDEFAULT.
 # libresolv.tbd: Go's net package links -lresolv; zig validates library
 #   existence before invoking its linker, searching only explicit -L paths.
-#   Without a stub it fails with "unable to find dynamic system library resolv".
 #   The TBD stub tells zig "this dylib exists at /usr/lib/libresolv.9.dylib";
-#   all symbols are resolved at runtime from macOS's libSystem/libresolv.
-RUN mkdir -p /usr/local/include/zig-macos-stubs /usr/local/lib/zig-macos-stubs \
-    && printf '/* tzfile.h stub: ICU needs TZDIR and TZDEFAULT */\n#ifndef TZFILE_H\n#define TZFILE_H\n#ifndef TZDIR\n#define TZDIR "/var/db/timezone/zoneinfo"\n#endif\n#ifndef TZDEFAULT\n#define TZDEFAULT "/etc/localtime"\n#endif\n#endif\n' \
-        > /usr/local/include/zig-macos-stubs/tzfile.h \
-    && printf '--- !tapi-tbd\ntbd-version:     4\ntargets:         [ arm64-macos, x86_64-macos ]\ninstall-name:    '"'"'/usr/lib/libresolv.9.dylib'"'"'\ncurrent-version: 1.0\ncompatibility-version: 1.0\nexports:\n  - targets:         [ arm64-macos, x86_64-macos ]\n    symbols:         [ dn_comp, dn_expand, dn_skipname, res_close, res_getservers, res_init, res_mkquery, res_ndestroy, res_ninit, res_nmkquery, res_nquery, res_nsearch, res_nsend, res_query, res_search, res_send, res_setservers ]\n...\n' \
-        > /usr/local/lib/zig-macos-stubs/libresolv.tbd
+#   symbols resolve at runtime from macOS's libresolv/libSystem.
+COPY build/zig-macos-stubs/tzfile.h    /usr/local/include/zig-macos-stubs/tzfile.h
+COPY build/zig-macos-stubs/libresolv.tbd /usr/local/lib/zig-macos-stubs/libresolv.tbd
 
 # Create zig cc/c++ wrappers for each cross-compile target.
 # Names match the CC/CXX env entries in .goreleaser.yml.
