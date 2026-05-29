@@ -12,6 +12,11 @@
 #   $6 = AR  — archiver command (e.g. `zig-ar`, `aarch64-linux-gnu-ar`).
 #        Must be a single executable name or path — no embedded spaces.
 #   $7 = RANLIB — ranlib command (e.g. `zig-ranlib`). Same constraint as AR.
+#   $8 = extra_cppflags (optional) — extra -D/-I flags appended to CPPFLAGS
+#        before ./configure. Use to override ICU's platform.h defaults when
+#        the cross-toolchain's SDK differs from what ICU expects.
+#        Example: "-DU_HAVE_TZFILE_H=0" for zig-based macOS targets whose
+#        bundled SDK omits tzfile.h.
 #
 # Reads:
 #   /tmp/icu-build/src/                       — ICU source tree
@@ -28,6 +33,7 @@
 set -euo pipefail
 
 goos="$1"; goarch="$2"; triplet="$3"; cc="$4"; cxx="$5"; ar="$6"; ranlib="$7"
+extra_cppflags="${8:-}"
 prefix="/opt/icu/${goos}_${goarch}"
 builddir="/tmp/icu-build/cross-${goos}-${goarch}"
 
@@ -35,7 +41,7 @@ echo "=== ICU cross-build for ${goos}/${goarch}"
 echo "    host=${triplet} cc=${cc} ar=${ar} ranlib=${ranlib}"
 cp -r /tmp/icu-build/src "$builddir"
 cd "$builddir/source"
-CC="$cc" CXX="$cxx" AR="$ar" RANLIB="$ranlib" \
+CC="$cc" CXX="$cxx" AR="$ar" RANLIB="$ranlib" CPPFLAGS="${extra_cppflags}" \
     ./configure --host="$triplet" --prefix="$prefix" \
         --with-cross-build=/tmp/icu-build/native-build/source \
         --enable-static --disable-shared \

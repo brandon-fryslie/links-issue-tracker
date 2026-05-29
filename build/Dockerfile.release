@@ -140,10 +140,15 @@ RUN icu-cross-build windows amd64 \
 # Stage: cross-darwin-arm64
 # -----------------------------------------------------------------------------
 FROM native-icu AS cross-darwin-arm64
+# [LAW:one-source-of-truth] -DU_HAVE_TZFILE_H=0: zig's bundled macOS SDK does
+# not include tzfile.h (removed in modern Apple SDK releases). ICU's platform.h
+# hardcodes U_HAVE_TZFILE_H=1 for any __APPLE__ target via an #ifndef guard,
+# so a command-line -D override suppresses the inclusion cleanly.
 RUN icu-cross-build darwin arm64 \
     aarch64-apple-darwin \
     zig-cc-aarch64-apple-darwin zig-cxx-aarch64-apple-darwin \
-    zig-ar zig-ranlib
+    zig-ar zig-ranlib \
+    "-DU_HAVE_TZFILE_H=0"
 
 # -----------------------------------------------------------------------------
 # Stage: cross-darwin-amd64
@@ -152,7 +157,8 @@ FROM native-icu AS cross-darwin-amd64
 RUN icu-cross-build darwin amd64 \
     x86_64-apple-darwin \
     zig-cc-x86_64-apple-darwin zig-cxx-x86_64-apple-darwin \
-    zig-ar zig-ranlib
+    zig-ar zig-ranlib \
+    "-DU_HAVE_TZFILE_H=0"
 
 # -----------------------------------------------------------------------------
 # Stage: final
