@@ -1,16 +1,15 @@
 # goreleaser config for lit.
 #
-# CONFIG VERSION: goreleaser v2 syntax. The cross-compile image tag is
-# `goreleaser-cross:v1.26.2-3` — that "v1.x.y" naming is the cross-image
-# release line, NOT the bundled goreleaser version. The image bundles
-# goreleaser v2 (the v1.26.2-3 build picked up "feat: bump goreleaser to
-# v2.16.0" from goreleaser-cross master). release-validate proved this:
-# trying to run it without `version: 2` here failed with "only version: 2
-# configuration files are supported". Do not be tempted by the v1 tag name.
+# CONFIG VERSION: goreleaser v2 syntax. `version: 2` below is required —
+# release-validate proved it: running without it fails with "only version: 2
+# configuration files are supported". The release build runs goreleaser inside
+# build/Dockerfile.release, which installs goreleaser v2.16.0 + zig 0.14.0 as
+# the single cross-toolchain (a pinned macOS SDK supplies the Apple frameworks
+# zig omits, link-only).
 #
-# CGO is required by gozstd in Dolt; the cross image owns the per-target C
-# toolchains (osxcross / mingw / glibc), invoked via the per-target CC env
-# entries below.
+# CGO is required by gozstd in Dolt; that Dockerfile image owns the per-target C
+# toolchains (zig cc for darwin + windows + linux/arm64, native gcc for
+# linux/amd64), invoked via the per-target CC env entries below.
 #
 # [LAW:one-source-of-truth] The version/commit/date a release reports come from
 # a single place: the ldflags injected here. internal/version.{Version,Commit,Date}

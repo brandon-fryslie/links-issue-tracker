@@ -36,15 +36,25 @@
 # [LAW:one-source-of-truth] ICU version and tool versions are pinned via
 # build args; .goreleaser.yml does not duplicate them.
 
+# Every downloaded toolchain/source below is pinned by SHA256 and verified
+# before extraction — these inputs compile the published release binaries, so a
+# tampered/substituted asset would silently compromise every release. The
+# version and its SHA256 are a pair: bump them together, or the verify step
+# fails loudly. [LAW:one-source-of-truth] the digest is the authoritative
+# identity of the bytes; the version string is just a convenience label.
 ARG GO_VERSION=1.25.7
 ARG GORELEASER_VERSION=v2.16.0
+ARG GORELEASER_SHA256=eaae05b5eba07533bd0f06846b68c808399504784df00c62eb219541fc04e5e2
 ARG ZIG_VERSION=0.14.0
+ARG ZIG_SHA256=473ec26806133cf4d1918caf1a410f8403a13d979726a9045b421b685031a982
 ARG ICU_MAJOR=75
 ARG ICU_MINOR=1
+ARG ICU_SHA256=cb968df3e4d2e87e8b11c49a5d01c787bd13b9545280fc6642f826527618caef
 # Pinned macOS SDK supplying the Apple frameworks zig omits. Used link-only by
 # the darwin wrappers below; building for older deployment targets (10.15/11.0,
 # set by the zig target triple) against a newer SDK is supported via availability.
 ARG MACOS_SDK_VERSION=13.3
+ARG MACOS_SDK_SHA256=518e35eae6039b3f64e8025f4525c1c43786cc5cf39459d609852faf091e34be
 
 # -----------------------------------------------------------------------------
 # Stage: base
@@ -54,10 +64,14 @@ ARG MACOS_SDK_VERSION=13.3
 FROM golang:${GO_VERSION}-bookworm AS base
 
 ARG GORELEASER_VERSION
+ARG GORELEASER_SHA256
 ARG ZIG_VERSION
+ARG ZIG_SHA256
 ARG ICU_MAJOR
 ARG ICU_MINOR
+ARG ICU_SHA256
 ARG MACOS_SDK_VERSION
+ARG MACOS_SDK_SHA256
 
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
         autoconf \
@@ -72,7 +86,10 @@ RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-ins
 # Install goreleaser (v2 binary release for Linux x86_64).
 RUN curl -fsSL \
       "https://github.com/goreleaser/goreleaser/releases/download/${GORELEASER_VERSION}/goreleaser_Linux_x86_64.tar.gz" \
-      | tar -xz -C /usr/local/bin goreleaser \
+      -o /tmp/goreleaser.tar.gz \
+    && echo "${GORELEASER_SHA256}  /tmp/goreleaser.tar.gz" | sha256sum -c - \
+    && tar -xz -C /usr/local/bin -f /tmp/goreleaser.tar.gz goreleaser \
+    && rm /tmp/goreleaser.tar.gz \
     && chmod +x /usr/local/bin/goreleaser
 
 # Install zig. The entire extracted directory must remain in /opt because the
@@ -80,7 +97,10 @@ RUN curl -fsSL \
 # symlinked into PATH.
 RUN curl -fsSL \
       "https://ziglang.org/download/${ZIG_VERSION}/zig-linux-x86_64-${ZIG_VERSION}.tar.xz" \
-      | tar -xJ -C /opt \
+      -o /tmp/zig.tar.xz \
+    && echo "${ZIG_SHA256}  /tmp/zig.tar.xz" | sha256sum -c - \
+    && tar -xJ -C /opt -f /tmp/zig.tar.xz \
+    && rm /tmp/zig.tar.xz \
     && ln -s "/opt/zig-linux-x86_64-${ZIG_VERSION}/zig" /usr/local/bin/zig
 
 # Vendor the macOS SDK that supplies the Apple frameworks zig omits (see header
@@ -91,7 +111,10 @@ RUN curl -fsSL \
 # is far cheaper to diagnose than a 14-minute link failure downstream.
 RUN curl -fsSL \
       "https://github.com/joseluisq/macosx-sdks/releases/download/${MACOS_SDK_VERSION}/MacOSX${MACOS_SDK_VERSION}.sdk.tar.xz" \
-      | tar -xJ -C /opt \
+      -o /tmp/macos-sdk.tar.xz \
+    && echo "${MACOS_SDK_SHA256}  /tmp/macos-sdk.tar.xz" | sha256sum -c - \
+    && tar -xJ -C /opt -f /tmp/macos-sdk.tar.xz \
+    && rm /tmp/macos-sdk.tar.xz \
     && ln -s "/opt/MacOSX${MACOS_SDK_VERSION}.sdk" /opt/macos-sdk \
     && test -d /opt/macos-sdk/System/Library/Frameworks/CoreFoundation.framework \
     && test -d /opt/macos-sdk/System/Library/Frameworks/Security.framework \
@@ -142,6 +165,7 @@ WORKDIR /tmp/icu-build
 RUN curl -fsSL \
       "https://github.com/unicode-org/icu/releases/download/release-${ICU_MAJOR}-${ICU_MINOR}/icu4c-${ICU_MAJOR}_${ICU_MINOR}-src.tgz" \
       -o icu.tgz \
+    && echo "${ICU_SHA256}  icu.tgz" | sha256sum -c - \
     && mkdir -p src \
     && tar -xzf icu.tgz -C src --strip-components=1 \
     && rm icu.tgz
