@@ -22,7 +22,8 @@ on:
 
 permissions:
   contents: write    # creates the GitHub Release and uploads assets
-  packages: read     # pull goreleaser-cross base image from ghcr
+                     # (no packages scope: image is golang:bookworm + direct
+                     # downloads, not a GHCR pull)
 
 concurrency:
   group: release-${{ github.ref }}

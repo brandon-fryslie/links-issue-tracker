@@ -28,8 +28,8 @@ on:
   workflow_dispatch: {}    # on-demand: run the full proof against any branch
 
 permissions:
-  contents: read
-  packages: read    # required to pull base images from ghcr
+  contents: read    # least privilege: image is golang:bookworm + direct
+                    # downloads (no GHCR pull), so no packages scope is needed
 
 concurrency:
   group: release-validate-${{ github.ref }}
