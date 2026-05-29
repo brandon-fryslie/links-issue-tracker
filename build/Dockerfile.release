@@ -83,7 +83,7 @@ RUN printf '#!/bin/sh\nexec zig ar "$@"\n' > /usr/local/bin/zig-ar \
 # omits tzfile.h (removed from modern Apple SDKs). We provide a stub with
 # just that define, injected via -isystem in the darwin wrapper scripts.
 RUN mkdir -p /usr/local/include/zig-macos-stubs \
-    && printf '/* tzfile.h stub: only TZDIR is needed by ICU */\n#ifndef TZFILE_H\n#define TZFILE_H\n#ifndef TZDIR\n#define TZDIR "/var/db/timezone/zoneinfo"\n#endif\n#endif\n' \
+    && printf '/* tzfile.h stub for zig macOS cross-compile: ICU uses TZDIR and TZDEFAULT */\n#ifndef TZFILE_H\n#define TZFILE_H\n#ifndef TZDIR\n#define TZDIR "/var/db/timezone/zoneinfo"\n#endif\n#ifndef TZDEFAULT\n#define TZDEFAULT "/etc/localtime"\n#endif\n#endif\n' \
         > /usr/local/include/zig-macos-stubs/tzfile.h
 
 # Create zig cc/c++ wrappers for each cross-compile target.
