@@ -49,6 +49,16 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # setup-go RESTORES a module cache keyed on go.sum; it does not run any
+      # `go` command, so on a cold cache (first build of a new go.sum) GOMODCACHE
+      # is empty. The release build mounts it :ro into the container, where
+      # goreleaser cannot then download the missing modules. Populate it here so
+      # the read-only mount is correct by construction rather than depending on a
+      # warm Actions cache. [LAW:one-source-of-truth] this step is the populated
+      # GOMODCACHE; the :ro mount consumes it.
+      - name: Populate module cache
+        run: go mod download
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 

@@ -45,6 +45,16 @@ jobs:
           go-version-file: go.mod
           cache: true
 
+      # setup-go RESTORES a module cache keyed on go.sum; it does not run any
+      # `go` command, so on a cold cache (first build of a new go.sum) GOMODCACHE
+      # is empty. The snapshot build mounts it :ro into the container, where
+      # goreleaser cannot then download the missing modules. Populate it here so
+      # the read-only mount is correct by construction rather than depending on a
+      # warm Actions cache. [LAW:one-source-of-truth] this step is the populated
+      # GOMODCACHE; the :ro mount consumes it.
+      - name: Populate module cache
+        run: go mod download
+
       # Build the custom release-builder image. GHA layer cache makes
       # subsequent runs reuse the (slow) ICU cross-build layers — only
       # Dockerfile edits or ARG bumps invalidate them.
@@ -73,9 +83,9 @@ jobs:
 
       # Full snapshot build inside the image; produces archives + checksums
       # for every target in .goreleaser.yml.
-      # [LAW:one-source-of-truth] GOMODCACHE is populated by actions/setup-go
-      # above; mount it read-only so goreleaser reuses cached modules instead
-      # of re-downloading the full Dolt dependency tree on every run.
+      # GOMODCACHE is populated by the `go mod download` step above; mount it
+      # read-only so goreleaser reuses the cached modules and the container
+      # (running as root) cannot mutate the host cache.
       - name: Build snapshot artifacts
         run: |
           set -euo pipefail
