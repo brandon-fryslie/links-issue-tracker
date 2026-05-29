@@ -1,7 +1,7 @@
 name: Release
 
 # Triggered by tag push matching `v*.*.*`. Builds the custom release-builder
-# image (goreleaser-cross + ICU cross-toolchains for every Lit target), runs
+# image (zig cross-toolchain + ICU cross-builds for every Lit target), runs
 # goreleaser inside it to produce per-platform archives + checksums, runs
 # mkmanifest, then publishes everything atomically via `gh release create`.
 #
