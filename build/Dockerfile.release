@@ -76,19 +76,31 @@ RUN printf '#!/bin/sh\nexec zig ar "$@"\n' > /usr/local/bin/zig-ar \
     && printf '#!/bin/sh\nexec zig ranlib "$@"\n' > /usr/local/bin/zig-ranlib \
     && chmod +x /usr/local/bin/zig-ar /usr/local/bin/zig-ranlib
 
+# Minimal tzfile.h stub for zig macOS cross-compile targets.
+# [LAW:one-source-of-truth] ICU 75.1 putil.cpp unconditionally includes
+# tzfile.h when U_PLATFORM_IS_DARWIN_BASED is set (which zig sets via
+# __APPLE__); the only symbol ICU uses is TZDIR. zig's bundled macOS SDK
+# omits tzfile.h (removed from modern Apple SDKs). We provide a stub with
+# just that define, injected via -isystem in the darwin wrapper scripts.
+RUN mkdir -p /usr/local/include/zig-macos-stubs \
+    && printf '/* tzfile.h stub: only TZDIR is needed by ICU */\n#ifndef TZFILE_H\n#define TZFILE_H\n#ifndef TZDIR\n#define TZDIR "/var/db/timezone/zoneinfo"\n#endif\n#endif\n' \
+        > /usr/local/include/zig-macos-stubs/tzfile.h
+
 # Create zig cc/c++ wrappers for each cross-compile target.
 # Names match the CC/CXX env entries in .goreleaser.yml.
 # [LAW:one-source-of-truth] target triples here are the single definition;
 # .goreleaser.yml references the wrapper names, not the triples directly.
+# Non-darwin targets get plain wrappers; darwin targets additionally pass
+# -isystem to inject the tzfile.h stub (see above).
 RUN for pair in \
-        "aarch64-linux-gnu:aarch64-linux-gnu" \
-        "x86_64-windows-gnu:x86_64-windows-gnu" \
-        "aarch64-apple-darwin:aarch64-macos.11.0-none" \
-        "x86_64-apple-darwin:x86_64-macos.10.15-none"; do \
-        name="${pair%%:*}"; target="${pair##*:}"; \
-        printf '#!/bin/sh\nexec zig cc -target %s "$@"\n' "$target" \
+        "aarch64-linux-gnu:aarch64-linux-gnu:" \
+        "x86_64-windows-gnu:x86_64-windows-gnu:" \
+        "aarch64-apple-darwin:aarch64-macos.11.0-none:-isystem /usr/local/include/zig-macos-stubs" \
+        "x86_64-apple-darwin:x86_64-macos.10.15-none:-isystem /usr/local/include/zig-macos-stubs"; do \
+        name="${pair%%:*}"; rest="${pair#*:}"; target="${rest%%:*}"; extra="${rest##*:}"; \
+        printf '#!/bin/sh\nexec zig cc -target %s %s "$@"\n' "$target" "$extra" \
             > "/usr/local/bin/zig-cc-${name}" && \
-        printf '#!/bin/sh\nexec zig c++ -target %s "$@"\n' "$target" \
+        printf '#!/bin/sh\nexec zig c++ -target %s %s "$@"\n' "$target" "$extra" \
             > "/usr/local/bin/zig-cxx-${name}" && \
         chmod +x "/usr/local/bin/zig-cc-${name}" "/usr/local/bin/zig-cxx-${name}"; \
     done
@@ -140,15 +152,10 @@ RUN icu-cross-build windows amd64 \
 # Stage: cross-darwin-arm64
 # -----------------------------------------------------------------------------
 FROM native-icu AS cross-darwin-arm64
-# [LAW:one-source-of-truth] -DU_HAVE_TZFILE_H=0: zig's bundled macOS SDK does
-# not include tzfile.h (removed in modern Apple SDK releases). ICU's platform.h
-# hardcodes U_HAVE_TZFILE_H=1 for any __APPLE__ target via an #ifndef guard,
-# so a command-line -D override suppresses the inclusion cleanly.
 RUN icu-cross-build darwin arm64 \
     aarch64-apple-darwin \
     zig-cc-aarch64-apple-darwin zig-cxx-aarch64-apple-darwin \
-    zig-ar zig-ranlib \
-    "-DU_HAVE_TZFILE_H=0"
+    zig-ar zig-ranlib
 
 # -----------------------------------------------------------------------------
 # Stage: cross-darwin-amd64
@@ -157,8 +164,7 @@ FROM native-icu AS cross-darwin-amd64
 RUN icu-cross-build darwin amd64 \
     x86_64-apple-darwin \
     zig-cc-x86_64-apple-darwin zig-cxx-x86_64-apple-darwin \
-    zig-ar zig-ranlib \
-    "-DU_HAVE_TZFILE_H=0"
+    zig-ar zig-ranlib
 
 # -----------------------------------------------------------------------------
 # Stage: final
