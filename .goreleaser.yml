@@ -37,11 +37,10 @@ builds:
     binary: lit
     # CGO is REQUIRED: Dolt's embedded MySQL library (gozstd, the regex build
     # tag) does not build with CGO_ENABLED=0. release.yml runs goreleaser
-    # inside the ghcr.io/goreleaser/goreleaser-cross image, which ships with
-    # the C cross-compilers for every target below (osxcross for darwin,
-    # mingw for windows, glibc/musl for linux). Per-target CC is selected via
-    # the template-driven env entries below — that is the standard
-    # goreleaser-cross pattern.
+    # inside the build/Dockerfile.release image, which installs zig 0.14.0 as
+    # the single cross-toolchain for every non-native target (darwin arm64/amd64
+    # and windows via zig cc; linux/amd64 uses the image's native gcc).
+    # Per-target CC/CXX is selected via the template-driven env entries below.
     #
     # [LAW:single-enforcer] One Docker image owns the cross-toolchain inventory;
     # nothing in this repo installs compilers ad-hoc.

@@ -12,8 +12,9 @@
 #   $6 = AR  — archiver command (e.g. `zig-ar`, `aarch64-linux-gnu-ar`).
 #        Must be a single executable name or path — no embedded spaces.
 #   $7 = RANLIB — ranlib command (e.g. `zig-ranlib`). Same constraint as AR.
-#   $8 = extra_cppflags (optional) — extra -D/-I flags appended to CPPFLAGS
-#        before ./configure. Use to override ICU's platform.h defaults when
+#   $8 = extra_cppflags (optional) — -D/-I flags set as CPPFLAGS for
+#        ./configure (this is the sole CPPFLAGS source — nothing is inherited).
+#        Use to override ICU's platform.h defaults when
 #        the cross-toolchain's SDK differs from what ICU expects.
 #        Example: "-DU_HAVE_TZFILE_H=0" for zig-based macOS targets whose
 #        bundled SDK omits tzfile.h.
