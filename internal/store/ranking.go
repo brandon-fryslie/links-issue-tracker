@@ -446,11 +446,15 @@ type blocksEdge struct {
 // because cycle detection asks about the constraint graph itself, not the
 // current rank assignment.
 func loadBlocksEdges(ctx context.Context, q rowQueryer) ([]blocksEdge, error) {
+	// ORDER BY makes edge iteration — and therefore the adjacency order that
+	// findBlocksCycle's DFS follows — stable across runs and engines, so the
+	// reported cycle path is deterministic.
 	rows, err := q.QueryContext(ctx, `SELECT r.src_id, r.dst_id FROM relations r
 		JOIN issues src ON src.id = r.src_id
 		JOIN issues dst ON dst.id = r.dst_id
 		WHERE r.type = 'blocks'
-		AND src.deleted_at IS NULL AND dst.deleted_at IS NULL`)
+		AND src.deleted_at IS NULL AND dst.deleted_at IS NULL
+		ORDER BY r.src_id, r.dst_id`)
 	if err != nil {
 		return nil, fmt.Errorf("query blocks edges: %w", err)
 	}
