@@ -88,7 +88,7 @@ func rejectBlocksCycle(ctx context.Context, tx *sql.Tx, dependent, dependency st
 		return fmt.Errorf("blocks cycle check: %w", err)
 	}
 	if blocksPrecedes(blocksPrecedenceAdj(edges), dependent, dependency) {
-		return fmt.Errorf("blocks: %s already depends on %s (directly or transitively); this edge would create a dependency cycle, which has no valid rank order", dependency, dependent)
+		return fmt.Errorf("blocks: cannot add %s depends-on %s — %s already depends on %s (directly or transitively), so this edge would close a dependency cycle, which has no valid rank order", dependent, dependency, dependency, dependent)
 	}
 	return nil
 }

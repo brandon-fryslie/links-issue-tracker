@@ -105,8 +105,9 @@ func (s *Store) Export(ctx context.Context) (model.Export, error) {
 
 func (s *Store) Doctor(ctx context.Context) (HealthReport, error) {
 	report := HealthReport{
-		Errors:   []string{},
-		Warnings: []string{},
+		DependencyCycle: []string{},
+		Errors:          []string{},
+		Warnings:        []string{},
 	}
 	report.IntegrityCheck = "ok"
 	var violations int
@@ -167,8 +168,8 @@ func (s *Store) Doctor(ctx context.Context) (HealthReport, error) {
 	if err != nil {
 		return report, fmt.Errorf("detect blocks dependency cycle: %w", err)
 	}
-	report.DependencyCycle = cycle
 	if len(cycle) > 0 {
+		report.DependencyCycle = cycle
 		report.Warnings = append(report.Warnings, fmt.Sprintf("blocks dependency cycle: %s (no rank order exists; remove one edge with 'lit dep rm' to break it)", strings.Join(cycle, " -> ")))
 	}
 	return report, nil
