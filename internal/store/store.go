@@ -1024,7 +1024,9 @@ func (s *Store) DeleteComment(ctx context.Context, commentID string) (model.Comm
 		row := tx.QueryRowContext(ctx, `SELECT id, issue_id, body, created_at, created_by FROM comments WHERE id = ?`, id)
 		if err := row.Scan(&deleted.ID, &deleted.IssueID, &deleted.Body, &createdAt, &deleted.CreatedBy); err != nil {
 			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("comment %q not found", id)
+				// [LAW:one-type-per-behavior] Typed not-found error matches GetIssue / relation removals,
+				// so callers detect not-found via errors.As instead of string-matching the message.
+				return NotFoundError{Entity: "comment", ID: id}
 			}
 			return fmt.Errorf("read comment: %w", err)
 		}
