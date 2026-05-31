@@ -187,7 +187,11 @@ func scanMigrationDrops() map[ColumnRef]string {
 		if err != nil {
 			panic("scan migration drops: read " + entry.Name() + ": " + err.Error())
 		}
-		for _, ref := range parseDroppedColumns(string(data)) {
+		// [LAW:one-source-of-truth] Only the forward (Up) section records
+		// intended drops. A goose Down section is the inverse of Up — it DROPs
+		// the columns Up ADDs — so scanning it would misclassify a kept column
+		// as an intended drop and could justify discarding live data.
+		for _, ref := range parseDroppedColumns(gooseUpSection(string(data))) {
 			out[ref] = entry.Name()
 		}
 	}

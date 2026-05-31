@@ -103,6 +103,29 @@ func TestParseDroppedColumnsReadsMigrationHistory(t *testing.T) {
 	}
 }
 
+// TestGooseUpSectionExcludesDownDrops proves intended drops are read from the
+// forward (Up) direction only. A migration that ADDs a column in Up DROPs it in
+// Down; reading Down would misclassify a kept column as an intended drop and
+// could justify discarding live data.
+func TestGooseUpSectionExcludesDownDrops(t *testing.T) {
+	addInUpDropInDown := "-- +goose Up\n" +
+		"ALTER TABLE issues ADD COLUMN foo TEXT;\n" +
+		"-- +goose Down\n" +
+		"ALTER TABLE issues DROP COLUMN foo;\n"
+	if refs := parseDroppedColumns(gooseUpSection(addInUpDropInDown)); len(refs) != 0 {
+		t.Fatalf("a Down-only DROP COLUMN must not count as an intended drop; got %v", refs)
+	}
+
+	realDrop := "-- +goose Up\n" +
+		"ALTER TABLE issues DROP COLUMN legacy;\n" +
+		"-- +goose Down\n" +
+		"ALTER TABLE issues ADD COLUMN legacy TEXT;\n"
+	refs := parseDroppedColumns(gooseUpSection(realDrop))
+	if len(refs) != 1 || refs[0] != (ColumnRef{Table: "issues", Column: "legacy"}) {
+		t.Fatalf("an Up DROP COLUMN must be captured; got %v", refs)
+	}
+}
+
 // --- The two known shapes produce valid total mappings (acceptance #3) ---
 
 func mustClean(t *testing.T, report HealthReport) {
