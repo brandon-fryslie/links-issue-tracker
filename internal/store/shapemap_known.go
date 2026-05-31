@@ -30,14 +30,6 @@ func DeterministicMap(dump RawDump) (ShapeMapping, bool) {
 	for _, table := range dump.Tables {
 		rules, isDomain := knownSourceColumns[table.Name]
 		_, isBookkeeping := bookkeepingTables[table.Name]
-		if isDomain && !hasRequiredColumns(table) {
-			// Every present column is known, but the table is missing columns
-			// that mark a recognizable historical shape (e.g. an issues table
-			// with only id). That is the synthetic-corruption shape reconcile
-			// also refuses — decline to the loop's LLM/human path rather than
-			// fabricate empty values for the absent columns.
-			return ShapeMapping{}, false
-		}
 		for _, col := range table.Columns {
 			ref := ColumnRef{Table: table.Name, Column: col}
 			switch {
@@ -57,6 +49,16 @@ func DeterministicMap(dump RawDump) (ShapeMapping, bool) {
 				return ShapeMapping{}, false
 			}
 		}
+		// A domain table must cover its collection's required target fields.
+		// Otherwise the typed write path (which does raw inserts on restore,
+		// not the Import* required-field checks) would persist fabricated empty
+		// values for the absent fields. Gate on covered TARGETS, not source
+		// column names, so an aliased column (pre-goose assignee -> events.actor)
+		// counts the same as its v1 name. Decline a too-thin table to the
+		// loop's LLM/human path.
+		if isDomain && !coversRequiredTargets(table, out) {
+			return ShapeMapping{}, false
+		}
 	}
 	// [LAW:single-enforcer] ok=true must mean "a valid mapping": route the
 	// proposal through Validate rather than re-deriving its rules here. A dump
@@ -70,24 +72,46 @@ func DeterministicMap(dump RawDump) (ShapeMapping, bool) {
 	return out, true
 }
 
-// requiredColumns names, per domain source table, the columns that must be
-// present for a dump to be a recognizable historical shape. Only issues is
-// gated: a too-thin issues table yields schema-valid-but-empty issues
-// silently, whereas a too-thin relations/comments/labels/events table fails
-// loudly at the typed write path (a foreign key or required-field check). The
-// issues set is the reconcile prerequisite list, shared so the lifeboat and
-// reconcile agree on what counts as a known shape. [LAW:one-source-of-truth]
-var requiredColumns = map[string][]string{
-	"issues": reconcileRequiredIssueColumns,
+// requiredTargets names, per domain source table, the target fields a
+// recognizable historical shape must map. A table covering fewer than these
+// would let the restore path persist fabricated empty values (it does raw
+// inserts, not the Import* required-field checks), so the mapper declines it.
+//
+// The check is on covered TARGETS, not source column names: an aliased source
+// column (pre-goose issue_events.assignee, or pre-rename issues.prompt) covers
+// the same target as its v1 name, so a valid legacy shape passes while a
+// genuinely thin one does not. The issues set derives from the reconcile
+// prerequisite list, prefixed to target keys, so the lifeboat and reconcile
+// agree on what counts as a known issues shape. [LAW:one-source-of-truth]
+var requiredTargets = map[string][]TargetKey{
+	"issues":              issuesRequiredTargets(),
+	"relations":           {"relations.src_id", "relations.dst_id", "relations.type"},
+	"comments":            {"comments.id", "comments.issue_id", "comments.body"},
+	"labels":              {"labels.issue_id", "labels.name"},
+	"issue_events":        {"events.id", "events.issue_id"},
+	"issue_event_changes": {"event_changes.event_id", "event_changes.field"},
 }
 
-func hasRequiredColumns(table RawTable) bool {
-	have := make(map[string]bool, len(table.Columns))
-	for _, c := range table.Columns {
-		have[c] = true
+func issuesRequiredTargets() []TargetKey {
+	targets := make([]TargetKey, len(reconcileRequiredIssueColumns))
+	for i, col := range reconcileRequiredIssueColumns {
+		targets[i] = TargetKey("issues." + col)
 	}
-	for _, c := range requiredColumns[table.Name] {
-		if !have[c] {
+	return targets
+}
+
+// coversRequiredTargets reports whether the table's mapped columns cover every
+// required target for its collection, reading the dispositions just assigned
+// into m.
+func coversRequiredTargets(table RawTable, m ShapeMapping) bool {
+	covered := map[TargetKey]bool{}
+	for _, col := range table.Columns {
+		if mapped, ok := m.Columns[ColumnRef{Table: table.Name, Column: col}].(MappedTo); ok {
+			covered[mapped.Target] = true
+		}
+	}
+	for _, t := range requiredTargets[table.Name] {
+		if !covered[t] {
 			return false
 		}
 	}

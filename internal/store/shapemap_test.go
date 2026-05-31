@@ -100,6 +100,25 @@ func TestRejectsDuplicateTargets(t *testing.T) {
 	}
 }
 
+// TestDeterministicMapDeclinesThinNonIssuesTable proves the recognizable-shape
+// gate covers every domain table, not just issues: a comments table missing
+// body/id would otherwise let the restore path persist a fabricated empty
+// comment (ReplaceFromExport does raw inserts, bypassing ImportComment's
+// required-field checks).
+func TestDeterministicMapDeclinesThinNonIssuesTable(t *testing.T) {
+	// A complete issues table (so issues is not the reason to decline) plus a
+	// comments table carrying only issue_id.
+	dump := RawDump{WorkspaceID: "w", Tables: []RawTable{
+		{Name: "issues",
+			Columns: []string{"id", "title", "description", "status", "priority", "issue_type", "closed_at", "created_at", "updated_at"},
+			Rows:    [][]any{{"i1", "T", "", "open", int64(0), "task", nil, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z"}}},
+		{Name: "comments", Columns: []string{"issue_id"}, Rows: [][]any{{"i1"}}},
+	}}
+	if _, ok := DeterministicMap(dump); ok {
+		t.Fatal("DeterministicMap must decline a comments table missing required target fields")
+	}
+}
+
 // --- Drop provenance distinguishable from migration history (acceptance #2) ---
 
 func TestClassifyDropDistinguishesProvenance(t *testing.T) {
