@@ -58,6 +58,10 @@ func mapTo(target TargetKey, t Transform) Disposition { return MappedTo{Target: 
 // keep maps a source column straight onto a domain field, no value conversion.
 func keep(target TargetKey) Disposition { return mapTo(target, TransformIdentity) }
 
+// ts maps a stored timestamp string onto a domain time field; a non-NULL value
+// that does not parse fails the apply rather than vanishing.
+func ts(target TargetKey) Disposition { return mapTo(target, TransformTimestamp) }
+
 // knownSourceColumns is the correspondence table: per domain source table, the
 // disposition of each source column name the deterministic mapper recognizes.
 // Aliases (a v1 name and its pre-goose predecessor) point at the same domain
@@ -74,31 +78,31 @@ var knownSourceColumns = map[string]map[string]Disposition{
 		"issue_type":   keep("issues.issue_type"),
 		"topic":        keep("issues.topic"),
 		"assignee":     keep("issues.assignee"),
-		"created_at":   keep("issues.created_at"),
-		"updated_at":   keep("issues.updated_at"),
-		"closed_at":    keep("issues.closed_at"),
-		"archived_at":  keep("issues.archived_at"),
-		"deleted_at":   keep("issues.deleted_at"),
+		"created_at":   ts("issues.created_at"),
+		"updated_at":   ts("issues.updated_at"),
+		"closed_at":    ts("issues.closed_at"),
+		"archived_at":  ts("issues.archived_at"),
+		"deleted_at":   ts("issues.deleted_at"),
 		"item_rank":    keep("issues.rank"), // v1 name
 	},
 	"relations": {
 		"src_id":     keep("relations.src_id"),
 		"dst_id":     keep("relations.dst_id"),
 		"type":       keep("relations.type"),
-		"created_at": keep("relations.created_at"),
+		"created_at": ts("relations.created_at"),
 		"created_by": keep("relations.created_by"),
 	},
 	"comments": {
 		"id":         keep("comments.id"),
 		"issue_id":   keep("comments.issue_id"),
 		"body":       keep("comments.body"),
-		"created_at": keep("comments.created_at"),
+		"created_at": ts("comments.created_at"),
 		"created_by": keep("comments.created_by"),
 	},
 	"labels": {
 		"issue_id":   keep("labels.issue_id"),
 		"label":      keep("labels.name"),
-		"created_at": keep("labels.created_at"),
+		"created_at": ts("labels.created_at"),
 		"created_by": keep("labels.created_by"),
 	},
 	"issue_events": {
@@ -108,7 +112,7 @@ var knownSourceColumns = map[string]map[string]Disposition{
 		"reason":     keep("events.reason"),
 		"actor":      keep("events.actor"), // v1 name
 		"assignee":   keep("events.actor"), // pre-goose, pre-rename
-		"created_at": keep("events.created_at"),
+		"created_at": ts("events.created_at"),
 	},
 	"issue_event_changes": {
 		"event_id":   keep("event_changes.event_id"),

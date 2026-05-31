@@ -273,8 +273,9 @@ func TestDeterministicMapPreGoose(t *testing.T) {
 // --- The NULL-vs-"" distinction is load-bearing and preserved ---
 
 func TestApplyTransformPreservesNull(t *testing.T) {
-	// An epic's NULL status must never be coerced to a leaf value by a transform.
-	for _, tf := range []Transform{TransformIdentity, TransformLegacyStatus} {
+	// An epic's NULL status must never be coerced to a leaf value, and a NULL
+	// timestamp must never become a zero time, by any transform.
+	for _, tf := range []Transform{TransformIdentity, TransformLegacyStatus, TransformTimestamp} {
 		got, err := applyTransform(tf, nil)
 		if err != nil {
 			t.Fatalf("%s(nil) error = %v", tf, err)
@@ -285,5 +286,32 @@ func TestApplyTransformPreservesNull(t *testing.T) {
 	}
 	if got, _ := applyTransform(TransformLegacyStatus, "todo"); got != "open" {
 		t.Fatalf("legacy 'todo' = %v, want 'open'", got)
+	}
+}
+
+// TestApplyRejectsCorruptTimestamp proves a non-NULL timestamp that does not
+// parse fails loudly with source context rather than vanishing into a zero
+// value — [LAW:no-silent-fallbacks], the conservation guarantee a recovery tool
+// must hold.
+func TestApplyRejectsCorruptTimestamp(t *testing.T) {
+	dump := RawDump{WorkspaceID: "w", Tables: []RawTable{
+		{Name: "issues",
+			Columns: []string{"id", "title", "description", "status", "priority", "issue_type", "created_at", "updated_at"},
+			Rows: [][]any{
+				{"i1", "T", "", "open", int64(0), "task", "not-a-timestamp", "2026-01-01T00:00:00Z"},
+			}},
+	}}
+	mapping, ok := DeterministicMap(dump)
+	if !ok {
+		t.Fatal("DeterministicMap declined a known shape")
+	}
+	_, err := Apply(dump, mapping)
+	if err == nil {
+		t.Fatal("Apply accepted a corrupt timestamp instead of surfacing it")
+	}
+	for _, want := range []string{"issues", "created_at", "not-a-timestamp"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error must carry source context %q; got %v", want, err)
+		}
 	}
 }

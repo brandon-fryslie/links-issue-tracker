@@ -84,6 +84,7 @@ type Transform string
 const (
 	TransformIdentity     Transform = "identity"
 	TransformLegacyStatus Transform = "legacy_status_value"
+	TransformTimestamp    Transform = "timestamp"
 )
 
 // TargetKey is "<collection>.<field>" and resolves in targetRegistry.
@@ -134,7 +135,7 @@ func buildTargetRegistry() map[TargetKey]targetField {
 }
 
 func knownTransform(t Transform) bool {
-	return t == TransformIdentity || t == TransformLegacyStatus
+	return t == TransformIdentity || t == TransformLegacyStatus || t == TransformTimestamp
 }
 
 // Validate is the single totality enforcer. [LAW:single-enforcer] It is the one
@@ -384,9 +385,35 @@ func applyTransform(t Transform, cell any) (any, error) {
 		// Reuse the reconcile's canonicalizer so "what a legacy status maps to"
 		// has one definition. [LAW:one-source-of-truth]
 		return canonicalLegacyStatus(sql.NullString{Valid: true, String: s}).String, nil
+	case TransformTimestamp:
+		s, ok := cell.(string)
+		if !ok {
+			return nil, fmt.Errorf("%s requires a string cell, got %T", t, cell)
+		}
+		// [LAW:no-silent-fallbacks] A non-NULL value that does not parse is a
+		// corrupt dump, not an absent timestamp; surface it (Apply wraps this
+		// with the source table and column) rather than zeroing the field and
+		// quietly losing recovery data.
+		ts, err := parseTimestamp(s)
+		if err != nil {
+			return nil, err
+		}
+		return ts, nil
 	default:
 		return nil, fmt.Errorf("unknown transform %q", t)
 	}
+}
+
+// parseTimestamp parses a stored timestamp string. The store writes
+// RFC3339Nano; the looser RFC3339 covers the second-precision values legacy
+// (pre-goose) workspaces carry.
+func parseTimestamp(s string) (time.Time, error) {
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if t, err := time.Parse(layout, s); err == nil {
+			return t, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("invalid timestamp %q", s)
 }
 
 // cellString renders a source cell as a domain string: SQL NULL and missing
@@ -425,22 +452,20 @@ func cellInt(cell any) int {
 	}
 }
 
+// cellTime / cellTimePtr read a timestamp the TransformTimestamp fold already
+// parsed into a time.Time (SQL NULL stays nil). The parse — and its failure —
+// happened at the fold where the source table and column are known; here the
+// value is trusted.
 func cellTime(cell any) time.Time {
-	if t := cellTimePtr(cell); t != nil {
-		return *t
+	if t, ok := cell.(time.Time); ok {
+		return t
 	}
 	return time.Time{}
 }
 
 func cellTimePtr(cell any) *time.Time {
-	s := cellString(cell)
-	if s == "" {
-		return nil
-	}
-	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
-		if t, err := time.Parse(layout, s); err == nil {
-			return &t
-		}
+	if t, ok := cell.(time.Time); ok {
+		return &t
 	}
 	return nil
 }
