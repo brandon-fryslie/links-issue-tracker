@@ -680,7 +680,7 @@ func canonicalEventAction(v sql.NullString) any {
 }
 
 // canonicalEventReason mirrors recordEvent's reason canonicalization:
-// TrimSpace, with NULL input coerced to ” (the column is NOT NULL).
+// TrimSpace, with NULL input coerced to "" (the column is NOT NULL).
 func canonicalEventReason(v sql.NullString) string {
 	if !v.Valid {
 		return ""

@@ -113,13 +113,16 @@ func TestClassifyDropDistinguishesProvenance(t *testing.T) {
 
 func TestParseDroppedColumnsReadsMigrationHistory(t *testing.T) {
 	sqlText := "ALTER TABLE issues DROP COLUMN legacy_field;\n" +
-		"ALTER TABLE `relations` DROP COLUMN IF EXISTS `old_col`;"
+		"ALTER TABLE `relations` DROP COLUMN IF EXISTS `old_col`;\n" +
+		"ALTER TABLE issues DROP COLUMN a, DROP COLUMN b;"
 	refs := parseDroppedColumns(sqlText)
 	got := map[ColumnRef]bool{}
 	for _, r := range refs {
 		got[r] = true
 	}
-	for _, want := range []ColumnRef{{"issues", "legacy_field"}, {"relations", "old_col"}} {
+	// Every dropped column is captured, including both drops in the
+	// multi-DROP-COLUMN statement.
+	for _, want := range []ColumnRef{{"issues", "legacy_field"}, {"relations", "old_col"}, {"issues", "a"}, {"issues", "b"}} {
 		if !got[want] {
 			t.Fatalf("parseDroppedColumns missed %v; got %v", want, refs)
 		}

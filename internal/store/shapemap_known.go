@@ -187,16 +187,26 @@ func classifyDrop(table, column string) (DropProvenance, string) {
 	return DropUnexplained, ""
 }
 
-var dropColumnRE = regexp.MustCompile("(?is)ALTER\\s+TABLE\\s+`?(\\w+)`?[^;]*?DROP\\s+COLUMN\\s+(?:IF\\s+EXISTS\\s+)?`?(\\w+)`?")
+// alterTableRE captures one ALTER TABLE statement: its target table and the
+// statement body up to the terminating semicolon (or end of input). The body
+// is then scanned for every DROP COLUMN clause, so a multi-drop statement is
+// fully captured and a later statement's drops are never attributed to this
+// table.
+var alterTableRE = regexp.MustCompile("(?is)ALTER\\s+TABLE\\s+`?(\\w+)`?([^;]*)")
+var dropColumnRE = regexp.MustCompile("(?is)DROP\\s+COLUMN\\s+(?:IF\\s+EXISTS\\s+)?`?(\\w+)`?")
 
 // parseDroppedColumns extracts every (table, column) a chunk of migration SQL
-// explicitly drops. It is a pure function so the "migration history" arm of
+// explicitly drops — including multiple DROP COLUMN clauses in one ALTER TABLE
+// statement. It is a pure function so the "migration history" arm of
 // classifyDrop is testable without depending on the current corpus happening to
 // contain a drop.
 func parseDroppedColumns(sqlText string) []ColumnRef {
 	var refs []ColumnRef
-	for _, m := range dropColumnRE.FindAllStringSubmatch(sqlText, -1) {
-		refs = append(refs, ColumnRef{Table: m[1], Column: m[2]})
+	for _, stmt := range alterTableRE.FindAllStringSubmatch(sqlText, -1) {
+		table, body := stmt[1], stmt[2]
+		for _, drop := range dropColumnRE.FindAllStringSubmatch(body, -1) {
+			refs = append(refs, ColumnRef{Table: table, Column: drop[1]})
+		}
 	}
 	return refs
 }
