@@ -30,6 +30,14 @@ func DeterministicMap(dump RawDump) (ShapeMapping, bool) {
 	for _, table := range dump.Tables {
 		rules, isDomain := knownSourceColumns[table.Name]
 		_, isBookkeeping := bookkeepingTables[table.Name]
+		if isDomain && !hasRequiredColumns(table) {
+			// Every present column is known, but the table is missing columns
+			// that mark a recognizable historical shape (e.g. an issues table
+			// with only id). That is the synthetic-corruption shape reconcile
+			// also refuses — decline to the loop's LLM/human path rather than
+			// fabricate empty values for the absent columns.
+			return ShapeMapping{}, false
+		}
 		for _, col := range table.Columns {
 			ref := ColumnRef{Table: table.Name, Column: col}
 			switch {
@@ -60,6 +68,30 @@ func DeterministicMap(dump RawDump) (ShapeMapping, bool) {
 		return ShapeMapping{}, false
 	}
 	return out, true
+}
+
+// requiredColumns names, per domain source table, the columns that must be
+// present for a dump to be a recognizable historical shape. Only issues is
+// gated: a too-thin issues table yields schema-valid-but-empty issues
+// silently, whereas a too-thin relations/comments/labels/events table fails
+// loudly at the typed write path (a foreign key or required-field check). The
+// issues set is the reconcile prerequisite list, shared so the lifeboat and
+// reconcile agree on what counts as a known shape. [LAW:one-source-of-truth]
+var requiredColumns = map[string][]string{
+	"issues": reconcileRequiredIssueColumns,
+}
+
+func hasRequiredColumns(table RawTable) bool {
+	have := make(map[string]bool, len(table.Columns))
+	for _, c := range table.Columns {
+		have[c] = true
+	}
+	for _, c := range requiredColumns[table.Name] {
+		if !have[c] {
+			return false
+		}
+	}
+	return true
 }
 
 // to maps a source column onto a domain target field. The value conversion is

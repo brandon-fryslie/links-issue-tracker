@@ -404,12 +404,12 @@ func (s *Store) reconcileToBaseline(ctx context.Context, guard *snapshotGuard) (
 // reconcile steps assume is present:
 //
 //   - status       — idx_issues_status_priority, ensureUnifiedStatusSchema
-//                    backfills, status CHECK clause
+//     backfills, status CHECK clause
 //   - priority     — idx_issues_status_priority, resetPrioritiesToNormal,
-//                    priority CHECK clause
+//     priority CHECK clause
 //   - updated_at   — idx_issues_status_priority, ensureIssueRanks ordering
 //   - issue_type   — ensureUnifiedStatusSchema (epic carve-out),
-//                    topic ADD COLUMN AFTER issue_type, type CHECK clause
+//     topic ADD COLUMN AFTER issue_type, type CHECK clause
 //   - closed_at    — ensureUnifiedStatusSchema (closed_at consistency)
 //
 // Reconcile adds the columns it knows are not part of every historical
@@ -420,6 +420,18 @@ func (s *Store) reconcileToBaseline(ctx context.Context, guard *snapshotGuard) (
 // hold.
 // [LAW:no-silent-fallbacks] A specific, named structural error is
 // emitted before any mutation; the operator sees the actual anomaly.
+// reconcileRequiredIssueColumns is the column set that marks a recognizable
+// historical issues table: the columns reconcile's downstream steps read, and
+// equivalently the columns no real pre-goose shape lacked. An issues table
+// missing any of them is the synthetic-corruption shape, "not a known
+// historical shape."
+//
+// [LAW:one-source-of-truth] One definition of "a recognizable historical issues
+// table", consumed both by the reconcile prerequisite gate here and by the data
+// lifeboat's deterministic mapper (DeterministicMap), so the two cannot drift
+// on what counts as a known shape.
+var reconcileRequiredIssueColumns = []string{"status", "priority", "updated_at", "issue_type", "closed_at", "description"}
+
 func (s *Store) verifyIssuesReconcilable(ctx context.Context) error {
 	cols, err := s.tableColumns(ctx, "issues")
 	if err != nil {
@@ -433,9 +445,8 @@ func (s *Store) verifyIssuesReconcilable(ctx context.Context) error {
 	// description appears in the ALTER TABLE issues ADD COLUMN
 	// agent_prompt ... AFTER `description` step, so reconcile fails
 	// mid-flight if it is missing.
-	required := []string{"status", "priority", "updated_at", "issue_type", "closed_at", "description"}
 	var missing []string
-	for _, c := range required {
+	for _, c := range reconcileRequiredIssueColumns {
 		if !cols[c] {
 			missing = append(missing, c)
 		}
@@ -669,7 +680,7 @@ func canonicalEventAction(v sql.NullString) any {
 }
 
 // canonicalEventReason mirrors recordEvent's reason canonicalization:
-// TrimSpace, with NULL input coerced to '' (the column is NOT NULL).
+// TrimSpace, with NULL input coerced to ” (the column is NOT NULL).
 func canonicalEventReason(v sql.NullString) string {
 	if !v.Valid {
 		return ""

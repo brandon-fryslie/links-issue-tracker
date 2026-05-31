@@ -77,14 +77,19 @@ func TestValidateRejectsStaleAndMalformedKeys(t *testing.T) {
 // workspace carrying both prompt and agent_prompt) instead of emitting a lossy
 // mapping.
 func TestRejectsDuplicateTargets(t *testing.T) {
+	// An otherwise-complete issues table that carries BOTH the v1 name and its
+	// pre-goose alias, so the only fault is the duplicate target (not a missing
+	// required column).
 	dump := RawDump{WorkspaceID: "w", Tables: []RawTable{
-		{Name: "issues", Columns: []string{"prompt", "agent_prompt"}, Rows: [][]any{{"a", "b"}}},
+		{Name: "issues",
+			Columns: []string{"id", "title", "description", "status", "priority", "issue_type", "closed_at", "created_at", "updated_at", "prompt", "agent_prompt"},
+			Rows:    [][]any{{"i1", "T", "", "open", int64(0), "task", nil, "2026-01-01T00:00:00Z", "2026-01-01T00:00:00Z", "a", "b"}}},
 	}}
 
-	ambiguous := ShapeMapping{Columns: map[ColumnRef]Disposition{
-		{Table: "issues", Column: "prompt"}:       to("issues.prompt"),
-		{Table: "issues", Column: "agent_prompt"}: to("issues.prompt"),
-	}}
+	ambiguous := ShapeMapping{Columns: map[ColumnRef]Disposition{}}
+	for _, col := range dump.Tables[0].Columns {
+		ambiguous.Columns[ColumnRef{Table: "issues", Column: col}] = knownSourceColumns["issues"][col]
+	}
 	err := Validate(dump, ambiguous)
 	if err == nil || !strings.Contains(err.Error(), "both map to") {
 		t.Fatalf("Validate must reject two columns mapping to one field; got %v", err)
@@ -349,9 +354,9 @@ func TestApplyTransformPreservesNull(t *testing.T) {
 func TestApplyRejectsCorruptTimestamp(t *testing.T) {
 	dump := RawDump{WorkspaceID: "w", Tables: []RawTable{
 		{Name: "issues",
-			Columns: []string{"id", "title", "description", "status", "priority", "issue_type", "created_at", "updated_at"},
+			Columns: []string{"id", "title", "description", "status", "priority", "issue_type", "closed_at", "created_at", "updated_at"},
 			Rows: [][]any{
-				{"i1", "T", "", "open", int64(0), "task", "not-a-timestamp", "2026-01-01T00:00:00Z"},
+				{"i1", "T", "", "open", int64(0), "task", nil, "not-a-timestamp", "2026-01-01T00:00:00Z"},
 			}},
 	}}
 	mapping, ok := DeterministicMap(dump)
