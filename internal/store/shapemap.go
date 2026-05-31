@@ -168,15 +168,25 @@ func Validate(dump RawDump, m ShapeMapping) error {
 			problems = append(problems, fmt.Sprintf("%s: mapping references a column the dump does not have", ref))
 			continue
 		}
-		mapped, ok := disp.(MappedTo)
-		if !ok {
-			continue
-		}
-		if _, ok := targetRegistry[mapped.Target]; !ok {
-			problems = append(problems, fmt.Sprintf("%s: unknown target %q", ref, mapped.Target))
-		}
-		if !knownTransform(mapped.Transform) {
-			problems = append(problems, fmt.Sprintf("%s: unknown transform %q", ref, mapped.Transform))
+		// [LAW:types-are-the-program] The boundary is total over the
+		// disposition's shape, not just its presence: a column carrying a
+		// well-formed MappedTo or Dropped is the only thing that survives. A nil
+		// interface value or any other shape is rejected here rather than
+		// silently treated as a drop by Apply.
+		switch d := disp.(type) {
+		case MappedTo:
+			if _, ok := targetRegistry[d.Target]; !ok {
+				problems = append(problems, fmt.Sprintf("%s: unknown target %q", ref, d.Target))
+			}
+			if !knownTransform(d.Transform) {
+				problems = append(problems, fmt.Sprintf("%s: unknown transform %q", ref, d.Transform))
+			}
+		case Dropped:
+			if d.Provenance != DropIntended && d.Provenance != DropUnexplained {
+				problems = append(problems, fmt.Sprintf("%s: unknown drop provenance %q", ref, d.Provenance))
+			}
+		default:
+			problems = append(problems, fmt.Sprintf("%s: disposition is neither MappedTo nor Dropped", ref))
 		}
 	}
 	if len(problems) > 0 {

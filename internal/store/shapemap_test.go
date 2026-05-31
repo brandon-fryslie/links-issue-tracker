@@ -54,6 +54,18 @@ func TestValidateRejectsStaleAndMalformedKeys(t *testing.T) {
 			}},
 			want: "unknown transform",
 		},
+		"nil disposition": {
+			mapping: ShapeMapping{Columns: map[ColumnRef]Disposition{
+				{Table: "issues", Column: "id"}: nil,
+			}},
+			want: "neither MappedTo nor Dropped",
+		},
+		"unknown drop provenance": {
+			mapping: ShapeMapping{Columns: map[ColumnRef]Disposition{
+				{Table: "issues", Column: "id"}: Dropped{Provenance: "guessed", Reason: "x"},
+			}},
+			want: "unknown drop provenance",
+		},
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
