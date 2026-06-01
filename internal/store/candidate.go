@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // Candidate is one disposable, fully isolated rebuild of a workspace: a fresh
@@ -13,17 +14,22 @@ import (
 // (Doctor + conservation against the dump) and then either promotes or throws
 // away.
 //
-// [LAW:types-are-the-program] A candidate OWNS its own directory. That is what
+// [LAW:types-are-the-program] A candidate OWNS one directory TREE. That is what
 // makes "a rejected attempt leaves zero durable residue" a structural fact
-// rather than a cleanup routine: discarding a candidate removes its directory
-// whole, and the next attempt is a different, empty directory — there are no
-// rows to scrub and nothing one attempt can leak into the next. The alternative
-// (reuse one workspace and roll back) would lean on the import path's row
-// deletion to undo a rejected attempt, which is the drift-prone shape this type
-// exists to forbid.
+// rather than a cleanup routine: discarding a candidate removes its root whole,
+// and the next attempt is a different, empty tree — there are no rows to scrub
+// and nothing one attempt can leak into the next. The alternative (reuse one
+// workspace and roll back) would lean on the import path's row deletion to undo
+// a rejected attempt, which is the drift-prone shape this type exists to forbid.
+//
+// The dolt workspace is nested one level INSIDE root, not placed at root itself,
+// because Open's footprint is not just the dolt directory: it writes a workspace
+// lock and migration snapshots as SIBLINGS of the dolt directory (in its
+// parent). Rooting the candidate at the dolt dir's parent is what brings those
+// siblings inside the owned tree, so one RemoveAll(root) is genuinely total.
 type Candidate struct {
 	store *Store
-	dir   string
+	root  string
 }
 
 // RebuildCandidate is the mechanical applier's lifecycle: it turns a validated
@@ -54,15 +60,15 @@ func RebuildCandidate(ctx context.Context, parentDir string, dump RawDump, mappi
 		return nil, fmt.Errorf("apply mapping: %w", err)
 	}
 
-	dir, err := os.MkdirTemp(parentDir, "lit-candidate-*")
+	root, err := os.MkdirTemp(parentDir, "lit-candidate-*")
 	if err != nil {
 		return nil, fmt.Errorf("create candidate workspace dir: %w", err)
 	}
 	// [LAW:dataflow-not-control-flow] Cleanup runs unconditionally on the way out;
 	// the success flag is the datum that decides whether it fires. A rejected
-	// attempt thus removes the directory (and closes the store, if opened) it
-	// touched, leaving zero durable residue — the same idiom Open uses to release
-	// resources it acquired before a failure.
+	// attempt thus removes the whole root tree (and closes the store, if opened)
+	// it touched, leaving zero durable residue — the same idiom Open uses to
+	// release resources it acquired before a failure.
 	var st *Store
 	success := false
 	defer func() {
@@ -72,10 +78,12 @@ func RebuildCandidate(ctx context.Context, parentDir string, dump RawDump, mappi
 		if st != nil {
 			err = errors.Join(err, st.Close())
 		}
-		err = errors.Join(err, os.RemoveAll(dir))
+		err = errors.Join(err, os.RemoveAll(root))
 	}()
 
-	st, err = Open(ctx, dir, dump.WorkspaceID)
+	// Open at a child of root so its sibling artifacts (workspace lock, migration
+	// snapshots) land inside root rather than escaping into parentDir.
+	st, err = Open(ctx, filepath.Join(root, "workspace"), dump.WorkspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("open candidate workspace: %w", err)
 	}
@@ -84,7 +92,7 @@ func RebuildCandidate(ctx context.Context, parentDir string, dump RawDump, mappi
 	}
 
 	success = true
-	return &Candidate{store: st, dir: dir}, nil
+	return &Candidate{store: st, root: root}, nil
 }
 
 // Store hands out the built workspace so the verify gate can inspect it (Doctor,
@@ -92,14 +100,26 @@ func RebuildCandidate(ctx context.Context, parentDir string, dump RawDump, mappi
 // a read-only consumer.
 func (c *Candidate) Store() *Store { return c.store }
 
-// Discard releases the candidate: it closes the store and removes its directory.
-// It is idempotent — a caller may defer Discard and still discard explicitly on
-// the reject path. After Discard the candidate holds no resources.
+// Discard releases the candidate's two resources: the open store handle and the
+// on-disk root tree. [LAW:types-are-the-program] Each field's non-empty value IS
+// "this resource is still held", so each is released against its own state — not
+// against one shared flag. That difference is load-bearing: a store handle
+// releases once, but the root must be retried until removal actually succeeds,
+// or a transient filesystem error would strand the very residue this type exists
+// to forbid. root is cleared only once RemoveAll succeeds, so a later Discard
+// re-attempts cleanup. Idempotent: a caller may defer Discard and still discard
+// explicitly on the reject path.
 func (c *Candidate) Discard() error {
-	if c.store == nil {
-		return nil
+	var err error
+	if c.store != nil {
+		err = c.store.Close()
+		c.store = nil
 	}
-	err := c.store.Close()
-	c.store = nil
-	return errors.Join(err, os.RemoveAll(c.dir))
+	if c.root != "" {
+		if rmErr := os.RemoveAll(c.root); rmErr != nil {
+			return errors.Join(err, rmErr)
+		}
+		c.root = ""
+	}
+	return err
 }
