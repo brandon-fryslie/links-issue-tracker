@@ -233,10 +233,17 @@ func Validate(dump RawDump, m ShapeMapping) error {
 }
 
 // tableShapeProblems reports the per-table structural faults that make a
-// mapping unassemblable: a table feeding more than one collection, or two of
-// its columns claiming the same target field. Both would otherwise surface as
-// silent loss — the second cell overwriting the first, or an ambiguous record
-// shape — so they are rejected before any row is read.
+// mapping unassemblable: a table feeding more than one collection, two of its
+// columns claiming the same target field, or a table that maps into a
+// collection without covering that collection's required (non-optional) target
+// fields. All three would otherwise surface as silent loss — the second cell
+// overwriting the first, an ambiguous record shape, or an assembled record with
+// fabricated empty values for the missing required fields — so they are
+// rejected before any row is read.
+//
+// [LAW:single-enforcer] Required-target coverage is enforced here, at the one
+// trust boundary every producer passes, not in the deterministic mapper alone —
+// an LLM-supplied partial mapping is rejected the same way.
 func tableShapeProblems(dump RawDump, m ShapeMapping) []string {
 	var problems []string
 	for _, table := range dump.Tables {
@@ -260,6 +267,15 @@ func tableShapeProblems(dump RawDump, m ShapeMapping) []string {
 				problems = append(problems, fmt.Sprintf("table %q: columns %q and %q both map to %q", table.Name, prior, col, mapped.Target))
 			}
 			seenTarget[mapped.Target] = col
+		}
+		if collFound {
+			for key, tf := range targetRegistry {
+				if tf.coll == coll && !tf.optional {
+					if _, ok := seenTarget[key]; !ok {
+						problems = append(problems, fmt.Sprintf("table %q maps into %q but does not cover required target %q", table.Name, coll, key))
+					}
+				}
+			}
 		}
 	}
 	return problems

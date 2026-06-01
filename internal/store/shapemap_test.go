@@ -117,6 +117,20 @@ func TestDeterministicMapDeclinesThinNonIssuesTable(t *testing.T) {
 	if _, ok := DeterministicMap(dump); ok {
 		t.Fatal("DeterministicMap must decline a comments table missing required target fields")
 	}
+
+	// The same partial shape must be rejected at the public Validate boundary —
+	// an LLM-supplied mapping that omits required targets cannot slip past it.
+	// [LAW:single-enforcer]
+	partial := ShapeMapping{Columns: map[ColumnRef]Disposition{}}
+	for _, table := range dump.Tables {
+		for _, col := range table.Columns {
+			partial.Columns[ColumnRef{Table: table.Name, Column: col}] = knownSourceColumns[table.Name][col]
+		}
+	}
+	err := Validate(dump, partial)
+	if err == nil || !strings.Contains(err.Error(), "does not cover required target") {
+		t.Fatalf("Validate must reject a mapping that omits required targets; got %v", err)
+	}
 }
 
 // TestDeterministicMapDeclinesThinRequiredTargets proves the gate requires every
