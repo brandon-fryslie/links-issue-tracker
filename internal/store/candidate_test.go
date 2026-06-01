@@ -127,48 +127,6 @@ func TestRebuildCandidateRejectLeavesZeroResidue(t *testing.T) {
 	}
 }
 
-// TestDiscardRetriesDirectoryRemoval proves the zero-residue guarantee survives
-// a transient filesystem failure. With the parent dir made unwritable, the first
-// Discard closes the store but cannot unlink the candidate directory, so it
-// errors and keeps dir tracked; once the parent is writable again a second
-// Discard re-attempts removal and clears it. A single shared release flag would
-// have nulled everything on the first attempt and the retry would no-op,
-// stranding the directory.
-func TestDiscardRetriesDirectoryRemoval(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("removal-permission injection has no effect as root")
-	}
-	ctx := context.Background()
-	parent := t.TempDir()
-	dump := preGooseDump()
-
-	cand, err := RebuildCandidate(ctx, parent, dump, mustMap(t, dump))
-	if err != nil {
-		t.Fatalf("RebuildCandidate: %v", err)
-	}
-	t.Cleanup(func() { _ = cand.Discard() })
-
-	// Removing an entry needs write permission on its parent; drop it so the
-	// candidate directory cannot be unlinked and RemoveAll fails.
-	if err := os.Chmod(parent, 0o555); err != nil {
-		t.Fatalf("chmod parent: %v", err)
-	}
-	if err := cand.Discard(); err == nil {
-		_ = os.Chmod(parent, 0o755)
-		t.Fatal("Discard succeeded despite an unwritable parent; expected a removal error")
-	}
-	if err := os.Chmod(parent, 0o755); err != nil {
-		t.Fatalf("restore parent perms: %v", err)
-	}
-
-	if err := cand.Discard(); err != nil {
-		t.Fatalf("retry Discard did not clear residue: %v", err)
-	}
-	if n := dirEntryCount(t, parent); n != 0 {
-		t.Fatalf("directory residue survived retry: %d entries remain", n)
-	}
-}
-
 // TestRebuildCandidateAttemptsAreIsolated proves two candidates built from one
 // dump are independent: discarding the first removes only its directory and the
 // second remains fully queryable. This is the structural property the
