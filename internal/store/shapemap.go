@@ -229,6 +229,20 @@ func Validate(dump RawDump, m ShapeMapping) error {
 		sort.Strings(problems)
 		return fmt.Errorf("mapping is malformed: %s", strings.Join(problems, "; "))
 	}
+
+	// [LAW:types-are-the-program] Apply indexes cells positionally, so "every
+	// row has exactly one cell per column" is a precondition it relies on.
+	// Enforce it here — the dump may be a serialized artifact from outside this
+	// process — so a short or long row is a clear error at the boundary, not a
+	// panic deep in Apply.
+	for _, table := range dump.Tables {
+		for i, row := range table.Rows {
+			if len(row) != len(table.Columns) {
+				return fmt.Errorf("table %q row %d has %d cells, want %d (one per column)",
+					table.Name, i, len(row), len(table.Columns))
+			}
+		}
+	}
 	return nil
 }
 

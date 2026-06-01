@@ -164,6 +164,24 @@ func TestDeterministicMapDeclinesThinRequiredTargets(t *testing.T) {
 	}
 }
 
+// TestValidateRejectsRowArityMismatch proves a malformed dump with a row whose
+// cell count differs from the column count is rejected at the boundary, rather
+// than panicking on a positional index deep in Apply. The dump may be a
+// serialized artifact, so this is real external input.
+func TestValidateRejectsRowArityMismatch(t *testing.T) {
+	dump := RawDump{WorkspaceID: "w", Tables: []RawTable{
+		{Name: "issues", Columns: []string{"id", "title"}, Rows: [][]any{{"i1"}}}, // short row
+	}}
+	mapping := ShapeMapping{Columns: map[ColumnRef]Disposition{
+		{Table: "issues", Column: "id"}:    to("issues.id"),
+		{Table: "issues", Column: "title"}: to("issues.title"),
+	}}
+	err := Validate(dump, mapping)
+	if err == nil || !strings.Contains(err.Error(), "cells, want") {
+		t.Fatalf("Validate must reject a row/column arity mismatch; got %v", err)
+	}
+}
+
 // --- Drop provenance distinguishable from migration history (acceptance #2) ---
 
 func TestClassifyDropDistinguishesProvenance(t *testing.T) {
