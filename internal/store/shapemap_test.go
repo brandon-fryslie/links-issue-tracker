@@ -169,13 +169,16 @@ func TestDeterministicMapDeclinesThinRequiredTargets(t *testing.T) {
 // than panicking on a positional index deep in Apply. The dump may be a
 // serialized artifact, so this is real external input.
 func TestValidateRejectsRowArityMismatch(t *testing.T) {
+	// A complete issues shape (so coverage passes and the arity check is what
+	// fires) whose single row is one cell short of the column count.
+	cols := []string{"id", "title", "description", "status", "priority", "issue_type", "closed_at", "created_at", "updated_at"}
 	dump := RawDump{WorkspaceID: "w", Tables: []RawTable{
-		{Name: "issues", Columns: []string{"id", "title"}, Rows: [][]any{{"i1"}}}, // short row
+		{Name: "issues", Columns: cols, Rows: [][]any{{"i1", "T", "", "open", int64(0), "task", nil, "2026-01-01T00:00:00Z"}}}, // 8 cells, 9 columns
 	}}
-	mapping := ShapeMapping{Columns: map[ColumnRef]Disposition{
-		{Table: "issues", Column: "id"}:    to("issues.id"),
-		{Table: "issues", Column: "title"}: to("issues.title"),
-	}}
+	mapping := ShapeMapping{Columns: map[ColumnRef]Disposition{}}
+	for _, c := range cols {
+		mapping.Columns[ColumnRef{Table: "issues", Column: c}] = knownSourceColumns["issues"][c]
+	}
 	err := Validate(dump, mapping)
 	if err == nil || !strings.Contains(err.Error(), "cells, want") {
 		t.Fatalf("Validate must reject a row/column arity mismatch; got %v", err)
